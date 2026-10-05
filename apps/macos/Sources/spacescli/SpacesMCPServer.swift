@@ -342,7 +342,10 @@ final class SpacesMCPStdioServer {
                         MCPAgentSessionsToolResponse(
                             message: "Listed agent sessions.", agentSessions: [AgentSessionRowJSON(row, deviceID: device.id)]))
                 }
-                let rows = try TerminalService.sendProfileCommand(.agentList(.init(sessionID: sessionID))).agentSessions ?? []
+                let rows =
+                    try TerminalService.sendProfileCommand(
+                        .agentList(.init(sessionID: sessionID, callerProcessID: environmentCallerProcessID(explicit: args.session)))
+                    ).agentSessions ?? []
                 guard let row = rows.first else { throw MCPError.invalidArguments("No agent session for terminal \(sessionID).") }
                 return .agentSessions(MCPAgentSessionsToolResponse(message: "Listed agent sessions.", agentSessions: [AgentSessionRowJSON(row)]))
             },
@@ -366,7 +369,9 @@ final class SpacesMCPStdioServer {
                             message: response.message,
                             agentSessions: (response.agentSessions ?? []).map { AgentSessionRowJSON($0, deviceID: device.id) }))
                 }
-                let response = try TerminalService.sendProfileCommand(.agentBriefWrite(.init(sessionID: sessionID, markdown: args.markdown)))
+                let response = try TerminalService.sendProfileCommand(
+                    .agentBriefWrite(
+                        .init(sessionID: sessionID, markdown: args.markdown, callerProcessID: environmentCallerProcessID(explicit: args.session))))
                 return .agentSessions(
                     MCPAgentSessionsToolResponse(
                         message: response.message, agentSessions: (response.agentSessions ?? []).map { AgentSessionRowJSON($0) }))
@@ -387,7 +392,9 @@ final class SpacesMCPStdioServer {
                         sessionID: sessionID, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
                     return .agentBrief(MCPAgentBriefToolResponse(session: sessionID, brief: result.brief, updatedAt: result.updatedAt))
                 }
-                let result = try TerminalService.sendProfileCommand(.agentBriefRead(sessionID: sessionID)).agentBrief
+                let result = try TerminalService.sendProfileCommand(
+                    .agentBriefRead(.init(sessionID: sessionID, callerProcessID: environmentCallerProcessID(explicit: args.session)))
+                ).agentBrief
                 return .agentBrief(MCPAgentBriefToolResponse(session: sessionID, brief: result?.brief, updatedAt: result?.updatedAt))
             },
             MCPToolDescriptor(
@@ -409,7 +416,8 @@ final class SpacesMCPStdioServer {
                             message: WorkspaceOrchestrator.agentBriefClearedMessage,
                             agentSessions: rows.map { AgentSessionRowJSON($0, deviceID: device.id) }))
                 }
-                let response = try TerminalService.sendProfileCommand(.agentBriefClear(sessionID: sessionID))
+                let response = try TerminalService.sendProfileCommand(
+                    .agentBriefClear(.init(sessionID: sessionID, callerProcessID: environmentCallerProcessID(explicit: args.session))))
                 return .agentSessions(
                     MCPAgentSessionsToolResponse(
                         message: response.message, agentSessions: (response.agentSessions ?? []).map { AgentSessionRowJSON($0) }))
@@ -494,13 +502,17 @@ final class SpacesMCPStdioServer {
                     return .profile(
                         try TerminalService.sendProfileCommand(
                             .agentSubscribe(
-                                .init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: args.session, deviceID: device.id)),
-                            timeout: 30))
+                                .init(
+                                    subscriberTerminalSessionID: subscriberSessionID, agentSessionID: args.session, deviceID: device.id,
+                                    callerProcessID: environmentCallerProcessID(explicit: args.subscriber))), timeout: 30))
                 }
                 let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: args.session)
                 return .profile(
                     try TerminalService.sendProfileCommand(
-                        .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5))
+                        .agentSubscribe(
+                            .init(
+                                subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID,
+                                callerProcessID: environmentCallerProcessID(explicit: args.subscriber))), timeout: 5))
             },
             MCPToolDescriptor(
                 name: "spaces_agent_unsubscribe",
@@ -517,13 +529,17 @@ final class SpacesMCPStdioServer {
                     return .profile(
                         try TerminalService.sendProfileCommand(
                             .agentUnsubscribe(
-                                .init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: args.session, deviceID: device.id)),
-                            timeout: 5))
+                                .init(
+                                    subscriberTerminalSessionID: subscriberSessionID, agentSessionID: args.session, deviceID: device.id,
+                                    callerProcessID: environmentCallerProcessID(explicit: args.subscriber))), timeout: 5))
                 }
                 let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: args.session)
                 return .profile(
                     try TerminalService.sendProfileCommand(
-                        .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5))
+                        .agentUnsubscribe(
+                            .init(
+                                subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID,
+                                callerProcessID: environmentCallerProcessID(explicit: args.subscriber))), timeout: 5))
             },
             MCPToolDescriptor(
                 name: "spaces_device_list", description: "List paired devices reachable from this machine.", properties: [:], required: []
@@ -638,8 +654,11 @@ final class SpacesMCPStdioServer {
         let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(
             in: .whitespacesAndNewlines)
         guard let subscriber, !subscriber.isEmpty else { return nil }
-        return try TerminalService.sendProfileCommand(.agentConsumePendingEvents(subscriberTerminalSessionID: subscriber), timeout: 5)
-            .pendingAgentEvents
+        // The terminal always comes from the environment here, so the daemon holds the events back from a
+        // server running outside that terminal instead of failing the tool call they ride on.
+        return try TerminalService.sendProfileCommand(
+            .agentConsumePendingEvents(.init(sessionID: subscriber, callerProcessID: environmentCallerProcessID(explicit: nil))), timeout: 5
+        ).pendingAgentEvents
     }
 
     /// After a tool handler returns successfully, attaches any pending agent events drained by

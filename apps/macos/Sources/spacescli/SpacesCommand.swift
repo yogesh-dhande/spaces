@@ -321,6 +321,16 @@ func resolvedAgentSessionID(_ session: String?, environment: [String: String] = 
     throw ValidationError("--session is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
 }
 
+/// The pid to send with a request to this host's daemon whose terminal defaulted from the environment:
+/// this process, because it is the one whose place in the terminal's process tree the daemon checks.
+/// nil when `explicit` names the terminal, since an explicit target states intent and is not checked.
+///
+/// Never send it to a paired device: the id would name a terminal on this host, and the pid a process on
+/// this host.
+func environmentCallerProcessID(explicit: String?, processID: Int32 = getpid()) -> Int32? {
+    explicit?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? nil : processID
+}
+
 struct AgentListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List coding-agent sessions on this or a paired device.")
 
@@ -383,9 +393,12 @@ struct AgentStatusCommand: ParsableCommand {
             return
         }
         let sessionID = try resolvedAgentSessionID(session)
-        guard let row = (try TerminalService.sendProfileCommand(.agentList(.init(sessionID: sessionID))).agentSessions ?? []).first else {
-            throw ValidationError("No agent session for terminal \(sessionID).")
-        }
+        guard
+            let row =
+                (try TerminalService.sendProfileCommand(
+                    .agentList(.init(sessionID: sessionID, callerProcessID: environmentCallerProcessID(explicit: session)))
+                ).agentSessions ?? []).first
+        else { throw ValidationError("No agent session for terminal \(sessionID).") }
         if json {
             try context.output.emitJSON(AgentSessionRowJSON(row))
             return
@@ -424,7 +437,8 @@ struct AgentBriefWriteCommand: ParsableCommand {
             context.output.emit(response.message)
             return
         }
-        let response = try TerminalService.sendProfileCommand(.agentBriefWrite(.init(sessionID: sessionID, markdown: markdown)))
+        let response = try TerminalService.sendProfileCommand(
+            .agentBriefWrite(.init(sessionID: sessionID, markdown: markdown, callerProcessID: environmentCallerProcessID(explicit: session))))
         context.output.emit(response.message)
     }
 
@@ -453,7 +467,9 @@ struct AgentBriefReadCommand: ParsableCommand {
                 sessionID: sessionID, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp())
             ).brief
         } else {
-            brief = try TerminalService.sendProfileCommand(.agentBriefRead(sessionID: sessionID)).agentBrief?.brief
+            brief = try TerminalService.sendProfileCommand(
+                .agentBriefRead(.init(sessionID: sessionID, callerProcessID: environmentCallerProcessID(explicit: session)))
+            ).agentBrief?.brief
         }
         // No brief is an answer, not a failure of the command, but it exits 1 so a script can tell "nothing
         // to read" apart from an empty document, and the notice goes to stderr so stdout only ever carries
@@ -482,7 +498,8 @@ struct AgentBriefClearCommand: ParsableCommand {
             context.output.emit(WorkspaceOrchestrator.agentBriefClearedMessage)
             return
         }
-        let response = try TerminalService.sendProfileCommand(.agentBriefClear(sessionID: sessionID))
+        let response = try TerminalService.sendProfileCommand(
+            .agentBriefClear(.init(sessionID: sessionID, callerProcessID: environmentCallerProcessID(explicit: session))))
         context.output.emit(response.message)
     }
 }
@@ -575,9 +592,15 @@ func performAgentSpawn(
     cwd: String, workspace: String?, command: String, title: String?, timeoutSeconds: Int, subscriberSessionID: String?,
     automationRunID: String? = nil, pollInterval: TimeInterval = 0.5
 ) throws -> AgentSpawnResult {
+    // The subscriber and the automation run id both come from the environment, so the daemon checks this
+    // process against them before the child is started rather than after the subscription is refused.
+    let callerProcessID = environmentCallerProcessID(explicit: nil)
     let spawnResponse = try TerminalService.sendProfileCommand(
-        .agentSpawn(.init(cwd: cwd, workspaceID: workspace, command: command, title: title, automationRunID: automationRunID)),
-        timeout: TerminalService.createSessionRequestTimeout())
+        .agentSpawn(
+            .init(
+                cwd: cwd, workspaceID: workspace, command: command, title: title, automationRunID: automationRunID,
+                callerProcessID: subscriberSessionID != nil || automationRunID != nil ? callerProcessID : nil,
+                callerTerminalSessionID: subscriberSessionID)), timeout: TerminalService.createSessionRequestTimeout())
     guard let session = spawnResponse.terminalSession else {
         throw WorkspaceError.invalidArgument(message: "spacesd did not return an agent session.")
     }
@@ -608,7 +631,8 @@ func performAgentSpawn(
         let rowID = try resolvedAgentRowIDIfPresent(forChildTerminalSessionID: childSessionID)
     {
         _ = try TerminalService.sendProfileCommand(
-            .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: rowID)), timeout: 5)
+            .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: rowID, callerProcessID: callerProcessID)),
+            timeout: 5)
         subscribed = true
     }
 
@@ -718,6 +742,14 @@ func performRemoteAgentSpawn(
     // Every SpacesDeviceClient call below targets this same device/clientApp pair, so it is resolved
     // once here and reused rather than rebuilt at each call site.
     let context = DeviceRequestContext(device: device, clientApp: cliDeviceClientApp())
+    // The subscription is recorded on the local daemon, which refuses a caller outside the subscriber's
+    // terminal. That refusal would come only after the remote child is running, and a retry would start
+    // another child, so the local daemon checks the caller first. A list of the subscriber's own agents is
+    // a read the same caller gate covers.
+    if let subscriberSessionID {
+        _ = try TerminalService.sendProfileCommand(
+            .agentList(.init(sessionID: subscriberSessionID, callerProcessID: environmentCallerProcessID(explicit: nil))), timeout: 30)
+    }
     let spawnResponse = try SpacesDeviceClient.spawnAgentSession(workspaceID: workspace, command: command, title: title, context: context)
     guard let childSessionID = spawnResponse.sessionID else {
         throw WorkspaceError.invalidArgument(message: "\(device.name) did not return an agent session.")
@@ -746,8 +778,10 @@ func performRemoteAgentSpawn(
         // The cross-device watch edge is recorded on the local daemon (which owns this terminal); it
         // keys on the child's terminal session id and names the device the child lives on.
         _ = try TerminalService.sendProfileCommand(
-            .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: childSessionID, deviceID: device.id)), timeout: 30
-        )
+            .agentSubscribe(
+                .init(
+                    subscriberTerminalSessionID: subscriberSessionID, agentSessionID: childSessionID, deviceID: device.id,
+                    callerProcessID: environmentCallerProcessID(explicit: nil))), timeout: 30)
         subscribed = true
     }
 
@@ -913,13 +947,19 @@ struct AgentSubscribeCommand: ParsableCommand {
             // validates it against the remote device and records the cross-device edge.
             let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try TerminalService.sendProfileCommand(
-                .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: session, deviceID: record.id)), timeout: 30)
+                .agentSubscribe(
+                    .init(
+                        subscriberTerminalSessionID: subscriberSessionID, agentSessionID: session, deviceID: record.id,
+                        callerProcessID: environmentCallerProcessID(explicit: subscriber))), timeout: 30)
             context.output.emit(response.message)
             return
         }
         let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: session)
         let response = try TerminalService.sendProfileCommand(
-            .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)
+            .agentSubscribe(
+                .init(
+                    subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID,
+                    callerProcessID: environmentCallerProcessID(explicit: subscriber))), timeout: 5)
         context.output.emit(response.message)
     }
 }
@@ -940,13 +980,19 @@ struct AgentUnsubscribeCommand: ParsableCommand {
             // call and works even when the device is offline.
             let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try TerminalService.sendProfileCommand(
-                .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: session, deviceID: record.id)), timeout: 5)
+                .agentUnsubscribe(
+                    .init(
+                        subscriberTerminalSessionID: subscriberSessionID, agentSessionID: session, deviceID: record.id,
+                        callerProcessID: environmentCallerProcessID(explicit: subscriber))), timeout: 5)
             context.output.emit(response.message)
             return
         }
         let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: session)
         let response = try TerminalService.sendProfileCommand(
-            .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)
+            .agentUnsubscribe(
+                .init(
+                    subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID,
+                    callerProcessID: environmentCallerProcessID(explicit: subscriber))), timeout: 5)
         context.output.emit(response.message)
     }
 }
@@ -984,8 +1030,9 @@ struct AgentSignalCommand: ParsableCommand {
         }
         _ = try TerminalService.sendProfileCommand(
             .agentSignal(
-                .init(workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue, agentSessionKey: agentSessionKey))
-        )
+                .init(
+                    workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue, agentSessionKey: agentSessionKey,
+                    callerProcessID: environmentCallerProcessID(explicit: session))))
         cliContext.output.emit("Agent \(type.rawValue): workspace=\(context.workspaceID)")
     }
 

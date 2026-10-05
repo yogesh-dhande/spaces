@@ -85,7 +85,7 @@ import spacesterminalcore
         .resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest(sessionID: "session-1", terminalLink: "link")),
         .readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest(sessionID: "session-1", terminalLinkID: "link-1", offset: 0, limit: 1024)),
         .subscribeDeviceOverview, .agentHooksStatus, .installAgentHooks(SpacesDeviceInstallAgentHooksRequest(kinds: [.claudeCode])),
-        .trustAgentHooks(SpacesDeviceTrustAgentHooksRequest(kind: .codex)),
+        .trustAgentHooks(SpacesDeviceTrustAgentHooksRequest(kind: .codex)), .stopCodexSharedServer,
         .spawnAgentSession(SpacesDeviceSpawnAgentSessionRequest(workspaceID: "workspace-1", command: "claude")),
         .listAgentSessions(SpacesDeviceListAgentSessionsRequest(workspaceID: "workspace-1")),
         .writeAgentBrief(SpacesDeviceWriteAgentBriefRequest(sessionID: "session-1", markdown: "# Status")),
@@ -147,17 +147,17 @@ import spacesterminalcore
     ///     `SpacesDeviceAPICommand` at compile time (a missing arm fails the build).
     ///  2. This assertion rejects a duplicated sample: mapping every sample through `goldenWireKey` and
     ///     checking the resulting set is exactly 85 distinct keys catches two samples for the same case
-    ///     (the set would be smaller than the list), which a bare `count == 85` check would miss.
+    ///     (the set would be smaller than the list), which a bare `count == 86` check would miss.
     ///  3. What neither closes: a new 77th case added to the enum but never added to `samples`: the
     ///     switch still compiles (it only requires *a* mapping, not that every mapping is exercised) and
-    ///     the set stays "85 distinct out of 85 samples". `SpacesDeviceAPICommand` still cannot conform to
+    ///     the set stays "86 distinct out of 86 samples". `SpacesDeviceAPICommand` still cannot conform to
     ///     `CaseIterable` (its cases carry differently-typed associated values), so no enumeration source
     ///     independent of a hand-maintained list exists to close this gap against; both `goldenWireKey` and
     ///     `SpacesDeviceAPICommandDescriptor`'s own switch are default-less exhaustive switches over the
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 85)
+        #expect(keys.count == 86)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -252,6 +252,7 @@ import spacesterminalcore
         case .agentHooksStatus: "agentHooksStatus"
         case .installAgentHooks: "installAgentHooks"
         case .trustAgentHooks: "trustAgentHooks"
+        case .stopCodexSharedServer: "stopCodexSharedServer"
         case .spawnAgentSession: "spawnAgentSession"
         case .listAgentSessions: "listAgentSessions"
         case .writeAgentBrief: "writeAgentBrief"

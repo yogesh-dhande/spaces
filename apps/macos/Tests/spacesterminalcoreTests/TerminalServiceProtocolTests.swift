@@ -243,13 +243,22 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 .init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "working", agentSessionKey: .resumable("thread-9"))),
             .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
             .agentBriefWrite(.init(sessionID: "session-1", markdown: "# Status\nreviewing the auth flow")),
-            .agentBriefWrite(.init(sessionID: "session-1", markdown: "")), .agentBriefRead(sessionID: "session-1"),
-            .agentBriefClear(sessionID: "session-1"),
+            .agentBriefWrite(.init(sessionID: "session-1", markdown: "")), .agentBriefRead(.init(sessionID: "session-1")),
+            .agentBriefClear(.init(sessionID: "session-1", callerProcessID: 4242)),
+            .agentBriefRead(.init(sessionID: "session-1", callerProcessID: 4242)),
+            .agentBriefWrite(.init(sessionID: "session-1", markdown: "m", callerProcessID: 4242)),
+            .agentList(.init(sessionID: "session-1", callerProcessID: 4242)),
+            .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "working", callerProcessID: 4242)),
+            .agentSpawn(
+                .init(cwd: "/tmp/work", command: "claude", automationRunID: "run-1", callerProcessID: 4242, callerTerminalSessionID: "session-1")),
+            .agentSubscribe(.init(subscriberTerminalSessionID: "s", agentSessionID: "a", callerProcessID: 4242)),
+            .agentUnsubscribe(.init(subscriberTerminalSessionID: "s", agentSessionID: "a", deviceID: "d", callerProcessID: 4242)),
+            .agentConsumePendingEvents(.init(sessionID: "s", callerProcessID: 4242)),
             .agentSpawn(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "claude", title: "Claude Code")),
             .agentSpawn(.init(cwd: "/tmp/work", command: "codex --yolo")), .agentKill(.init(sessionID: "session-1")),
             .agentSubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
             .agentUnsubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
-            .agentConsumePendingEvents(subscriberTerminalSessionID: "orchestrator-session"),
+            .agentConsumePendingEvents(.init(sessionID: "orchestrator-session")),
             .terminalSend(.init(sessionID: "session-1", input: .text("hello"), appendNewline: true)),
             .terminalSend(.init(sessionID: "session-1", input: .bytes(Data([0, 10, 255])))),
             .terminalTail(.init(sessionID: "session-1", lineCount: 40)), .terminalTail(.init(sessionID: "session-1")),
@@ -331,8 +340,26 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertThrowsError(
             try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefWrite":{"sessionID":"  ","markdown":"hi"}}"#.utf8)))
         XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefWrite":{"sessionID":"s"}}"#.utf8)))
-        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefRead":" "}"#.utf8)))
-        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefClear":""}"#.utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefRead":{"sessionID":" "}}"#.utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentBriefClear":{"sessionID":""}}"#.utf8)))
+    }
+
+    /// An explicit terminal sends no caller pid, so the key is absent from the wire rather than null, and
+    /// a request without the key decodes to no pid.
+    func testCallerProcessIDIsOmittedWhenAbsentAndRoundTripsWhenPresent() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let explicit = try String(
+            decoding: encoder.encode(TerminalServiceProfileCommand.agentBriefRead(.init(sessionID: "session-1"))), as: UTF8.self)
+        XCTAssertFalse(explicit.contains("callerProcessID"))
+        let fromEnvironment = try String(
+            decoding: encoder.encode(TerminalServiceProfileCommand.agentBriefRead(.init(sessionID: "session-1", callerProcessID: 77))), as: UTF8.self)
+        XCTAssertEqual(fromEnvironment, #"{"agentBriefRead":{"callerProcessID":77,"sessionID":"session-1"}}"#)
+        XCTAssertEqual(
+            try JSONDecoder().decode(TerminalServiceProfileCommand.self, from: Data(fromEnvironment.utf8)),
+            .agentBriefRead(.init(sessionID: "session-1", callerProcessID: 77)))
+        XCTAssertEqual(
+            try JSONDecoder().decode(TerminalServiceProfileCommand.self, from: Data(explicit.utf8)), .agentBriefRead(.init(sessionID: "session-1")))
     }
 
     func testAgentSpawnPayloadRequiresCwdAndCommand() throws {

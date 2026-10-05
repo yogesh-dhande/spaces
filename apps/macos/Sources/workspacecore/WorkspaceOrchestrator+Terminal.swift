@@ -412,7 +412,14 @@ extension WorkspaceOrchestrator {
 
     func shellSingleQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
 
-    func interactiveShellCommand(cwd _: String) -> String { "exec \(shellSingleQuoted(terminalLoginShellPath())) -l" }
+    /// The bare interactive shell form. The shell is started through the Spaces shell integration (see
+    /// `SpacesShellIntegration`) so the `codex` wrapper stays first on PATH after the user's startup files.
+    func interactiveShellCommand(cwd _: String) throws -> String {
+        let shellPath = terminalLoginShellPath()
+        let launch = try SpacesShellIntegration.prepared().bareShellLaunch(shellPath: shellPath)
+        let exec = "exec \(shellSingleQuoted(shellPath)) \(launch.shellArguments.joined(separator: " "))"
+        return (launch.statements + [exec]).joined(separator: "; ")
+    }
 
     /// Runs `command` through an interactive login shell (`-l -i -c`), the single shell form every
     /// command Spaces launches into a terminal goes through — workspace processes, ad-hoc
@@ -424,8 +431,15 @@ extension WorkspaceOrchestrator {
     /// (installed to `~/.local/bin`), an fnm-managed `codex`, or `nvm use 24 && npm run dev` fails
     /// with `command not found` even though the same command works typed into a Spaces terminal —
     /// whose shell is a bare `exec <shell> -l` on a PTY, and therefore interactive.
-    func interactiveLoginShellCommand(_ command: String, shellPath: String? = nil) -> String {
-        "exec \(shellQuoted(shellPath ?? terminalLoginShellPath())) -l -i -c \(shellQuoted(command))"
+    ///
+    /// No prompt ever runs in this form, so the command text itself puts the Spaces `codex` wrapper
+    /// directory back at the front of PATH after the rc files have run (see `SpacesShellIntegration`).
+    func interactiveLoginShellCommand(_ command: String, shellPath: String? = nil) throws -> String {
+        let shellPath = shellPath ?? terminalLoginShellPath()
+        let integration = try SpacesShellIntegration.prepared()
+        let innerCommand = integration.commandPathPrelude(shellPath: shellPath).map { "\($0); \(command)" } ?? command
+        let exec = "exec \(shellQuoted(shellPath)) -l -i -c \(shellQuoted(innerCommand))"
+        return (integration.commandLaunchStatements(shellPath: shellPath) + [exec]).joined(separator: "; ")
     }
 
     /// Builds the environment a Spaces terminal session launches with.
@@ -532,7 +546,7 @@ extension WorkspaceOrchestrator {
         let command = commandWithPrelude(try processLaunchCommand(template: template), prelude: commandPrelude)
         let runtimeEnv = terminalLaunchEnvironment(
             base: env, includeInheritedPath: includeInheritedPath, includeProfileEnvironment: includeProfileEnvironment)
-        return commandPrefixedWithShellEnvironment(interactiveLoginShellCommand(command, shellPath: shellPath), env: runtimeEnv)
+        return commandPrefixedWithShellEnvironment(try interactiveLoginShellCommand(command, shellPath: shellPath), env: runtimeEnv)
     }
 
     func logTerminalPerfMetric(_ metric: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {

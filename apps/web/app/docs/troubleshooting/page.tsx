@@ -71,7 +71,11 @@ export default function TroubleshootingDocsPage() {
       <Section id="agents" title="Agent status missing">
         <Prose>
           Check Settings → Coding Agents for the agent&apos;s hook state; see{" "}
-          <DocLink href="/docs/coding-agents#hooks">Status hooks</DocLink>.
+          <DocLink href="/docs/coding-agents#hooks">Status hooks</DocLink>. An agent running inside
+          tmux or screen doesn&apos;t report status. For a Codex row that stays idle while Codex works,
+          see <DocLink href="/docs/coding-agents#codex-server">Codex&apos;s background server</DocLink>.
+          If Codex stops with &quot;unexpected argument &apos;--no-daemon&apos;&quot;, update Codex to
+          0.156 or later.
         </Prose>
       </Section>
 

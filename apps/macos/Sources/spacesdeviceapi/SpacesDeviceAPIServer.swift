@@ -142,6 +142,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     typealias AgentHookStatusLoader = @Sendable () -> [AgentHookStatus]
     typealias AgentHookInstallHandler = @Sendable ([CodingAgent]) throws -> AgentHookInstallOutcome
     typealias AgentHookTrustHandler = @Sendable (CodingAgent) throws -> AgentHookInstallOutcome
+    typealias CodexSharedServerStopHandler = @Sendable () -> AgentHookInstallOutcome
     /// Exports the current state of a session this daemon hosts live, or nil when it hosts no live core for
     /// that session id (the reader then falls through to the persisted/socket read).
     /// Answers a one-shot state read for a session this process hosts. `TerminalOneShotStateRead` is what
@@ -1147,6 +1148,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let agentHookStatusLoader: AgentHookStatusLoader
     private let agentHookInstallHandler: AgentHookInstallHandler
     private let agentHookTrustHandler: AgentHookTrustHandler
+    private let codexSharedServerStopHandler: CodexSharedServerStopHandler
     /// Login-shell probing and config writes can take seconds. Serialize them independently so they
     /// cannot stall terminal controls, overview requests, or the rest of the Device API state queue.
     private let agentHookQueue = DispatchQueue(label: "spaces.device.api.agent-hooks", qos: .userInitiated)
@@ -1472,6 +1474,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         agentHookStatusLoader = { AgentHookInstaller.status() }
         agentHookInstallHandler = { try AgentHookInstaller.install($0) }
         agentHookTrustHandler = { try AgentHookInstaller.trust($0) }
+        codexSharedServerStopHandler = { AgentHookInstaller.stopCodexSharedServer() }
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper()
@@ -1498,6 +1501,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
         agentHookInstallHandler: @escaping AgentHookInstallHandler = { try AgentHookInstaller.install($0) },
         agentHookTrustHandler: @escaping AgentHookTrustHandler = { try AgentHookInstaller.trust($0) },
+        codexSharedServerStopHandler: @escaping CodexSharedServerStopHandler = { AgentHookInstaller.stopCodexSharedServer() },
         workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()
     ) {
         self.host = host
@@ -1519,6 +1523,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.agentHookStatusLoader = agentHookStatusLoader
         self.agentHookInstallHandler = agentHookInstallHandler
         self.agentHookTrustHandler = agentHookTrustHandler
+        self.codexSharedServerStopHandler = codexSharedServerStopHandler
         self.workspaceGitClient = workspaceGitClient
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper(environment: networkEnvironment)
@@ -3458,7 +3463,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
             .subscribeWorkspaceFileListSignature:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
-        case .agentHooksStatus, .installAgentHooks, .trustAgentHooks: return try handleAgentHookRequest(request)
+        case .agentHooksStatus, .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer: return try handleAgentHookRequest(request)
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
         case .listAgentSessions(let payload): return try handleListAgentSessionsRequest(payload, context: context)
         case .writeAgentBrief(let payload): return try handleWriteAgentBriefRequest(payload, context: context)
@@ -3490,6 +3495,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(.init(agents: agentHookStatusLoader())))
         case .installAgentHooks(let payload): return try handleInstallAgentHooksRequest(payload)
         case .trustAgentHooks(let payload): return try handleTrustAgentHooksRequest(payload)
+        case .stopCodexSharedServer: return handleStopCodexSharedServerRequest()
         default: preconditionFailure("Only agent-hook commands run on the agent-hook queue.")
         }
     }
@@ -3876,6 +3882,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let outcome = try agentHookTrustHandler(payload.kind)
         let message =
             outcome.failures.isEmpty ? "Trusted agent hooks." : "Did not trust agent hooks: \(outcome.failures.map(\.message).joined(separator: " "))"
+        return SpacesDeviceAPIResponse(ok: true, message: message, result: .agentHooksInstall(outcome))
+    }
+
+    /// Stops Codex's shared background server in this daemon's home, then returns fresh status for every
+    /// supported agent. Codex's refusal is reported inside the payload, like a trust's, so the caller
+    /// still gets the status the attempt left behind.
+    private func handleStopCodexSharedServerRequest() -> SpacesDeviceAPIResponse {
+        let outcome = codexSharedServerStopHandler()
+        let message =
+            outcome.failures.isEmpty
+            ? "Stopped Codex's shared server." : "Did not stop Codex's shared server: \(outcome.failures.map(\.message).joined(separator: " "))"
         return SpacesDeviceAPIResponse(ok: true, message: message, result: .agentHooksInstall(outcome))
     }
 

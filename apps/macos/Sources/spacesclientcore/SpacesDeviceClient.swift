@@ -354,6 +354,18 @@ public enum SpacesDeviceClient {
         return payload
     }
 
+    /// Stops Codex's shared background server on `context`'s device (local or remote), which ends the Codex
+    /// sessions running on it; their conversations are kept and can be resumed. Returns fresh status for
+    /// every supported agent; Codex's reason for not stopping it comes back as its failure entry. Throws
+    /// only when the request itself fails.
+    @discardableResult public static func stopCodexSharedServer(context: DeviceRequestContext) throws -> AgentHookInstallOutcome {
+        let response = try request(.init(command: .stopCodexSharedServer), context: context)
+        guard let payload = response.agentHooksInstall else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return payload
+    }
+
     /// Refreshes a device, reading its compatibility verdict from the overview's inline frozen-core
     /// status so the common compatible case costs a single round-trip. The standalone `daemonStatus`
     /// handshake is issued only as a fallback when the overview itself fails to decode — a
@@ -905,7 +917,8 @@ public enum SpacesDeviceClient {
     public static func visitTerminalSession(sessionID: String, focusedForSeconds: Double, keys: [String], context: DeviceRequestContext) throws
         -> SpacesDeviceAPIResponse
     {
-        try request(.init(command: .visitTerminalSession(.init(sessionID: sessionID, focusedForSeconds: focusedForSeconds, keys: keys))), context: context)
+        try request(
+            .init(command: .visitTerminalSession(.init(sessionID: sessionID, focusedForSeconds: focusedForSeconds, keys: keys))), context: context)
     }
 
     public static func setComeBackLater(rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String, isOn: Bool, context: DeviceRequestContext) throws

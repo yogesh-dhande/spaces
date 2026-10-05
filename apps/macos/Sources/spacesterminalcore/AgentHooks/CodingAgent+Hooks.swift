@@ -76,7 +76,10 @@ extension CodingAgent {
 
     // MARK: - Per-agent install / status
 
-    func install(home: URL, fileManager: FileManager, spacesExecutablePath: String, agentExecutablePath: String) throws {
+    func install(
+        home: URL, fileManager: FileManager, spacesExecutablePath: String, agentExecutablePath: String,
+        codexAppServer: AgentHookCodexAppServer.Launcher
+    ) throws {
         switch self {
         case .claudeCode:
             try AgentHookJSONWriter.install(
@@ -93,6 +96,12 @@ extension CodingAgent {
             // unchanged at the same coordinate keeps its trust. The same record holds the user's
             // `enabled = false`, which has to outlast a Spaces update that changes the hook.
             try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: agentExecutablePath, codexHome: codexDir)
+            // The Spaces MCP server entry goes in through Codex as well, so Codex stays the only writer of
+            // its TOML and the user's other settings on the entry survive.
+            try AgentHookCodexAppServer.withSession(
+                executablePath: agentExecutablePath, codexHome: codexDir, timeoutSeconds: AgentHookCodexTrust.trustTimeoutSeconds,
+                launcher: codexAppServer
+            ) { try $0.registerSpacesMCPServer(spacesExecutablePath: spacesExecutablePath) }
         case .opencode:
             try AgentHookOpencodePluginWriter.install(
                 pluginURL: opencodePluginURL(home: home), spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
@@ -101,7 +110,8 @@ extension CodingAgent {
 
     /// How completely the agent's own config files carry the hooks this build writes.
     ///
-    /// For Codex this covers the hooks file and the `hooks` feature flag only, and its `current` means
+    /// For Codex this covers the hooks file and the `hooks` feature flag only (the `spaces` MCP server entry
+    /// is read through the app-server with the trust state, see `AgentHookCodexTrust.status`), and its `current` means
     /// "ready to be trusted": whether Codex has trusted the entries, or the user switched them off, is
     /// Codex's to say and is read through `AgentHookCodexTrust` once this reports `current`. The states
     /// are ordered by what fixes them. Entries an older Spaces wrote, or the feature flag being off, are

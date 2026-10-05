@@ -55,8 +55,20 @@ struct AgentHookCodexTrustTests {
         }
     }
 
-    private func status(_ codexHome: URL, fake: FakeCodexAppServer) -> AgentHookCodexTrust.Reading {
-        AgentHookCodexTrust.status(codexExecutablePath: "codex", codexHome: codexHome, spacesExecutablePath: spacesPath, launcher: fake.launcher)
+    /// Appends the `spaces` MCP server entry setup writes, unless the config already has one.
+    private func seedSpacesMCPServer(_ codexHome: URL, envVars: [String] = AgentHookCodexMCPEntry.requiredEnvVars, command: String? = nil) {
+        guard FakeCodexAppServer.mcpServerEntry(configURL: configFile(codexHome)) == nil else { return }
+        let envJSON = "[" + envVars.map { "\"\($0)\"" }.joined(separator: ", ") + "]"
+        let table = FakeCodexAppServer.mcpServerTable([
+            (key: "command", json: "\"\(command ?? spacesPath)\""), (key: "args", json: "[\"mcp\"]"), (key: "env_vars", json: envJSON),
+        ])
+        try? (read(configFile(codexHome)) + table).write(to: configFile(codexHome), atomically: true, encoding: .utf8)
+    }
+
+    private func status(_ codexHome: URL, fake: FakeCodexAppServer, seedingMCPServer: Bool = true) -> AgentHookCodexTrust.Reading {
+        if seedingMCPServer { seedSpacesMCPServer(codexHome) }
+        return AgentHookCodexTrust.status(
+            codexExecutablePath: "codex", codexHome: codexHome, spacesExecutablePath: spacesPath, launcher: fake.launcher)
     }
 
     private func trust(_ codexHome: URL, fake: FakeCodexAppServer) throws {
@@ -205,8 +217,8 @@ struct AgentHookCodexTrustTests {
 
     // MARK: - The exchange
 
-    /// One status check is one short session: the handshake, then a single listing, with whatever Codex
-    /// announces in between read past.
+    /// One status check is one short session: the handshake, then a single listing and a read of the
+    /// Spaces MCP server entry, with whatever Codex announces in between read past.
     @Test func aStatusCheckIsOneSessionWithOneListing() throws {
         let codexHome = try makeCodexHome()
         defer { try? FileManager.default.removeItem(at: codexHome) }
@@ -216,7 +228,82 @@ struct AgentHookCodexTrustTests {
         _ = status(codexHome, fake: fake)
 
         #expect(fake.launchCount == 1)
-        #expect(fake.methods == ["initialize", "initialized", "hooks/list"])
+        #expect(fake.methods == ["initialize", "initialized", "hooks/list", "config/read"])
+    }
+
+    // MARK: - The Spaces MCP server entry
+
+    @Test func aMissingSpacesMCPServerEntryReadsAsOutdated() throws {
+        let codexHome = try makeCodexHome()
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+        try installSpacesHooks(codexHome)
+
+        #expect(status(codexHome, fake: FakeCodexAppServer(), seedingMCPServer: false) == .init(installState: .outdated, untrustedEntries: []))
+    }
+
+    @Test func aSpacesMCPServerEntryForAnotherCLIOrWithoutAWantedEnvVarReadsAsOutdated() throws {
+        let stale: [(command: String?, envVars: [String])] = [
+            ("/somewhere/else/spaces", AgentHookCodexMCPEntry.requiredEnvVars), (nil, ["SPACES_TERMINAL_TRACKING_ID"]),
+            (nil, ["SPACES_AUTOMATION_RUN_ID"]), (nil, []),
+        ]
+        for entry in stale {
+            let codexHome = try makeCodexHome()
+            defer { try? FileManager.default.removeItem(at: codexHome) }
+            try installSpacesHooks(codexHome)
+            seedSpacesMCPServer(codexHome, envVars: entry.envVars, command: entry.command)
+
+            #expect(status(codexHome, fake: FakeCodexAppServer(), seedingMCPServer: false).installState == .outdated)
+        }
+    }
+
+    @Test func aSpacesMCPServerEntryWithExtraUserEnvVarsStillReadsAsCurrent() throws {
+        let codexHome = try makeCodexHome()
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+        try installSpacesHooks(codexHome)
+        try FakeCodexAppServer.trustTables(try listedSpacesCommands(codexHome)).write(to: configFile(codexHome), atomically: true, encoding: .utf8)
+        seedSpacesMCPServer(codexHome, envVars: ["MY_VAR"] + AgentHookCodexMCPEntry.requiredEnvVars)
+
+        #expect(status(codexHome, fake: FakeCodexAppServer(), seedingMCPServer: false) == .init(installState: .current, untrustedEntries: []))
+    }
+
+    @Test func registeringTheSpacesMCPServerWritesTheEntryAndKeepsTheUsersEnvVarsAndOtherKeys() throws {
+        let codexHome = try makeCodexHome()
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+        let seeded =
+            "# my config\n[mcp_servers.other]\ncommand = \"/bin/other\"\n"
+            + FakeCodexAppServer.mcpServerTable([
+                (key: "command", json: "\"/old/spaces\""), (key: "env_vars", json: "[\"MY_VAR\", \"SPACES_AUTOMATION_RUN_ID\"]"),
+                (key: "startup_timeout_sec", json: "30"),
+            ])
+        try seeded.write(to: configFile(codexHome), atomically: true, encoding: .utf8)
+
+        try AgentHookCodexAppServer.withSession(
+            executablePath: "codex", codexHome: codexHome, timeoutSeconds: 5, launcher: FakeCodexAppServer().launcher
+        ) { try $0.registerSpacesMCPServer(spacesExecutablePath: spacesPath) }
+
+        let entry = try #require(FakeCodexAppServer.mcpServerEntry(configURL: configFile(codexHome)))
+        #expect(entry["command"] as? String == spacesPath)
+        #expect(entry["args"] as? [String] == ["mcp"])
+        #expect(entry["env_vars"] as? [String] == ["MY_VAR", "SPACES_AUTOMATION_RUN_ID", "SPACES_TERMINAL_TRACKING_ID"])
+        #expect(entry["startup_timeout_sec"] as? Int == 30)
+        #expect(read(configFile(codexHome)).hasPrefix("# my config\n[mcp_servers.other]"))
+    }
+
+    @Test func registeringTheSpacesMCPServerIsIdempotent() throws {
+        let codexHome = try makeCodexHome()
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+        func register() throws {
+            try AgentHookCodexAppServer.withSession(
+                executablePath: "codex", codexHome: codexHome, timeoutSeconds: 5, launcher: FakeCodexAppServer().launcher
+            ) { try $0.registerSpacesMCPServer(spacesExecutablePath: spacesPath) }
+        }
+        try register()
+        let first = read(configFile(codexHome))
+        try register()
+
+        #expect(read(configFile(codexHome)) == first)
+        let entry = try #require(FakeCodexAppServer.mcpServerEntry(configURL: configFile(codexHome)))
+        #expect(entry["env_vars"] as? [String] == AgentHookCodexMCPEntry.requiredEnvVars)
     }
 
     /// A trust lists, writes only what needs writing, and lists again to confirm Codex took it.

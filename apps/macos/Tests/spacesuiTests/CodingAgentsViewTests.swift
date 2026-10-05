@@ -89,6 +89,51 @@ import Testing
         #expect(Set(CodingAgentsView.standingFailures(failures, after: [agent(.codex, installState: .current)]).keys) == [.claudeCode])
     }
 
+    /// The warning line and Stop Server button belong to a Codex row only while its device reports the
+    /// shared server running; the row's own action is unaffected.
+    @Test func theStopServerLineAndButtonAppearOnlyWhileTheServerRuns() {
+        func codex(running: Bool?, state: AgentHookInstallState = .current) -> AgentHookStatus {
+            AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: state, sharedServerRunning: running)
+        }
+
+        #expect(CodingAgentsView.showsSharedServerStop(status: codex(running: true)))
+        #expect(!CodingAgentsView.showsSharedServerStop(status: codex(running: false)))
+        #expect(!CodingAgentsView.showsSharedServerStop(status: codex(running: nil)))
+        #expect(!CodingAgentsView.showsSharedServerStop(status: agent(.claudeCode, installState: .current)))
+        #expect(!CodingAgentsView.showsSharedServerStop(status: nil))
+        #expect(CodingAgentsView.sharedServerNote == "Background server running: Codex sessions on it can't report to Spaces.")
+        #expect(CodingAgentsView.rowAction(for: codex(running: true, state: .awaitingTrust)) == .trust)
+        #expect(CodingAgentsView.rowAction(for: codex(running: true)) == nil)
+        #expect(CodingAgentsView.actionTitle(.stopServer, agentName: "Codex", inProgress: false) == "Stop Server")
+        #expect(CodingAgentsView.captionText(status: codex(running: true), failureMessage: nil, isLoading: false) == "Detected, hooks installed")
+    }
+
+    /// A refused stop stands only while the server still reads as running, and leaves other failures alone.
+    @Test func aRefusedStopStandsUntilTheServerNoLongerRuns() {
+        func codex(running: Bool?) -> AgentHookStatus {
+            AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .current, sharedServerRunning: running)
+        }
+        let refusal = CodingAgentsView.stopFailureCaption(agentName: "Codex", reason: "it did not exit")
+        let failures: [CodingAgent: CodingAgentsView.RowFailure] = [.codex: .init(action: .stopServer, message: refusal)]
+
+        #expect(CodingAgentsView.standingFailures(failures, after: [codex(running: true)]) == failures)
+        #expect(CodingAgentsView.standingFailures(failures, after: []) == failures)
+        #expect(CodingAgentsView.standingFailures(failures, after: [codex(running: false)]).isEmpty)
+        #expect(CodingAgentsView.standingFailures(failures, after: [codex(running: nil)]).isEmpty)
+        #expect(refusal == "Codex didn't stop its background server: it did not exit")
+    }
+
+    @Test func theStopConfirmationNamesTheDeviceAndTheKeptConversations() {
+        let confirmation = CodexServerStopConfirmation(deviceName: "This Mac")
+
+        #expect(confirmation.title == "Stop Codex's background server?")
+        #expect(
+            confirmation.message
+                == "This ends the Codex sessions running on it on This Mac. Their conversations are kept, and you can resume them in a Spaces terminal."
+        )
+        #expect(confirmation.confirmButtonTitle == "Stop Server")
+    }
+
     /// The trust is consent to exactly what the sheet lists, so it names the device, counts the commands,
     /// and carries each one as the device reported it.
     @Test func theConfirmationListsTheExactCommandsAndCountsThem() {

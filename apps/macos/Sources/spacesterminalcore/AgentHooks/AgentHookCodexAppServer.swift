@@ -22,7 +22,8 @@ protocol AgentHookCodexAppServerTransport: AnyObject {
 /// `hooks/list` for each hook's key, current hash, and trust status, and records a trust by handing that
 /// same key and hash back through `config/batchWrite`, which is the write Codex's own review screen makes.
 /// Both methods exist with these fields in every Codex this integration supports (0.146 onward), and
-/// neither needs an experimental opt-in.
+/// neither needs an experimental opt-in. The same session also reads (`config/read`) and writes
+/// (`config/batchWrite`) the `spaces` MCP server entry (`AgentHookCodexMCPEntry`).
 ///
 /// The protocol is newline-delimited JSON-RPC over the server's stdio: `initialize`, the `initialized`
 /// notification, then requests. Everything the server says that is not the reply being waited for
@@ -107,6 +108,28 @@ final class AgentHookCodexAppServer {
         _ = try request(
             "config/batchWrite",
             params: ["edits": [["keyPath": "hooks.state", "value": trusts, "mergeStrategy": "upsert"]], "reloadUserConfig": true])
+    }
+
+    /// The `spaces` entry of Codex's effective `mcp_servers`, or nil when there is none.
+    func readSpacesMCPServer() throws -> AgentHookCodexMCPEntry.Existing? {
+        let method = "config/read"
+        let result = try request(method, params: ["includeLayers": false])
+        guard let config = result["config"] as? [String: Any] else { throw Failure.unreadable(method: method) }
+        let servers = config["mcp_servers"]
+        if servers == nil || servers is NSNull { return nil }
+        guard let servers = servers as? [String: Any] else { throw Failure.unreadable(method: method) }
+        return servers[AgentHookCodexMCPEntry.serverName] as? [String: Any]
+    }
+
+    /// Writes the `spaces` MCP server entry through `config/batchWrite`, keeping the names the user already
+    /// has in `env_vars`. `upsert` merges into the existing table, so every other key of the entry and its
+    /// tool subtables stay as the user left them.
+    func registerSpacesMCPServer(spacesExecutablePath: String) throws {
+        let existing = try readSpacesMCPServer()
+        let value = AgentHookCodexMCPEntry.value(spacesExecutablePath: spacesExecutablePath, existing: existing)
+        _ = try request(
+            "config/batchWrite",
+            params: ["edits": [["keyPath": AgentHookCodexMCPEntry.keyPath, "value": value, "mergeStrategy": "upsert"]], "reloadUserConfig": true])
     }
 
     // MARK: - JSON-RPC

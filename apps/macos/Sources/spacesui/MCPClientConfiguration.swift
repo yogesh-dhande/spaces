@@ -30,12 +30,14 @@ enum MCPClientConfiguration {
     /// available in every directory rather than only the one the command ran in.
     static func claudeCodeAddCommand(cliPath: String) -> String { "claude mcp add \(serverName) -s user -- \(cliPath) mcp" }
 
-    /// `mcp_servers` table for the Codex CLI `~/.codex/config.toml`.
+    /// `mcp_servers` table for the Codex CLI `~/.codex/config.toml`. Codex passes an MCP server only the
+    /// variables named in `env_vars`, which is how the server learns which terminal is calling.
     static func codexConfigTOML(cliPath: String) -> String {
         """
         [mcp_servers.\(serverName)]
         command = "\(cliPath)"
         args = ["mcp"]
+        env_vars = [\(AgentHookCodexMCPEntry.requiredEnvVars.map { "\"\($0)\"" }.joined(separator: ", "))]
         """
     }
 

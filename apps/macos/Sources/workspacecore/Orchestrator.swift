@@ -1908,7 +1908,7 @@ public final class WorkspaceOrchestrator {
             // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
             // virtue of the terminal); with one, the command runs through that same interactive login shell
             // so it resolves exactly the tools the bare session would.
-            let shellCommand = hasNonblankCommand ? interactiveLoginShellCommand(command!) : interactiveShellCommand(cwd: workspace.dir)
+            let shellCommand = try hasNonblankCommand ? interactiveLoginShellCommand(command!) : interactiveShellCommand(cwd: workspace.dir)
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: explicitTitle, shellCommand: shellCommand, kind: .shell,
                 defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id), workingDirectory: workspace.dir)
@@ -2106,7 +2106,7 @@ public final class WorkspaceOrchestrator {
         let generatedTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
         let workingDirectory = workspace.dir
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
-        let shellCommand = interactiveShellCommand(cwd: workspace.dir)
+        let shellCommand = try interactiveShellCommand(cwd: workspace.dir)
         let command = commandPrefixedWithShellEnvironment(shellCommand, env: env)
         let createdAt = TerminalSessionTimestamp.fractionalString(from: Date())
         let launchConfiguration = TerminalSessionLaunchConfiguration(

@@ -37,6 +37,14 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
+    /// Stopping Codex's shared server ends the sessions running on it, so a dropped connection must not
+    /// send it a second time.
+    func testStopCodexSharedServerCommandRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .stopCodexSharedServer, authToken: "SECRET")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
     /// The confirmation a client shows lists exactly the commands the status carries, so they have to
     /// survive the wire as written.
     func testAgentHooksStatusCarriesTheUntrustedEntriesThroughResponse() throws {

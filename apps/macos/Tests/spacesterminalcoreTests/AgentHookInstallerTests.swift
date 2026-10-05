@@ -139,6 +139,27 @@
               printf 'hooks                                stable             %s\n' "$enabled"
               exit 0
             fi
+            if [ "$1 $2 $3" = "app-server daemon version" ]; then
+              if [ -f "$CODEX_HOME/shared-server-running" ]; then
+                printf '{"status":"running","backend":"pid","cliVersion":"0.160.0","appServerVersion":"0.160.0"}\n'
+                exit 0
+              fi
+              printf 'failed to connect to %s/app-server-control.sock\n' "$CODEX_HOME" >&2
+              exit 1
+            fi
+            if [ "$1 $2 $3" = "app-server daemon stop" ]; then
+              if [ -f "$CODEX_HOME/shared-server-refuses-to-stop" ]; then
+                printf 'daemon is wedged\n' >&2
+                exit 1
+              fi
+              if [ -f "$CODEX_HOME/shared-server-running" ]; then
+                rm -f "$CODEX_HOME/shared-server-running"
+                printf '{"status":"stopped"}\n'
+              else
+                printf '{"status":"notRunning"}\n'
+              fi
+              exit 0
+            fi
             printf 'unexpected codex arguments\n' >&2
             exit 64
             """#
@@ -460,6 +481,15 @@
 
         private func codexInstallState(home: URL) -> AgentHookInstallState? { codexStatus(home: home)?.installState }
 
+        /// `config.toml` without the `[mcp_servers.spaces]` table, which an install moves to the new CLI path.
+        private func withoutSpacesMCPServer(_ config: String) -> String {
+            var skipping = false
+            return config.components(separatedBy: "\n").filter { line in
+                if line.hasPrefix("[") { skipping = line == "[mcp_servers.spaces]" }
+                return !skipping
+            }.joined(separator: "\n")
+        }
+
         /// Each step of the Codex row, in the order the user meets them: nothing installed, entries an
         /// older Spaces wrote (Update), entries Codex has not trusted (Trust, listing exactly this
         /// device's commands), trusted, and switched off in Codex afterwards.
@@ -492,7 +522,7 @@
             #expect(trusted.failures.isEmpty)
             #expect(
                 trusted.agents.first { $0.kind == .codex }
-                    == AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .current))
+                    == AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .current, sharedServerRunning: false))
 
             let keyPath = codexKeyPath(hooksFileURL)
             try read(configURL).replacingOccurrences(
@@ -584,7 +614,7 @@
             try trust(.codex, home: home)
             let userTable = FakeCodexAppServer.trustTables(["\(codexKeyPath(hooksFileURL)):stop:0:0": "my-own-stop-hook"])
             try (read(configURL) + userTable).write(to: configURL, atomically: true, encoding: .utf8)
-            let approved = read(configURL)
+            let approved = withoutSpacesMCPServer(read(configURL))
 
             try FileManager.default.removeItem(atPath: spacesCLIPath(home: home))
             let movedCLI = try makeExecutable(
@@ -593,7 +623,7 @@
 
             try install([.codex], home: home)
 
-            #expect(read(configURL) == approved)
+            #expect(withoutSpacesMCPServer(read(configURL)) == approved)
             #expect(try codexListing(home: home).first { $0.command == "my-own-stop-hook" }?.isTrusted == true)
             let awaiting = try #require(codexStatus(home: home))
             #expect(awaiting.installState == .awaitingTrust)
@@ -657,7 +687,10 @@
             try install([.codex], home: home)
 
             #expect(read(configURL) == switchedOff)
-            #expect(codexStatus(home: home) == AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .disabledByAgent))
+            #expect(
+                codexStatus(home: home)
+                    == AgentHookStatus(
+                        kind: .codex, displayName: "Codex", available: true, installState: .disabledByAgent, sharedServerRunning: false))
             let stop = try #require(try codexListing(home: home).first { $0.key == "\(codexKeyPath(hooksFileURL)):stop:0:0" })
             #expect(!stop.enabled)
             #expect(AgentHookCommand.isCurrent(stop.command ?? ""))
@@ -765,6 +798,148 @@
             let trustedUserHooks = try codexListing(home: home).filter { $0.isTrusted }.compactMap(\.command)
             #expect(Set(trustedUserHooks) == ["my-own-first-stop-hook", "my-own-last-stop-hook"])
             #expect(codexInstallState(home: home) == .awaitingTrust)
+        }
+
+        // MARK: - The Spaces MCP server entry
+
+        private func codexMCPEntry(home: URL) -> [String: Any]? {
+            FakeCodexAppServer.mcpServerEntry(configURL: home.appendingPathComponent(".codex/config.toml"))
+        }
+
+        @Test func codexInstallRegistersTheSpacesMCPServerWithTheCallerEnvVars() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+
+            try install([.codex], home: home)
+
+            let entry = try #require(codexMCPEntry(home: home))
+            #expect(entry["command"] as? String == spacesCLIPath(home: home))
+            #expect(entry["args"] as? [String] == ["mcp"])
+            #expect(entry["env_vars"] as? [String] == ["SPACES_TERMINAL_TRACKING_ID", "SPACES_AUTOMATION_RUN_ID"])
+        }
+
+        @Test func codexInstallKeepsTheUsersOwnEnvVarsOnTheSpacesMCPServer() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+            try FakeCodexAppServer.mcpServerTable([(key: "env_vars", json: "[\"MY_VAR\"]")]).write(
+                to: codexHome.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+
+            try install([.codex], home: home)
+
+            #expect(codexMCPEntry(home: home)?["env_vars"] as? [String] == ["MY_VAR", "SPACES_TERMINAL_TRACKING_ID", "SPACES_AUTOMATION_RUN_ID"])
+        }
+
+        /// A user whose Codex has no `spaces` entry, or one from before the env vars, is offered setup
+        /// again, and setup brings the row back to a state Codex can then be asked to trust.
+        @Test func aMissingOrStaleSpacesMCPServerEntryReadsOutdatedUntilInstallWritesIt() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            try install([.codex], home: home)
+            try trust(.codex, home: home)
+            #expect(codexInstallState(home: home) == .current)
+
+            let configURL = home.appendingPathComponent(".codex/config.toml")
+            let withoutEntry = withoutSpacesMCPServer(read(configURL))
+            try withoutEntry.write(to: configURL, atomically: true, encoding: .utf8)
+            #expect(codexInstallState(home: home) == .outdated)
+
+            try
+                (withoutEntry
+                + FakeCodexAppServer.mcpServerTable([(key: "command", json: "\"\(spacesCLIPath(home: home))\""), (key: "args", json: "[\"mcp\"]")]))
+                .write(to: configURL, atomically: true, encoding: .utf8)
+            #expect(codexInstallState(home: home) == .outdated)
+
+            try install([.codex], home: home)
+            #expect(codexInstallState(home: home) == .current)
+        }
+
+        // MARK: - Codex's shared server
+
+        @Test func statusReportsWhetherCodexsSharedServerIsRunning() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+
+            #expect(codexStatus(home: home)?.sharedServerRunning == false)
+
+            try "".write(to: codexHome.appendingPathComponent("shared-server-running"), atomically: true, encoding: .utf8)
+            #expect(codexStatus(home: home)?.sharedServerRunning == true)
+            #expect(status(home: home).filter { $0.kind != .codex }.allSatisfy { $0.sharedServerRunning == nil })
+        }
+
+        @Test func statusDoesNotProbeTheSharedServerWhenCodexIsNotDetected() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+
+            #expect(codexStatus(home: home)?.available == false)
+            #expect(codexStatus(home: home)?.sharedServerRunning == nil)
+        }
+
+        @Test func stoppingCodexsSharedServerStopsItAndReturnsFreshStatus() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+            try "".write(to: codexHome.appendingPathComponent("shared-server-running"), atomically: true, encoding: .utf8)
+
+            let outcome = AgentHookInstaller.stopCodexSharedServer(
+                home: home, fileManager: HomeScopedFileManager(home: home), environment: environment,
+                shellPathDirectoryResolver: ShellProbeSpy().resolver, codexAppServer: FakeCodexAppServer().launcher)
+
+            #expect(outcome.failures.isEmpty)
+            #expect(outcome.agents.first { $0.kind == .codex }?.sharedServerRunning == false)
+            #expect(!FileManager.default.fileExists(atPath: codexHome.appendingPathComponent("shared-server-running").path))
+        }
+
+        @Test func stoppingCodexsSharedServerWhenNothingRunsSucceeds() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            try FileManager.default.createDirectory(at: home.appendingPathComponent(".codex"), withIntermediateDirectories: true)
+
+            let outcome = AgentHookInstaller.stopCodexSharedServer(
+                home: home, fileManager: HomeScopedFileManager(home: home), environment: environment,
+                shellPathDirectoryResolver: ShellProbeSpy().resolver, codexAppServer: FakeCodexAppServer().launcher)
+
+            #expect(outcome.failures.isEmpty)
+        }
+
+        @Test func aStopCodexRefusesIsReportedAsCodexsFailureAlongsideFreshStatus() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.codex], home: home)
+            let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+            for name in ["shared-server-running", "shared-server-refuses-to-stop"] {
+                try "".write(to: codexHome.appendingPathComponent(name), atomically: true, encoding: .utf8)
+            }
+
+            let outcome = AgentHookInstaller.stopCodexSharedServer(
+                home: home, fileManager: HomeScopedFileManager(home: home), environment: environment,
+                shellPathDirectoryResolver: ShellProbeSpy().resolver, codexAppServer: FakeCodexAppServer().launcher)
+
+            #expect(outcome.failures.map(\.kind) == [.codex])
+            #expect(outcome.failures.first?.message.contains("daemon is wedged") == true)
+            #expect(outcome.agents.first { $0.kind == .codex }?.sharedServerRunning == true)
+        }
+
+        @Test func stoppingCodexsSharedServerWithoutCodexIsCodexsFailure() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+
+            let outcome = AgentHookInstaller.stopCodexSharedServer(
+                home: home, fileManager: HomeScopedFileManager(home: home), environment: environment,
+                shellPathDirectoryResolver: ShellProbeSpy().resolver, codexAppServer: FakeCodexAppServer().launcher)
+
+            #expect(outcome.failures.map(\.kind) == [.codex])
         }
 
         // MARK: - Codex feature command

@@ -57,17 +57,22 @@ enum AgentHookCodexTrust {
         -> Reading
     {
         let hooksFileURL = codexHome.appendingPathComponent("hooks.json")
-        let listed = try? AgentHookCodexAppServer.withSession(
+        let answer = try? AgentHookCodexAppServer.withSession(
             executablePath: codexExecutablePath, codexHome: codexHome, timeoutSeconds: statusTimeoutSeconds, launcher: launcher
-        ) { try $0.listHooks() }
-        guard let listed else {
+        ) { (hooks: try $0.listHooks(), mcpServer: try $0.readSpacesMCPServer()) }
+        guard let answer else {
             let expected = CodingAgent.codex.jsonEventBindings.map {
                 AgentHookEntry(
                     eventName: $0.eventName, command: AgentHookCommand.signalCommand(event: $0.event, spacesExecutablePath: spacesExecutablePath))
             }
             return Reading(installState: .awaitingTrust, untrustedEntries: expected)
         }
-        return reading(listed: listed, hooksFileURL: hooksFileURL, spacesExecutablePath: spacesExecutablePath)
+        // A missing or stale `spaces` MCP server entry is fixed by the same setup that rewrites the hooks,
+        // and setup comes before trust, so it reads `outdated` ahead of any trust question.
+        guard AgentHookCodexMCPEntry.isCurrent(answer.mcpServer, spacesExecutablePath: spacesExecutablePath) else {
+            return Reading(installState: .outdated, untrustedEntries: [])
+        }
+        return reading(listed: answer.hooks, hooksFileURL: hooksFileURL, spacesExecutablePath: spacesExecutablePath)
     }
 
     /// The row's state for a `hooks/list` answer. See the type's documentation for the rules.
