@@ -1162,14 +1162,16 @@ public final class WorkspaceOrchestrator {
     /// running succeeds as a no-op. This is `upWorkspace` with `restartIfRunning: false` under its own name
     /// for callers (the macOS Start action, the iOS control bar, and remote-device `workspace start`) that
     /// only ever want the launch-or-converge behavior, never a forced restart.
-    public func launchWorkspace(workspaceID: String) throws { try upWorkspace(workspaceID: workspaceID, restartIfRunning: false) }
+    @discardableResult public func launchWorkspace(workspaceID: String) throws -> WorkspaceStartOutcome {
+        try upWorkspace(workspaceID: workspaceID, restartIfRunning: false)
+    }
 
     /// Takes the workspace lifecycle lock directly rather than through the automation cancellation
     /// coordinator Stop uses: a restart touches configured processes only, so it never cancels a run (#799).
-    public func restartWorkspace(workspaceID: String) throws {
+    @discardableResult public func restartWorkspace(workspaceID: String) throws -> WorkspaceStartOutcome {
         try assertWorkspaceHasLifecycle(workspaceID: workspaceID)
         guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try restartWorkspaceUnlocked(workspaceID: workspaceID) }
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try restartWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
     /// Runs the stop script, then relaunches the workspace's configured processes in place; coding agents,
@@ -1180,11 +1182,10 @@ public final class WorkspaceOrchestrator {
     /// can prune the pane in between. A failed relaunch does not stop the others; one error names every
     /// failure at the end, and the workspace stays running. A workspace that is not running takes Start's
     /// cold-launch path instead.
-    private func restartWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
+    @discardableResult private func restartWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws -> WorkspaceStartOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard try workspace.isRunning || hasTrackedRuntimeIndicators(workspaceID: workspace.id) else {
-            try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
-            return
+            return try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
         }
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
@@ -1271,28 +1272,33 @@ public final class WorkspaceOrchestrator {
         guard failedTemplateKeys.isEmpty else {
             throw WorkspaceError.invalidArgument(message: "Failed to relaunch: \(failedTemplateKeys.joined(separator: ", "))")
         }
+        return WorkspaceStartOutcome(notice: nil)
     }
 
-    public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
+    /// The outcome carries the port-held notice only when this call started a stopped workspace; a
+    /// workspace that was already running reports nothing.
+    @discardableResult public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws
+        -> WorkspaceStartOutcome
+    {
         try assertWorkspaceHasLifecycle(workspaceID: workspaceID)
         if restartIfRunning { guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress } }
-        try upWorkspaceLocked(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: background)
+        return try upWorkspaceLocked(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: background)
     }
 
-    private func upWorkspaceLocked(workspaceID: String, restartIfRunning: Bool, background: Bool) throws {
+    private func upWorkspaceLocked(workspaceID: String, restartIfRunning: Bool, background: Bool) throws -> WorkspaceStartOutcome {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             try upWorkspaceUnlocked(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: background)
         }
     }
 
     /// Runs with the workspace lifecycle gate already held.
-    private func upWorkspaceUnlocked(workspaceID: String, restartIfRunning: Bool, background: Bool) throws {
+    private func upWorkspaceUnlocked(workspaceID: String, restartIfRunning: Bool, background: Bool) throws -> WorkspaceStartOutcome {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
         try validateWorkspaceFocusNames(workspaceID: workspace.id)
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
         if workspace.isRunning || hasTrackedRuntime {
             if restartIfRunning {
-                try restartWorkspaceUnlocked(workspaceID: workspaceID, background: background)
+                _ = try restartWorkspaceUnlocked(workspaceID: workspaceID, background: background)
             } else {
                 // The setup recovery screen keeps ad hoc terminal access open while setup is pending,
                 // running, or failed, so a workspace can reach this branch (tracked runtime present)
@@ -1316,12 +1322,12 @@ public final class WorkspaceOrchestrator {
                 try launchMissingConfiguredProcesses(workspaceID: workspaceID, background: background)
                 if try hasTrackedRuntimeIndicators(workspaceID: workspaceID) { try markWorkspaceRunningIfNeeded(workspaceID: workspaceID) }
             }
-            return
+            return WorkspaceStartOutcome(notice: nil)
         }
-        try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
+        return try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
     }
 
-    private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
+    private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws -> WorkspaceStartOutcome {
         // Fail fast on an unknown workspace id before triggering deferred setup for it.
         _ = try resolveWorkspace(id: workspaceID)
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
@@ -1356,6 +1362,11 @@ public final class WorkspaceOrchestrator {
         )
         let launchPorts = assignedPorts.map(\.port)
         releaseReservedPortsForRuntimeStart(ports: launchPorts)
+        // The one place a stopped workspace's assigned ports are checked against the machine: the
+        // placeholders are down, so anything still bound is someone else's. The start goes ahead, since an
+        // assignment is never moved, and the user is told. A single-process restart inside a running
+        // workspace never reaches this, because the instance it replaces may still hold its port briefly.
+        let startNotice = WorkspaceStartPortNotice.make(assignedPorts: assignedPorts.map { (name: $0.name, port: $0.port) })
         // Ending the runtime-start hold and rebinding synchronously on the failure path keeps the
         // outcome deterministic: the store still says this workspace is stopped with these ports
         // assigned, so the daemon's reservation reconciler would rebind them anyway, and doing it here
@@ -1391,6 +1402,7 @@ public final class WorkspaceOrchestrator {
 
         try markWorkspaceRunning(workspace, launchedAt: nowISO8601())
         shouldRestoreReservedPorts = false
+        return WorkspaceStartOutcome(notice: startNotice)
     }
 
     @discardableResult public func stopWorkspace(workspaceID: String) throws -> WorkspaceStopOutcome {

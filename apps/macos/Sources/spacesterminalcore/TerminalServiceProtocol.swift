@@ -451,6 +451,9 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     public let project: TerminalServiceProfileProjectSummary?
     public let defaultWorkspaceID: String?
     public let spacesYAMLImported: Bool?
+    /// What `workspaceStart` reports beyond the start itself: a port assigned to the started workspace is
+    /// held by another program. Nil when there is nothing to report and for every other command.
+    public let notice: String?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
@@ -459,7 +462,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         agentBrief: TerminalServiceAgentBriefResult? = nil, agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil,
         automations: [TerminalServiceAutomationSummary]? = nil, automationRuns: [TerminalServiceAutomationRunSummary]? = nil,
         parkedRestoreGeneration: String? = nil, project: TerminalServiceProfileProjectSummary? = nil, defaultWorkspaceID: String? = nil,
-        spacesYAMLImported: Bool? = nil
+        spacesYAMLImported: Bool? = nil, notice: String? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -478,6 +481,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.project = project
         self.defaultWorkspaceID = defaultWorkspaceID
         self.spacesYAMLImported = spacesYAMLImported
+        self.notice = notice
     }
 
     /// Returns a copy with `pendingAgentEvents` attached, or `self` unchanged when there is nothing to
@@ -490,7 +494,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
             terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentBrief: agentBrief,
             agentSpawn: agentSpawn, pendingAgentEvents: events, automations: automations, automationRuns: automationRuns,
             parkedRestoreGeneration: parkedRestoreGeneration, project: project, defaultWorkspaceID: defaultWorkspaceID,
-            spacesYAMLImported: spacesYAMLImported)
+            spacesYAMLImported: spacesYAMLImported, notice: notice)
     }
 }
 

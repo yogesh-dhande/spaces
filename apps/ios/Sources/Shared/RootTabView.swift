@@ -58,6 +58,10 @@ struct RootTabView: View {
             Button("OK", role: .cancel) { model.dismissDeletedWorkspaceNotice() }
         } message: {
             Text(model.deletedWorkspaceNotice ?? "")
+        }.alert("Started Workspace", isPresented: startedWorkspaceNoticeBinding) {
+            Button("OK", role: .cancel) { model.dismissStartedWorkspaceNotice() }
+        } message: {
+            Text(model.startedWorkspaceNotice ?? "")
         }
         // Applying a staged build to a blocked device is the one thing this app does on its own, so its
         // one report lives at the shell: it is about the device, not about whichever tab happens to be
@@ -192,6 +196,10 @@ struct RootTabView: View {
 
     private var sessionRestoreFailureBinding: Binding<Bool> {
         Binding(get: { model.sessionRestoreFailureReport != nil }, set: { if !$0 { model.dismissSessionRestoreFailureReport() } })
+    }
+
+    private var startedWorkspaceNoticeBinding: Binding<Bool> {
+        Binding(get: { model.startedWorkspaceNotice != nil }, set: { if !$0 { model.dismissStartedWorkspaceNotice() } })
     }
 
     private var deletedWorkspaceNoticeBinding: Binding<Bool> {

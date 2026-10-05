@@ -5486,7 +5486,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch result {
         // The overview in the response is the one this device just published, so it is applied to
         // that device's section (`device.id`) rather than re-resolved from the workspace id.
-        case .success(let response): applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
+        case .success(let response):
+            applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
+            // The daemon starts the workspace even when another program holds one of its ports, and says
+            // so here; a start with every port free carries no notice and stays silent.
+            if let notice = response.mutationNotice, !notice.isEmpty { showInfoMessage(title: "Started workspace", message: notice) }
         case .failure(let error): showError(error)
         }
     }
@@ -5520,6 +5524,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // sessions exactly as they were. A configured process's pane is retargeted onto its replacement
             // by this response's overview diff (`retargetReplacedTerminalPanes`), never by a close IPC (#799).
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: id)
+            // Restarting a stopped workspace starts it, with the same held-port report as Start.
+            if let notice = response.mutationNotice, !notice.isEmpty { showInfoMessage(title: "Started workspace", message: notice) }
         case .failure(let error): showError(error)
         }
     }

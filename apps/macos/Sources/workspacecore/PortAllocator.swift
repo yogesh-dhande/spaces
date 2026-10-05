@@ -1,5 +1,9 @@
 import Foundation
 
+/// Assigns each workspace service a port from the profile's range. A new assignment skips ports the
+/// database has assigned to any workspace (stopped workspaces keep theirs reserved) and ports something
+/// on the machine is bound to right now (`PortProbe`), such as another program or another profile's
+/// workspace. An existing assignment is never moved: it stays with the workspace until it is deleted.
 public final class PortAllocator {
     private let store: SQLiteStore
 
@@ -38,7 +42,7 @@ public final class PortAllocator {
             for port in allocated.compactMap({ $0 }) { inUse.insert(port) }
             for index in allocated.indices where allocated[index] == nil {
                 for port in range.start...range.end {
-                    if inUse.contains(port) { continue }
+                    if inUse.contains(port) || PortProbe.isInUse(port: port) { continue }
                     allocated[index] = port
                     inUse.insert(port)
                     break
@@ -64,7 +68,7 @@ public final class PortAllocator {
         let inUse = try allReservedPorts()
         var allocated: [Int] = []
         for port in range.start...range.end {
-            if inUse.contains(port) { continue }
+            if inUse.contains(port) || PortProbe.isInUse(port: port) { continue }
             allocated.append(port)
             if allocated.count == count { break }
         }

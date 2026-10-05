@@ -125,16 +125,10 @@ public final class PortReserver: Sendable {
     }
 
     private func bindSocket(port: Int) -> Int32? {
-        #if os(Linux)
-            let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
-        #else
-            let fd = socket(AF_INET, SOCK_STREAM, 0)
-        #endif
-        guard fd >= 0 else { return nil }
-        // The daemon replaces its own image with `execv` to apply an update. An inherited placeholder
-        // descriptor would keep its port bound in the successor with nothing tracking it, so it could
-        // never be released again.
-        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        // `TCPSocket` sets close-on-exec: the daemon replaces its own image with `execv` to apply an
+        // update, and an inherited placeholder descriptor would keep its port bound in the successor with
+        // nothing tracking it, so it could never be released again.
+        guard let fd = TCPSocket.open(family: AF_INET) else { return nil }
         var opt: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()

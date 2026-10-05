@@ -207,7 +207,7 @@ final class SpacesMCPStdioServer {
                 if let device = try server.resolvedDevice(args.device) {
                     let response = try SpacesDeviceClient.launchWorkspace(
                         workspaceID: args.workspace, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
-                    return .profile(TerminalServiceProfileCommandResponse(message: response.message))
+                    return .profile(TerminalServiceProfileCommandResponse(message: response.message, notice: response.mutationNotice))
                 }
                 return .profile(
                     try TerminalService.sendProfileCommand(
@@ -225,7 +225,7 @@ final class SpacesMCPStdioServer {
                 if let device = try server.resolvedDevice(args.device) {
                     let response = try SpacesDeviceClient.restartWorkspace(
                         workspaceID: args.workspace, context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
-                    return .profile(TerminalServiceProfileCommandResponse(message: response.message))
+                    return .profile(TerminalServiceProfileCommandResponse(message: response.message, notice: response.mutationNotice))
                 }
                 return .profile(
                     try TerminalService.sendProfileCommand(

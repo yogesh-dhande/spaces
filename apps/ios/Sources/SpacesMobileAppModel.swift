@@ -621,6 +621,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The branch-deletion report a completed workspace delete came back with, shown once and cleared.
     /// Only a delete that asked for a branch to be deleted produces one, so a plain delete stays silent.
     var deletedWorkspaceNotice: String?
+    /// The report a workspace start came back with when another program holds one of the workspace's
+    /// ports, shown once and cleared. A start with every port free produces none.
+    var startedWorkspaceNotice: String?
     var searchText = ""
     var workspaceCreateOptions: SpacesDeviceWorkspaceCreateOptions?
     var selectedTab: SpacesMobileTab = .spaces
@@ -3962,7 +3965,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Starts the whole workspace: every configured process and coding agent. The daemon opens no browser
     /// session or ad hoc terminal, so those rows are untouched.
     func launchWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
-        await performWorkspaceMutation { try await bridgeClient.launchWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
+        let identity = overviewIdentity
+        let response = await performWorkspaceMutation {
+            try await bridgeClient.launchWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+        }
+        // The daemon starts the workspace even when another program holds one of its ports, and says so
+        // here; a start with every port free carries no notice.
+        if identity == overviewIdentity, let notice = response?.mutationNotice, !notice.isEmpty { startedWorkspaceNotice = notice }
     }
 
     func stopWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
@@ -3970,7 +3979,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func restartWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
-        await performWorkspaceMutation { try await bridgeClient.restartWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
+        let identity = overviewIdentity
+        let response = await performWorkspaceMutation {
+            try await bridgeClient.restartWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+        }
+        // Restarting a stopped workspace starts it, with the same held-port report as Start.
+        if identity == overviewIdentity, let notice = response?.mutationNotice, !notice.isEmpty { startedWorkspaceNotice = notice }
     }
 
     /// Sets one workspace's visibility: a single hidden-flag mutation, hide and unhide alike. Hide changes
@@ -4283,14 +4297,23 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     func dismissDeletedWorkspaceNotice() { deletedWorkspaceNotice = nil }
 
-    private func performWorkspaceMutation(_ operation: () async throws -> SpacesDeviceAPIResponse) async {
-        guard !isMutating else { return }
+    func dismissStartedWorkspaceNotice() { startedWorkspaceNotice = nil }
+
+    /// Returns the daemon's response when the mutation completed, so a caller can read a notice from it.
+    @discardableResult
+    private func performWorkspaceMutation(_ operation: () async throws -> SpacesDeviceAPIResponse) async -> SpacesDeviceAPIResponse? {
+        guard !isMutating else { return nil }
         isMutating = true
         defer { isMutating = false }
         let identity = overviewIdentity
-        do { await applyMutationResponse(try await operation(), identity: identity) } catch {
-            guard identity == overviewIdentity else { return }
+        do {
+            let response = try await operation()
+            await applyMutationResponse(response, identity: identity)
+            return response
+        } catch {
+            guard identity == overviewIdentity else { return nil }
             handleBridgeError(error)
+            return nil
         }
     }
 

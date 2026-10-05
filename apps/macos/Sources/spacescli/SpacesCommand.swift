@@ -203,12 +203,14 @@ struct WorkspaceStartCommand: ParsableCommand {
             let response = try SpacesDeviceClient.launchWorkspace(
                 workspaceID: workspace, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             context.output.emit(response.message)
+            if let notice = response.mutationNotice, !notice.isEmpty { context.output.emit(notice) }
             return
         }
         let payload = TerminalServiceWorkspaceLifecyclePayload(cwd: context.currentDirectoryPath(), workspaceID: workspace)
-        let resolved = try requireProfileWorkspace(
-            try TerminalService.sendProfileCommand(.workspaceStart(payload), timeout: longRunningProfileCommandTimeout))
+        let response = try TerminalService.sendProfileCommand(.workspaceStart(payload), timeout: longRunningProfileCommandTimeout)
+        let resolved = try requireProfileWorkspace(response)
         context.output.emit("Workspace is running \(resolved.id)")
+        if let notice = response.notice, !notice.isEmpty { context.output.emit(notice) }
     }
 }
 
@@ -251,12 +253,14 @@ struct WorkspaceRestartCommand: ParsableCommand {
             let response = try SpacesDeviceClient.restartWorkspace(
                 workspaceID: workspace, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             context.output.emit(response.message)
+            if let notice = response.mutationNotice, !notice.isEmpty { context.output.emit(notice) }
             return
         }
         let payload = TerminalServiceWorkspaceLifecyclePayload(cwd: context.currentDirectoryPath(), workspaceID: workspace)
-        let resolved = try requireProfileWorkspace(
-            try TerminalService.sendProfileCommand(.workspaceRestart(payload), timeout: longRunningProfileCommandTimeout))
+        let response = try TerminalService.sendProfileCommand(.workspaceRestart(payload), timeout: longRunningProfileCommandTimeout)
+        let resolved = try requireProfileWorkspace(response)
         context.output.emit("Workspace restarted \(resolved.id)")
+        if let notice = response.notice, !notice.isEmpty { context.output.emit(notice) }
     }
 }
 

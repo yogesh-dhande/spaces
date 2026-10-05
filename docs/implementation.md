@@ -819,13 +819,18 @@ Ports are pinned in the store. The owning daemon holds a placeholder socket on e
   - `PortReservationReconciler` computes the wanted set: ports of workspaces stored as stopped.
   - `PortReserver.sync` binds and closes sockets to match.
   - `PortReservationService` runs the pass at startup and on `databaseDidChange`.
-  - `PortAllocator` touches only the store.
+  - `PortAllocator` reads the store and probes the machine, but holds no sockets.
 - **Keyed by port.** Any process can rewrite the workspace record, but only the daemon holds descriptors.
 - **Runtime-start hold.** Every spawn that injects the workspace's port variables closes the placeholders and takes an in-process hold, which `sync` skips. That covers workspace launch, configured processes, ad hoc terminals, and agent and automation sessions.
   - Why: the launch's own row writes trigger a reconcile pass while the workspace still reads stopped. Without the hold, that pass would rebind the port before a slow dev server binds it.
   - A hold ends when the port leaves the wanted set, or on workspace stop (stops and launches serialize on the lifecycle lock).
   - A failed launch rebinds the port synchronously. If the workspace was already running, it only clears the hold.
   - A leaked hold leaves the port unheld only until the next transition.
+- **Probe (`PortProbe`).** A new assignment (`allocatePorts`, and the added-service path of `syncPorts`) skips a port when a TCP bind fails with `EADDRINUSE` on 0.0.0.0, 127.0.0.1, `::` (`IPV6_V6ONLY`), or `::1`. Only this machine is probed; other profiles' databases are never read.
+  - Probe sockets set `SO_REUSEADDR` and never `SO_REUSEPORT`. Without `SO_REUSEPORT`, another profile's placeholder (or a server that opted into sharing) still fails the bind, so it counts as taken. With `SO_REUSEADDR`, a port whose only leftovers are `TIME_WAIT` connections counts as free, so a quick stop-then-start raises no false conflict.
+  - The loopback addresses are probed on their own because, on macOS, `SO_REUSEADDR` lets a wildcard bind succeed beside a listener on a specific address. `EADDRNOTAVAIL` and `EAFNOSUPPORT` (IPv6 disabled) mean the address cannot be probed, not that the port is taken.
+- **Start check.** `launchWorkspaceUnlocked`, the cold-start path of Start and of a restart of a stopped workspace, probes each assigned port right after releasing the placeholders (before that, the workspace's own placeholder would be the holder). The workspace starts regardless; `WorkspaceStartPortNotice` builds the sentences and `WorkspaceStartOutcome.notice` carries them out. The Device API puts it in `SpacesDeviceMutationResult.notice` for `launchWorkspace` and `restartWorkspace` (existing wire field), and the local profile command returns it in `TerminalServiceProfileCommandResponse.notice`; a restart of a running workspace yields none. A single-process restart and every spawn into an already-running workspace (single-process restart, ad hoc terminals, agent sessions) never check.
+- **Holder lookup (`PortHolderLookup`).** macOS walks every visible process's socket descriptors through libproc (`proc_pidinfo(PROC_PIDLISTFDS)`, `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)`) for a TCP socket on the port that is listening or bound, and names it with `proc_name`. Linux finds the LISTEN (`0A`) inode for the port in `/proc/net/tcp{,6}`, matches it against `/proc/<pid>/fd` links `socket:[inode]`, and reads `/proc/<pid>/comm`. Processes the user cannot inspect are not found, which yields "another program".
 
 #### Workspace lifecycle patterns
 

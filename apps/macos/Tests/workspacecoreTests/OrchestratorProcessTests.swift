@@ -1792,7 +1792,11 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web")])
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [24000], names: ["api"])
+        // The added service is allocated from the range, which probes the machine, so the range must be one
+        // this process just found free rather than the default that real daemons hold ports in.
+        try seedBindablePortRange(in: store)
+        let rangeStart = try store.appConfig().portRange.start
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [rangeStart + 3], names: ["api"])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -1809,7 +1813,7 @@ extension OrchestratorTests {
         XCTAssertEqual(processes.first?.templateName, "web")
 
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
-        XCTAssertEqual(namedPorts.map(\.port), [24000, 20000])
+        XCTAssertEqual(namedPorts.map(\.port), [rangeStart + 3, rangeStart])
         XCTAssertEqual(namedPorts.map(\.name), ["api", "web"])
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)

@@ -34,7 +34,12 @@ export default function ServicesDocsPage() {
           service&apos;s port stays assigned to its workspace for the workspace&apos;s life,
           including while it is stopped, and is released only when the workspace is deleted. Adding
           a service reserves its port right away, so you do not need to relaunch the workspace to
-          use it.
+          use it. New assignments skip ports another program is already listening on.
+        </Prose>
+        <Prose>
+          A port that is already assigned is never moved. If another program holds it when you start
+          a stopped workspace (with Start or Restart), the workspace starts anyway and Spaces tells you which service&apos;s
+          port is held and, when it can tell, by which program and pid, so you can stop that program.
         </Prose>
         <Prose>
           Your process reads its port from <InlineCode>SPACES_&lt;SERVICE&gt;_PORT</InlineCode>,

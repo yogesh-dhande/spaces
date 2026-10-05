@@ -5107,8 +5107,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleLaunchWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
-        try context.orchestrator().launchWorkspace(workspaceID: request.workspaceID)
-        return try refreshedMutationResponse(context: context, message: "Launched workspace.", workspaceID: request.workspaceID)
+        let outcome = try context.orchestrator().launchWorkspace(workspaceID: request.workspaceID)
+        return try refreshedMutationResponse(
+            context: context, message: "Launched workspace.", workspaceID: request.workspaceID, notice: outcome.notice)
     }
 
     private func handleStopWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest, context: RequestContext) throws
@@ -5121,8 +5122,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleRestartWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
-        try context.orchestrator().upWorkspace(workspaceID: request.workspaceID, restartIfRunning: true, background: true)
-        return try refreshedMutationResponse(context: context, message: "Restarted workspace.", workspaceID: request.workspaceID)
+        let outcome = try context.orchestrator().upWorkspace(workspaceID: request.workspaceID, restartIfRunning: true, background: true)
+        return try refreshedMutationResponse(
+            context: context, message: "Restarted workspace.", workspaceID: request.workspaceID, notice: outcome.notice)
     }
 
     private func handleArchiveWorkspaceRequest(_ request: SpacesDeviceWorkspaceArchiveRequest, context: RequestContext) throws

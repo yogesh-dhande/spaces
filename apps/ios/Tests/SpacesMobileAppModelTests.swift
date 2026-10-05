@@ -556,6 +556,44 @@
             XCTAssertNil(model.deletedWorkspaceNotice)
         }
 
+        /// A start succeeds even when another program holds one of the workspace's ports; the daemon says so in
+        /// the mutation's notice, which the app shows once.
+        func testLaunchWorkspaceSurfacesPortHeldNotice() async {
+            let settings = SpacesMobileConnectionSettings()
+            let notice = "web's port 20001 is in use by node (pid 4123), so web's requests may reach that program instead."
+            let refreshedOverview = makeOverview(featureIsRunning: true)
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "Launched workspace.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature", notice: notice)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.launchWorkspace(makeOverview().workspaces[0])
+
+            XCTAssertEqual(model.startedWorkspaceNotice, notice)
+
+            model.dismissStartedWorkspaceNotice()
+
+            XCTAssertNil(model.startedWorkspaceNotice)
+        }
+
+        func testLaunchWorkspaceWithoutNoticeStaysSilent() async {
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: true)
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "Launched workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.launchWorkspace(makeOverview().workspaces[0])
+
+            XCTAssertNil(model.startedWorkspaceNotice)
+        }
+
         func testDeleteWorkspaceSurfacesFailure() async {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
