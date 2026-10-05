@@ -1,6 +1,6 @@
 # Spaces
 
-Manage parallel coding sessions across all of your devices.
+Your coding agents, reachable from anywhere: run Claude Code, Codex, and opencode on your Mac or a Linux server, check on them from your Mac or iPhone, and let them work together across harnesses.
 
 [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Website](https://usespaces.dev) · [Docs](https://usespaces.dev/docs)
 

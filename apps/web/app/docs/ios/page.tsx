@@ -82,7 +82,7 @@ export default function IOSDocsPage() {
           <div className="mx-auto w-full max-w-[280px]">
             <PhoneFrame
               src="/media/ios-terminal.png"
-              alt="A live terminal session open in the Spaces iOS app, showing output and an input field"
+              alt="A Claude Code session open in the Spaces iOS app, with a terminal key row and the keyboard up"
             />
           </div>
         </div>
