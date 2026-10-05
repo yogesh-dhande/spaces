@@ -13,6 +13,7 @@ RELEASES_DIR="$REPO_ROOT/dist/releases/$VERSION"
 DMG_NAME="Spaces-${VERSION}.dmg"
 DMG_PATH="$RELEASES_DIR/$DMG_NAME"
 VOLUME_NAME="Spaces-${VERSION}"
+source "$REPO_ROOT/scripts/spaces-release-helpers.sh"
 
 if [[ ! -d "$APP_BUNDLE_INPUT" ]]; then
   echo "Error: app bundle not found at $APP_BUNDLE_INPUT" >&2
@@ -268,7 +269,7 @@ echo "✓ Installer app signature verified"
 SetFile -a V "$app_bundle"
 
 # Create compressed DMG directly (skip window customization to avoid AppleScript issues)
-hdiutil create -volname "$VOLUME_NAME" -srcfolder "$staging" -ov -format UDZO "$DMG_PATH"
+spaces_release_create_dmg "$staging" "$VOLUME_NAME" "$DMG_PATH"
 
 echo "Signing DMG with identity: $IDENTITY"
 codesign --force --timestamp --sign "$IDENTITY" "$DMG_PATH"
