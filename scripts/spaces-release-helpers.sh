@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 
-# Shared architecture-verification helpers for the macOS release scripts
-# (create-app-bundle.sh and verify-release-artifacts.sh). Both scripts check
-# that shipped binaries carry both Apple Silicon and Intel slices; this file
-# is their single source of truth for that check.
+# Shared helpers for the macOS release scripts. create-app-bundle.sh and
+# verify-release-artifacts.sh check that shipped binaries carry both Apple
+# Silicon and Intel slices; this file is their single source of truth for that
+# check. create-dmg.sh builds its image through spaces_release_create_dmg so a
+# regression test runs the same hdiutil call the release does.
 #
 # create-dmg.sh also copies libghostty-vt dylibs (mirroring a shape of
 # create-app-bundle.sh's dylib handling), but that copy runs inside an
@@ -101,4 +102,21 @@ spaces_release_is_universal_binary() {
 # whether a candidate libghostty-vt dylib is present before inspecting it.
 spaces_release_dylib_copy_candidate() {
   [[ -e "$1" || -L "$1" ]]
+}
+
+# Creates a compressed DMG at $3 (volume name $2) from the folder $1.
+#
+# The image size is explicit because hdiutil sizes a -srcfolder image from the files' allocated
+# blocks but then copies their logical length, so a sparse or transparently compressed file in the
+# bundle overflows the image ("No space left on device"). The size comes from the apparent (logical)
+# size, plus 20% and 32 MB of headroom for filesystem metadata; UDZO compresses the unused space
+# away, so the final DMG does not grow.
+spaces_release_create_dmg() {
+  local source_dir="$1"
+  local volume_name="$2"
+  local dmg_path="$3"
+  local apparent_mb
+  apparent_mb="$(du -sAm "$source_dir" | cut -f1)"
+  hdiutil create -volname "$volume_name" -srcfolder "$source_dir" \
+    -size "$((apparent_mb + apparent_mb / 5 + 32))m" -ov -format UDZO "$dmg_path"
 }
