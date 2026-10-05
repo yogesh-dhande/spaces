@@ -1120,11 +1120,16 @@ import Foundation
         /// controller misses a presentation made further up. This walks from the root through every
         /// `presentedViewController` to whichever one is topmost, then asks whether this view sits inside
         /// THAT controller's view: if it does, the terminal itself lives inside the presented content
-        /// (nested presentations) and nothing covers it; if it does not, something does.
+        /// (nested presentations) and nothing covers it; if it does not, something does. A presentation
+        /// that is being dismissed does not count: it no longer reads input, and an interactive swipe-down
+        /// delivers the sheet's dismissal signal while UIKit still lists it as presented, so counting it
+        /// would refuse the one request that dismissal makes and leave the terminal without a keyboard.
         private var isCoveredByAWindowPresentation: Bool {
             guard let rootViewController = window?.rootViewController else { return false }
             var topmostPresentedViewController = rootViewController
-            while let presented = topmostPresentedViewController.presentedViewController { topmostPresentedViewController = presented }
+            while let presented = topmostPresentedViewController.presentedViewController, !presented.isBeingDismissed {
+                topmostPresentedViewController = presented
+            }
             guard topmostPresentedViewController !== rootViewController else { return false }
             return !isDescendant(of: topmostPresentedViewController.view)
         }

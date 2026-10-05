@@ -2620,6 +2620,46 @@
             wait(for: [dismissedExpectation], timeout: 2)
         }
 
+        /// An interactive swipe-down delivers the sheet's `onDismiss` while UIKit still lists the sheet as
+        /// the root's presented controller with `isBeingDismissed` set. The one request that signal makes
+        /// must not be refused for a presentation that is already on its way out.
+        func testHostViewTakesFocusOnADismissalSignalThatArrivesWhileTheSheetIsStillBeingDismissed() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            defer { hostView.removeFromSuperview() }
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.setAcceptsTerminalInput(true)
+            let becameFirstResponderDeadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < becameFirstResponderDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.isFirstResponder, "sanity: the terminal must hold first responder before anything is presented")
+            hostView.resignFirstResponder()
+
+            let presentedViewController = UIViewController()
+            let presentedExpectation = expectation(description: "a view controller presents over the terminal")
+            viewController.present(presentedViewController, animated: false) { presentedExpectation.fulfill() }
+            wait(for: [presentedExpectation], timeout: 2)
+
+            let dismissedExpectation = expectation(description: "the presented view controller finishes dismissing")
+            presentedViewController.dismiss(animated: true) { dismissedExpectation.fulfill() }
+            XCTAssertTrue(presentedViewController.isBeingDismissed, "sanity: the animated dismissal must be in flight when the signal arrives")
+            hostView.reconcileFirstResponderAfterSheetDismissal(dismissalTick: 1)
+
+            let focusDeadline = Date().addingTimeInterval(2)
+            while !hostView.isFirstResponder && Date() < focusDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(
+                hostView.isFirstResponder,
+                "a sheet already on its way out must not block the request its dismissal signal makes")
+            wait(for: [dismissedExpectation], timeout: 2)
+        }
+
         /// The presentation can come from the window's root controller even though the terminal's own
         /// view lives inside a child controller nested under it, the way `TabView` and `NavigationStack`
         /// sit between the terminal and the window's root in the app: the terminal's nearest ancestor
