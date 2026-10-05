@@ -213,6 +213,15 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     /// rather than being redialed every second for as long as the pane stays open. Internal for the
     /// same reason as the floor above.
     var diffSignatureReconnectCap: Duration = .seconds(30)
+    /// How every reconnect backoff loop (diff, file, and file-list signature) waits out its delay.
+    /// Internal so a test can hold a scheduled retry pending, act against it (deactivate, change scope,
+    /// open a file), then release it, ordering the action against the retry without racing the wall clock.
+    var reconnectBackoffSleep: @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+    /// The most recent scheduled reconnect task of each signature stream. Internal so a test can await a
+    /// retry's completion (including its generation-guard no-op) instead of waiting on the clock.
+    var diffSignatureReconnectTask: Task<Void, Never>?
+    var fileSignatureReconnectTask: Task<Void, Never>?
+    var fileListSignatureReconnectTask: Task<Void, Never>?
 
     /// Bumped on every `workspaceFileRead` call whose dispatch is a NAVIGATION — i.e. it changes which
     /// path the pane is showing (`pathChanged == true`), as opposed to a same-path reread of the file
@@ -2830,8 +2839,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let delay = RemoteConnectionBackoff.delay(
             consecutiveFailures: diffSignatureReconnectFailures, floor: diffSignatureReconnectFloor, cap: diffSignatureReconnectCap, jitterFraction: 0
         )
-        Task { [weak self] in
-            try? await Task.sleep(for: delay)
+        diffSignatureReconnectTask = Task { [weak self] in
+            guard let sleep = self?.reconnectBackoffSleep else { return }
+            await sleep(delay)
             guard let self, self.diffSignatureSubscriptionGeneration == generation else { return }
             // The device is nil by contract for exactly the window a daemon restart's disconnect
             // fires retries into (`deviceForMutation`/`deviceAcceptsDaemonActions` refuse it while the
@@ -3070,8 +3080,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let delay = RemoteConnectionBackoff.delay(
             consecutiveFailures: fileSignatureReconnectFailures, floor: fileSignatureReconnectFloor, cap: fileSignatureReconnectCap, jitterFraction: 0
         )
-        Task { [weak self] in
-            try? await Task.sleep(for: delay)
+        fileSignatureReconnectTask = Task { [weak self] in
+            guard let sleep = self?.reconnectBackoffSleep else { return }
+            await sleep(delay)
             guard let self, self.fileSignatureSubscriptionGeneration == generation else { return }
             // Mirrors `scheduleDiffSignatureReconnect`'s device-unavailable reschedule: the device is
             // nil by contract for exactly the window a daemon restart's disconnect fires retries into.
@@ -3166,8 +3177,9 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
         let delay = RemoteConnectionBackoff.delay(
             consecutiveFailures: fileListSignatureReconnectFailures, floor: fileListSignatureReconnectFloor, cap: fileListSignatureReconnectCap,
             jitterFraction: 0)
-        Task { [weak self] in
-            try? await Task.sleep(for: delay)
+        fileListSignatureReconnectTask = Task { [weak self] in
+            guard let sleep = self?.reconnectBackoffSleep else { return }
+            await sleep(delay)
             guard let self, self.fileListSignatureSubscriptionGeneration == generation, self.fileListSignatureMonitoringEnabled else { return }
             guard let hosting = self.hosting, let device = hosting.codePaneDevice(workspaceID: self.workspaceID) else {
                 self.scheduleFileListSignatureReconnect(generation: generation)

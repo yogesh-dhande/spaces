@@ -2159,13 +2159,14 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     /// `deactivate()` is the hibernation seam: it must cancel a pending retry so a pane the user is no
-    /// longer looking at never resubscribes behind its back.
+    /// longer looking at never resubscribes behind its back. Proves a retry whose delay elapses AFTER
+    /// `deactivate()` no-ops instead of subscribing.
     @Test func deactivatingDuringBackoffCancelsThePendingRetry() async {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
         let content = makeController(hosting: hosting, deviceGateway: gateway)
-        content.diffSignatureReconnectFloor = .milliseconds(150)
-        content.diffSignatureReconnectCap = .milliseconds(150)
+        let sleeper = GatedBackoffSleeper()
+        content.reconnectBackoffSleep = sleeper.sleep
         content.activate(focus: false)
         content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
 
@@ -2176,25 +2177,27 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await gateway.waitForSubscribeCallCount(1)
 
         await gateway.triggerDisconnect(at: 0)
-        await settle(.milliseconds(50))  // let the disconnect handler run and schedule the retry's sleep
+        await sleeper.waitForRequestedCount(1)  // the retry is scheduled and waiting out its delay
 
         content.deactivate()
 
-        // Wait well past the 150ms backoff floor: if the retry weren't cancelled, it would have fired by now.
-        await settle(.milliseconds(300))
+        let retry = content.diffSignatureReconnectTask
+        sleeper.releaseNext()
+        await retry?.value
 
         let attempts = await gateway.subscribeAttemptCount()
         #expect(attempts == 1, "hibernating during backoff must cancel the pending retry, so no second subscribe attempt occurs")
     }
 
     /// A user-triggered scope change mid-backoff must win cleanly: it resubscribes the new scope, and
-    /// the stale retry for the old (now-superseded) scope must not fire late.
+    /// the stale retry for the old (now-superseded) scope must not fire late. Proves a retry whose delay
+    /// elapses AFTER the scope change no-ops instead of subscribing the old scope.
     @Test func aScopeChangeDuringBackoffSupersedesThePendingRetryForTheOldScope() async {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
         let content = makeController(hosting: hosting, deviceGateway: gateway)
-        content.diffSignatureReconnectFloor = .milliseconds(150)
-        content.diffSignatureReconnectCap = .milliseconds(150)
+        let sleeper = GatedBackoffSleeper()
+        content.reconnectBackoffSleep = sleeper.sleep
         content.activate(focus: false)
         content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
 
@@ -2205,18 +2208,19 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await gateway.waitForSubscribeCallCount(1)
 
         await gateway.triggerDisconnect(at: 0)
-        await settle(.milliseconds(50))  // let the disconnect handler run and schedule the retry's sleep
+        await sleeper.waitForRequestedCount(1)  // the retry is scheduled and waiting out its delay
 
-        // A scope change arrives well before the 150ms backoff floor elapses.
+        // A scope change arrives before the backoff delay elapses.
         content.dispatch(diffRequest(id: "req-2", scopeKind: "ref", refName: "feature-branch"))
         await gateway.waitForDiffCallCount(2)
         await gateway.completeDiffCall(
             at: 1, result: SpacesDeviceWorkspaceDiffManifestChunkResult(manifestID: "test-manifest", scopeSignature: "sig-2", files: []))
         await gateway.waitForSubscribeCallCount(2)
 
-        // Wait well past the original retry's 150ms floor to give a late, wrongly-surviving retry a
-        // fair chance to (wrongly) fire before asserting it didn't.
-        await settle(.milliseconds(300))
+        // Let the original retry's delay elapse now that the new scope is subscribed, and wait for it to finish.
+        let retry = content.diffSignatureReconnectTask
+        sleeper.releaseNext()
+        await retry?.value
 
         let subscribeCount = await gateway.subscribeCallCount()
         #expect(subscribeCount == 2, "no late retry for the old scope may land on top of the new scope's subscription")
@@ -2341,8 +2345,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // Never recovers within this test's lifetime: every retry attempt sees a nil device.
         let hosting = ToggleableCodePaneHostingDouble(device: fakeDevice(), unavailableForCalls: 1000)
         let content = makeController(hosting: hosting, deviceGateway: gateway)
-        content.diffSignatureReconnectFloor = .milliseconds(20)
-        content.diffSignatureReconnectCap = .milliseconds(20)
+        let sleeper = GatedBackoffSleeper()
+        content.reconnectBackoffSleep = sleeper.sleep
         content.activate(focus: false)
         content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
 
@@ -2353,12 +2357,20 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         await gateway.waitForSubscribeCallCount(1)
 
         await gateway.triggerDisconnect(at: 0)
-        // Let a couple of nil-device reschedule cycles happen before hibernating mid-loop.
-        await settle(.milliseconds(100))
+        // Run two nil-device reschedule cycles before hibernating mid-loop.
+        for cycle in 1...2 {
+            await sleeper.waitForRequestedCount(cycle)
+            let retry = content.diffSignatureReconnectTask
+            sleeper.releaseNext()
+            await retry?.value
+        }
+        await sleeper.waitForRequestedCount(3)  // the loop has rescheduled and is waiting out another delay
         let callCountBeforeHibernate = hosting.codePaneDeviceCallCount
 
         content.deactivate()
-        await settle(.milliseconds(200))
+        let retry = content.diffSignatureReconnectTask
+        sleeper.releaseNext()
+        await retry?.value
 
         #expect(
             hosting.codePaneDeviceCallCount == callCountBeforeHibernate,
@@ -3318,8 +3330,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
         let content = makeController(hosting: hosting, deviceGateway: gateway)
-        content.fileSignatureReconnectFloor = .seconds(1)
-        content.fileSignatureReconnectCap = .seconds(1)
+        let sleeper = GatedBackoffSleeper()
+        content.reconnectBackoffSleep = sleeper.sleep
         content.activate(focus: false)
         content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
 
@@ -3329,12 +3341,10 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             at: 0, result: SpacesDeviceWorkspaceFileReadResult(base64Data: "", sha256: "sha-1", size: 0, isBinaryGuess: false))
         await gateway.waitForFileSubscribeCallCount(1)
 
-        // Drop the first path's stream and let it enter its pending-retry backoff window, without waiting
-        // for that retry to fire. The second open below must be dispatched well before the 1s floor
-        // elapses, so the floor is set far above what this settle plus the dispatch can take even on a
-        // loaded machine: a tight window here is what let the stale retry win the race and fire first.
+        // Drop the first path's stream and hold its retry in the backoff window: the second open below
+        // must run before that retry's delay elapses.
         await gateway.triggerFileDisconnect(at: 0)
-        await settle(.milliseconds(50))  // let the disconnect handler run and schedule the retry's sleep
+        await sleeper.waitForRequestedCount(1)
 
         struct InjectedFileReadFailure: Error {}
         content.dispatch(fileReadRequest(id: "req-2", path: "bar.ts"))
@@ -3347,9 +3357,11 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let restoredPath = await gateway.subscribedFilePath(at: 1)
         #expect(restoredPath == "foo.ts")
 
-        // Wait well past the 1s backoff floor: the stale retry (still captured against the
-        // now-superseded generation) must not also fire and produce a second, redundant subscribe.
-        await settle(.milliseconds(1300))
+        // Let the stale retry's delay elapse: it is captured against the now-superseded generation, so it
+        // must not also fire and produce a second, redundant subscribe.
+        let retry = content.fileSignatureReconnectTask
+        sleeper.releaseNext()
+        await retry?.value
         let subscribeCount = await gateway.fileSubscribeCallCount()
         #expect(subscribeCount == 2, "the superseded backoff retry must not also resubscribe on top of the deliberate restore")
     }
@@ -3708,8 +3720,8 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         let gateway = RecordingCodePaneDeviceGateway()
         let hosting = DeviceCodePaneHostingDouble(device: fakeDevice())
         let content = makeController(hosting: hosting, deviceGateway: gateway)
-        content.fileListSignatureReconnectFloor = .milliseconds(20)
-        content.fileListSignatureReconnectCap = .milliseconds(20)
+        let sleeper = GatedBackoffSleeper()
+        content.reconnectBackoffSleep = sleeper.sleep
         content.activate(focus: false)
         content.scriptEvaluator = RecordingCodePaneScriptEvaluator()
 
@@ -3721,10 +3733,16 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         // The transport can disconnect before the async subscribe returns. Let the retry wake while
         // the original attempt is still pending; it must not consume the only retry by no-op'ing.
         await gateway.triggerPendingFileListSignatureDisconnect(at: 0)
-        await settle(.milliseconds(60))
+        await sleeper.waitForRequestedCount(1)
+        let retry = content.fileListSignatureReconnectTask
+        sleeper.releaseNext()
+        await retry?.value
         #expect(await gateway.fileListSignatureSubscribeAttemptCount() == 1)
 
+        // The woken retry rescheduled itself (a second sleep); releasing it drives the real reconnect.
+        await sleeper.waitForRequestedCount(2)
         _ = await gateway.completeHeldFileListSignatureSubscribeCall(at: 0)
+        sleeper.releaseNext()
         await gateway.waitForFileListSignatureSubscribeAttemptCount(2)
         #expect(await gateway.fileListSignatureSubscribeAttemptCount() == 2)
     }
