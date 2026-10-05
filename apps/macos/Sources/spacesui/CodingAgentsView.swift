@@ -426,7 +426,9 @@ struct AgentConfigWatchTargets: Sendable {
             warning.font = Typography.metadata
             warning.textColor = .systemOrange
             warning.lineBreakMode = .byWordWrapping
-            warning.maximumNumberOfLines = 2
+            // Unbounded: the label column narrows beside two buttons, and the warning is the one line
+            // that must never be cut off.
+            warning.maximumNumberOfLines = 0
             warning.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             labels.append(warning)
         }
