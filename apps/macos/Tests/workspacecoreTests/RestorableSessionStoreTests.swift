@@ -447,6 +447,97 @@ final class RestorableSessionStoreTests: XCTestCase {
         XCTAssertEqual(Set(captures.map(\.sessionID)), [first, second])
     }
 
+    // MARK: - Skip and Restore against saved briefs
+
+    private func seedKeyedBrief(store: SQLiteStore, workspaceID: String, rowID: String, key: String, brief: String) throws {
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: rowID, workspaceID: workspaceID, provider: .spaces, label: "Claude", sessionKey: key, status: .idle,
+                createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z"))
+        try store.setAgentSessionBrief(id: rowID, brief: brief, updatedAt: "2026-10-01T01:00:00Z")
+        try store.deleteAgentWindow(id: rowID)
+    }
+
+    /// Skip deletes the briefs of the conversations it discards, except one a live row has since resumed;
+    /// a conversation the offer never named keeps its brief.
+    func testDiscardDeletesSkippedConversationBriefsButKeepsOneALiveRowHolds() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedKeyedBrief(store: store, workspaceID: workspace.id, rowID: "r1", key: "skipped", brief: "Skipped")
+        try seedKeyedBrief(store: store, workspaceID: workspace.id, rowID: "r2", key: "resumed", brief: "Resumed by hand")
+        try seedKeyedBrief(store: store, workspaceID: workspace.id, rowID: "r3", key: "unrelated", brief: "Unrelated")
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "live", workspaceID: workspace.id, provider: .spaces, label: "Claude", sessionKey: "resumed", status: .idle,
+                createdAt: "2026-10-01T02:00:00Z", updatedAt: "2026-10-01T02:00:00Z"))
+        try store.replaceRestorableSessions(
+            generation: "gen-a", capturedAt: "2026-10-01T00:00:00Z",
+            captures: [
+                makeCapture(sessionID: "s1", workspaceID: workspace.id, agentSessionKey: "skipped"),
+                makeCapture(sessionID: "s2", workspaceID: workspace.id, agentSessionKey: "resumed"),
+                makeCapture(sessionID: "s3", workspaceID: workspace.id, agentSessionKey: nil),
+            ])
+
+        try store.discardRestorableSessions(generation: "gen-a")
+
+        XCTAssertTrue(try store.restorableSessions().isEmpty)
+        func briefOnNewRow(_ key: String) throws -> String? {
+            try store.upsertAgentWindow(
+                AgentWindowRecord(
+                    id: "probe-\(key)", workspaceID: workspace.id, provider: .spaces, label: "Claude", sessionKey: key, status: .idle,
+                    createdAt: "2026-10-01T03:00:00Z", updatedAt: "2026-10-01T03:00:00Z"))
+            return try store.agentWindow(id: "probe-\(key)")?.brief
+        }
+        XCTAssertNil(try briefOnNewRow("skipped"))
+        XCTAssertEqual(try briefOnNewRow("resumed"), "Resumed by hand")
+        XCTAssertEqual(try briefOnNewRow("unrelated"), "Unrelated")
+    }
+
+    /// A skipped session's own row, still lingering after its terminal ended, does not keep the brief; a row
+    /// of another terminal on the same conversation does.
+    func testDiscardIgnoresTheSkippedSessionsOwnLingeringRowButNotAnotherTerminalsRow() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedKeyedBrief(store: store, workspaceID: workspace.id, rowID: "r1", key: "lingering", brief: "Lingering")
+        try seedKeyedBrief(store: store, workspaceID: workspace.id, rowID: "r2", key: "by-hand", brief: "By hand")
+        func row(_ id: String, key: String, terminal: String) -> AgentWindowRecord {
+            AgentWindowRecord(
+                id: id, workspaceID: workspace.id, provider: .spaces, label: id, terminalTarget: TerminalTargetRecord(trackingID: terminal),
+                sessionKey: key, status: .exited, createdAt: "2026-10-01T02:00:00Z", updatedAt: "2026-10-01T02:00:00Z")
+        }
+        try store.upsertAgentWindow(row("own-row", key: "lingering", terminal: "s1"))
+        try store.upsertAgentWindow(row("other-row", key: "by-hand", terminal: "other-terminal"))
+        try store.replaceRestorableSessions(
+            generation: "gen-a", capturedAt: "2026-10-01T00:00:00Z",
+            captures: [
+                makeCapture(sessionID: "s1", workspaceID: workspace.id, agentSessionKey: "lingering"),
+                makeCapture(sessionID: "s2", workspaceID: workspace.id, agentSessionKey: "by-hand"),
+            ])
+
+        try store.discardRestorableSessions(generation: "gen-a")
+
+        XCTAssertNil(try store.agentWindow(id: "own-row")?.brief)
+        XCTAssertEqual(try store.agentWindow(id: "other-row")?.brief, "By hand")
+    }
+
+    /// Restore answers the offer through `clearRestorableSessions`, which touches no briefs.
+    func testClearingTheRecordForARestoreKeepsSavedBriefs() throws {
+        let store = try makeTemporaryStore()
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedKeyedBrief(store: store, workspaceID: workspace.id, rowID: "r1", key: "conv", brief: "Kept")
+        try store.replaceRestorableSessions(
+            generation: "gen-a", capturedAt: "2026-10-01T00:00:00Z",
+            captures: [makeCapture(sessionID: "s1", workspaceID: workspace.id, agentSessionKey: "conv")])
+
+        try store.clearRestorableSessions(generation: "gen-a")
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "restored", workspaceID: workspace.id, provider: .spaces, label: "Claude", sessionKey: "conv", status: .idle,
+                createdAt: "2026-10-01T03:00:00Z", updatedAt: "2026-10-01T03:00:00Z"))
+
+        XCTAssertEqual(try store.agentWindow(id: "restored")?.brief, "Kept")
+    }
+
     // MARK: - replaceRestorableSessions / restorableSessions / clearRestorableSessions
 
     /// Writing a new generation replaces the whole record: an older generation's rows are gone and

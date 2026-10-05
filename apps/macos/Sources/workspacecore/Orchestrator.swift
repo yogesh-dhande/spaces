@@ -1928,34 +1928,68 @@ public final class WorkspaceOrchestrator {
     /// where that differs from the command being run: restoring an agent runs a resume command but records
     /// the original, so the next capture rewrites the original again instead of stacking a second resume
     /// selector onto the first. Every other caller records the command it runs.
+    ///
+    /// `resumedAgentSessionKey` is the conversation a restore resumes (`CodingAgent.resumableSessionKey`);
+    /// only the two restore paths pass it. The session's agent row is created right after the launch,
+    /// carrying that key, so the row shows the conversation's saved brief at once.
     @discardableResult public func createWorkspaceAgentSession(
         workspaceID: String, command: String, title: String?, automationRunID: String? = nil, recordedLaunchCommand: String? = nil,
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil, resumedAgentSessionKey: String? = nil
     ) throws -> TerminalServiceSessionSummary {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            let (project, workspace) = try resolveWorkspace(id: workspaceID)
-            let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
-            let defaultTitle =
-                CodingAgent.matching(command: command)?.displayName
-                ?? (CodingAgent.executableToken(inCommand: command).map {
-                    (TerminalForegroundProcessInspector.posixUnquoted($0) as NSString).lastPathComponent
-                } ?? "Agent")
-            // A restore names the directory the agent was working in, which can be anywhere under the
-            // workspace the agent `cd`-ed to and which may since have been deleted. A directory that is
-            // gone fails this launch rather than silently starting the agent somewhere else: the caller
-            // reports that row as one that could not come back, which is honest, where a relaunch in the
-            // wrong directory would look like a success and act on the wrong tree.
-            if let workingDirectory {
-                var isDirectory: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: workingDirectory, isDirectory: &isDirectory), isDirectory.boolValue else {
-                    throw WorkspaceError.invalidArgument(message: "Working directory no longer exists: \(workingDirectory)")
+        // A restore never reports a failure for an agent it left running: callers treat a throw as "this
+        // agent did not come back" (and `relaunchAttributedAgentLocked` only learns the session id from a
+        // return), so a session launched before the row write failed is torn down before the error
+        // propagates. The teardown takes the lifecycle gate, so it runs after the gate is released.
+        var launchedSessionID: String?
+        do {
+            return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+                let (project, workspace) = try resolveWorkspace(id: workspaceID)
+                let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
+                let defaultTitle =
+                    CodingAgent.matching(command: command)?.displayName
+                    ?? (CodingAgent.executableToken(inCommand: command).map {
+                        (TerminalForegroundProcessInspector.posixUnquoted($0) as NSString).lastPathComponent
+                    } ?? "Agent")
+                // A restore names the directory the agent was working in, which can be anywhere under the
+                // workspace the agent `cd`-ed to and which may since have been deleted. A directory that is
+                // gone fails this launch rather than silently starting the agent somewhere else: the caller
+                // reports that row as one that could not come back, which is honest, where a relaunch in the
+                // wrong directory would look like a success and act on the wrong tree.
+                if let workingDirectory {
+                    var isDirectory: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: workingDirectory, isDirectory: &isDirectory), isDirectory.boolValue else {
+                        throw WorkspaceError.invalidArgument(message: "Working directory no longer exists: \(workingDirectory)")
+                    }
                 }
+                let launchCommand = recordedLaunchCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? trimmedCommand
+                let session = try launchWorkspaceCommandSession(
+                    project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(command), kind: .agent,
+                    defaultTitle: defaultTitle, workingDirectory: workingDirectory ?? workspace.dir, automationRunID: automationRunID,
+                    launchCommand: launchCommand)
+                launchedSessionID = session.id
+                // A restored agent gets its row now, carrying the conversation it resumes, instead of waiting
+                // for its first hook: Codex reports its conversation only with its first prompt, so until then
+                // a restored Codex would show no brief, and a restore followed by a capture before that prompt
+                // would offer it back as a fresh conversation. Detection's conflict clause keeps a stored key,
+                // so a later detection pass or hook cannot undo it. A row an earlier writer already created
+                // (detection, or a keyless hook `init` such as opencode's) is seeded only when it has no key,
+                // so a conversation a hook reported wins over the one the restore resumes. Detection and hooks
+                // write on other connections, so the store does the lookup and the write in one immediate
+                // transaction (see `upsertRestoredAgentWindow`): only that keeps one row per terminal.
+                if let resumedAgentSessionKey, let agent = CodingAgent.matching(command: launchCommand) {
+                    // The same kind label foreground detection stores for the agent's plain executable.
+                    let kindLabel = agent.primaryCommandName
+                    try insertAdHocDetectedAgent(
+                        detectedAgent: AdHocDetectedForegroundAgent(
+                            kind: kindLabel, label: kindLabel, displayCommand: nil, launchCommand: launchCommand), workspace: workspace,
+                        sessionID: session.id, sessionKey: resumedAgentSessionKey)
+                }
+                return session
             }
-            return try launchWorkspaceCommandSession(
-                project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(command), kind: .agent,
-                defaultTitle: defaultTitle, workingDirectory: workingDirectory ?? workspace.dir, automationRunID: automationRunID,
-                launchCommand: recordedLaunchCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? trimmedCommand)
+        } catch {
+            if let launchedSessionID { teardownUnrecordedAgentSession(sessionID: launchedSessionID) }
+            throw error
         }
     }
 

@@ -8,6 +8,20 @@ import XCTest
 /// executable-token scan that makes the splice land after the real executable rather than after a
 /// leading environment assignment.
 final class CodingAgentResumeCommandTests: XCTestCase {
+    // MARK: - resumableSessionKey
+
+    /// The key a restore hands to the relaunched row is exactly the key the resume command resumes: trimmed,
+    /// and absent for an empty key, an unsupported command, or a one-shot run.
+    func testResumableSessionKeyIsTheTrimmedKeyOnlyWhenTheCommandResumesIt() {
+        XCTAssertEqual(CodingAgent.resumableSessionKey(launchCommand: "claude", sessionKey: " abc \n"), "abc")
+        XCTAssertEqual(CodingAgent.resumableSessionKey(launchCommand: "codex", sessionKey: "abc"), "abc")
+        XCTAssertNil(CodingAgent.resumableSessionKey(launchCommand: "claude", sessionKey: "  "))
+        XCTAssertNil(CodingAgent.resumableSessionKey(launchCommand: "claude", sessionKey: nil))
+        XCTAssertNil(CodingAgent.resumableSessionKey(launchCommand: "vim notes.txt", sessionKey: "abc"))
+        XCTAssertNil(CodingAgent.resumableSessionKey(launchCommand: #"codex exec "fix it""#, sessionKey: "abc"))
+        XCTAssertNil(CodingAgent.resumableSessionKey(launchCommand: #"claude -p "summarize""#, sessionKey: "abc"))
+    }
+
     // MARK: - Claude Code: --resume <key> right after the executable
 
     func testClaudeCodeInsertsResumeFlagAfterExecutableKeepingOtherFlags() {

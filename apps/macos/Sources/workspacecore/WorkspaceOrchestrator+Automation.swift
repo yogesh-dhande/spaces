@@ -67,6 +67,18 @@ extension WorkspaceOrchestrator {
 
     func automationTerminateSession(sessionID: String) { builtInTerminalSessionTerminator(sessionID) }
 
+    /// Tears down a coding-agent session that launched but whose launch is being reported as failed. Used
+    /// by the automation launch paths (a scheduled/manual fire and a session restore), where the orphan is
+    /// a live session stamped with the run id that keeps `automationHasLiveAttributedSession` true and
+    /// permanently blocks the automation's next agent fire, and by `createWorkspaceAgentSession` when the
+    /// restored row cannot be written. Goes through the agent-kill flow so a session that already
+    /// registered a row is finalized and its subscribers told, falling back to a plain termination for a
+    /// not-yet-signaled session. The kill is best-effort: it must not mask the error the caller is about to
+    /// propagate. Takes the workspace lifecycle gate, so callers must not hold it.
+    func teardownUnrecordedAgentSession(sessionID: String) {
+        if (try? killAgentSession(terminalSessionID: sessionID)) != true { automationTerminateSession(sessionID: sessionID) }
+    }
+
     /// `appendNewline: true` is the submit path: the session host's send chokepoint writes the text
     /// and the Enter that submits it, so every supported agent TUI runs the line. Routes through the
     /// process-wide input writer the daemon installs; with none installed (non-daemon callers, which never

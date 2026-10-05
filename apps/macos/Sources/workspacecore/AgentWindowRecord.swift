@@ -20,9 +20,11 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let sessionKey: String?
     public let status: AgentWindowStatus
     /// The agent's brief: one markdown document it writes about its own work (`spaces agent brief write`),
-    /// shown read-only beside its terminal. Nil when the agent has none. Like `userLabel`, it has exactly one
-    /// writer (`SQLiteStore.setAgentSessionBrief`) and is read-only on every other path: no upsert writes the
-    /// column, so a hook or detection write holding an older snapshot can never put back a brief the agent
+    /// shown read-only beside its terminal. Nil when the agent has none. A row with a conversation id
+    /// (`sessionKey`) reads the brief saved for that conversation, so it survives the row; a row without one
+    /// reads its own column and loses the brief with the row. Like `userLabel`, it has exactly one writer
+    /// (`SQLiteStore.setAgentSessionBrief`) and is read-only on every other path: no upsert carries it from
+    /// a record, so a hook or detection write holding an older snapshot can never put back a brief the agent
     /// has since replaced. A lifecycle path that rebuilds a record from an existing one still copies it
     /// across, for the reason `userLabel` gives.
     public let brief: String?

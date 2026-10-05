@@ -4,14 +4,18 @@
 # and a coding agent running when the daemon is asked to shut down (what a restart, a logout, and a
 # `launchctl stop` deliver) is captured by that shutdown. Answering either offer with Restore brings the
 # agent back resuming its own conversation, and a restored agent restores again on the same terms with one
-# resume selector rather than a stack of them.
+# resume selector rather than a stack of them. It also verifies that a restored agent brings its brief
+# back (the brief follows the conversation, so the restored row shows it before any hook signal), and that
+# answering an offer with Skip deletes the briefs of the conversations it discards.
 #
 # Everything runs on a throwaway profile under a temporary HOME, with `spacesd` launched directly (as in
 # e2e_daemon_signal_shutdown.sh) so this script can `kill -9` the daemon it owns without touching any
 # other profile's. The fixture agent is a symlink to zsh named `opencode`: the name is what the spawn
 # gate and the daemon's foreground classifier match on (the classifier reads argv[0], which carries the
 # symlink path), and it reports a conversation id through `spaces agent signal --agent-session`, exactly
-# as a real agent's hooks do.
+# as a real agent's hooks do, except when it is launched with a resume selector: like Codex, a resumed
+# agent reports nothing until it is prompted, so the conversation id a restored row carries has to come
+# from the restore itself.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,6 +42,10 @@ DEVICE_API_AUTH_TOKEN=""
 WORKSPACE_ID=""
 CAPTURED_SESSION_ID=""
 ORPHANED_CHILD_PID=""
+# The conversation the first fixture agent reports. Every restore resumes this same conversation, because
+# a restored agent reports nothing of its own.
+ORIGINAL_CONVERSATION=""
+BRIEF_TEXT="restore-e2e brief written before the kill"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -209,11 +217,14 @@ provision_fixture() {
 
   ln -sf /bin/zsh "$FIXTURE_DIR/bin/opencode"
   cat >"$FIXTURE_DIR/agent-probe.zsh" <<PROBE
-# Reports a conversation id of its own the way a real agent's hooks do (a resumed agent reports the
-# conversation it is on, which is what the next capture has to offer back), turns bracketed paste on the
-# way an agent TUI does when it takes the terminal over (spawn reads that as the interface being ready for
-# input), then blocks so the fixture stays the terminal's foreground process for detection to identify.
-"$SPACES_CLI" agent signal --agent-session "restore-e2e-\$SPACES_TERMINAL_TRACKING_ID" working >/dev/null 2>&1 || true
+# A fresh launch reports a conversation id of its own the way a real agent's hooks do. A launch carrying a
+# resume selector (the restore's \`-s <conversation>\` arrives as the first positional parameter) reports
+# nothing, like a resumed Codex before its first prompt. Then it turns bracketed paste on the way an agent
+# TUI does when it takes the terminal over (spawn reads that as the interface being ready for input), and
+# blocks so the fixture stays the terminal's foreground process for detection to identify.
+if (( \$# == 0 )); then
+  "$SPACES_CLI" agent signal --agent-session "restore-e2e-\$SPACES_TERMINAL_TRACKING_ID" working >/dev/null 2>&1 || true
+fi
 print -rn -- \$'\\e[?2004h'
 print -r -- "restore-e2e-agent-ready"
 read || true
@@ -224,17 +235,13 @@ PROBE
   FIXTURE_COMMAND="$FIXTURE_DIR/bin/opencode -c 'source $FIXTURE_DIR/agent-probe.zsh'"
 }
 
-# The conversation id the fixture agent in `session_id` reports, matching the probe above.
-conversation_id_for_session() {
-  printf 'restore-e2e-%s\n' "$1"
-}
-
 # Blocks until the daemon holds both facts a capture of the named session needs: the conversation id its
-# agent reported (what a restore resumes) and the agent kind its foreground classifier identified (what
-# the offer shows). Both arrive on their own schedule after the session starts.
+# agent row carries (what a restore resumes) and the agent kind its foreground classifier identified (what
+# the offer shows). For the first agent the conversation arrives from its signal; for a restored agent,
+# which signals nothing, it is on the row from the restore itself.
 wait_for_identified_agent() {
-  local session_id="$1" expected deadline stored=""
-  expected="$(conversation_id_for_session "$session_id")/opencode"
+  local session_id="$1" conversation="$2" expected deadline stored=""
+  expected="$conversation/opencode"
   deadline=$((SECONDS + 60))
   while [[ $SECONDS -lt $deadline ]]; do
     stored="$(db_query \
@@ -252,7 +259,12 @@ spawn_fixture_agent() {
   CAPTURED_SESSION_ID="$(json_field "$spawn_json" 'd.get("terminalSessionID")')"
   [[ -n "$CAPTURED_SESSION_ID" ]] || fail "spawn returned no terminal session: $spawn_json"
   ORPHANED_CHILD_PID="$(db_query "SELECT child_pid FROM terminal_runtime_states WHERE session_id = ?" "$CAPTURED_SESSION_ID")"
-  wait_for_identified_agent "$CAPTURED_SESSION_ID"
+  # The id the probe signals for a fresh launch (see provision_fixture).
+  ORIGINAL_CONVERSATION="restore-e2e-$CAPTURED_SESSION_ID"
+  wait_for_identified_agent "$CAPTURED_SESSION_ID" "$ORIGINAL_CONVERSATION"
+  local write_output
+  write_output="$("${PROFILE_ENV[@]}" "$SPACES_CLI" agent brief write --session "$CAPTURED_SESSION_ID" "$BRIEF_TEXT" 2>&1)" \
+    || fail "writing the fixture agent's brief failed: $write_output"
 }
 
 # The daemon that owns a session is the one whose exit ends it, and the session's runtime row records
@@ -276,8 +288,7 @@ stop_daemon() {
 # The restorable record this device holds, as the paired client reads it: the row for `session_id` and the
 # generation the answer has to name.
 assert_session_is_offered() {
-  local session_id="$1" expected_conversation status_response
-  expected_conversation="$(conversation_id_for_session "$session_id")"
+  local session_id="$1" status_response offered_conversation
   status_response="$(device_request daemonStatus)"
   python3 - "$status_response" "$session_id" "$WORKSPACE_ID" <<'PY' || fail "daemon status did not offer session $session_id: $status_response"
 import json
@@ -292,13 +303,18 @@ assert row["hasResumeKey"] is True, row
 assert row["agentKind"] == "opencode", row
 assert row["generation"], row
 PY
+  # A restored agent has signaled nothing, so the conversation it is offered back under can only have
+  # come from the row the restore created.
+  offered_conversation="$(db_query "SELECT agent_session_key FROM restorable_sessions WHERE session_id = ?" "$session_id")"
+  [[ "$offered_conversation" == "$ORIGINAL_CONVERSATION" ]] \
+    || fail "session $session_id is offered under '$offered_conversation' instead of '$ORIGINAL_CONVERSATION'"
   json_field "$status_response" 'd["result"]["daemonStatus"]["restorableSessions"][0]["generation"]'
 }
 
 # Restoring records the command the agent was originally started with, so restoring the replacement
 # again rewrites that original command instead of stacking a second resume selector onto the first.
 restore_offered_session() {
-  local session_id="$1" generation="$2" restore_response replacement conversation wrapped recorded selectors
+  local session_id="$1" generation="$2" conversation="$3" restore_response replacement wrapped recorded selectors restored_brief
   restore_response="$(device_request restoreSessions "{\"generation\":\"$generation\"}")"
   [[ "$(json_field "$restore_response" 'str(d["ok"])')" == "True" ]] || fail "restore failed: $restore_response"
   replacement="$(json_field "$restore_response" \
@@ -306,13 +322,16 @@ restore_offered_session() {
   [[ -n "$replacement" ]] || fail "restore returned no replacement session: $restore_response"
   [[ "$replacement" != "$session_id" ]] || fail "restore reported the captured session as its own replacement"
 
-  conversation="$(conversation_id_for_session "$session_id")"
   wrapped="$(db_query "SELECT command FROM terminal_sessions WHERE session_id = ?" "$replacement")"
   [[ "$wrapped" == *"-s $conversation"* ]] || fail "the restored agent was not asked to resume $conversation: '$wrapped'"
   selectors="$(printf '%s' "$wrapped" | grep -o -- "-s restore-e2e-" | wc -l | tr -d ' ')"
   [[ "$selectors" == "1" ]] || fail "the restored agent carries $selectors resume selectors: '$wrapped'"
   recorded="$(db_query "SELECT launch_command FROM terminal_sessions WHERE session_id = ?" "$replacement")"
   [[ "$recorded" == "$FIXTURE_COMMAND" ]] || fail "the restored session recorded '$recorded' instead of the original command"
+  # The restored agent has signaled nothing yet, so the brief it shows is the one its conversation kept.
+  restored_brief="$("${PROFILE_ENV[@]}" "$SPACES_CLI" agent brief read --session "$replacement" 2>&1)" \
+    || fail "the restored agent has no brief: $restored_brief"
+  [[ "$restored_brief" == "$BRIEF_TEXT" ]] || fail "the restored agent shows '$restored_brief' instead of the brief written before the kill"
   printf '%s\n' "$replacement"
 }
 
@@ -351,8 +370,8 @@ main() {
     || fail "restoring with a stale generation was accepted: $stale_response"
   pass "an answer naming a record this device no longer holds is refused"
 
-  restored_session_id="$(restore_offered_session "$CAPTURED_SESSION_ID" "$generation")"
-  pass "restore relaunched the agent resuming its own conversation"
+  restored_session_id="$(restore_offered_session "$CAPTURED_SESSION_ID" "$generation" "$ORIGINAL_CONVERSATION")"
+  pass "restore relaunched the agent resuming its own conversation, with its brief"
 
   local remaining
   remaining="$(db_query "SELECT COUNT(*) FROM restorable_sessions")"
@@ -361,7 +380,7 @@ main() {
 
   # The graceful shutdown: the daemon is asked to stop while the restored agent is running, which is what
   # a restart, a logout, and a `launchctl stop` deliver, and it captures before it ends the session.
-  wait_for_identified_agent "$restored_session_id"
+  wait_for_identified_agent "$restored_session_id" "$ORIGINAL_CONVERSATION"
   stop_daemon -TERM "$restored_session_id"
   start_daemon
   pass "the daemon shut down gracefully with a live coding agent and restarted"
@@ -370,12 +389,12 @@ main() {
   shutdown_generation="$(assert_session_is_offered "$restored_session_id")"
   pass "the shutdown captured the running agent for restore"
 
-  second_restored_session_id="$(restore_offered_session "$restored_session_id" "$shutdown_generation")"
-  pass "a restored agent restores again resuming its newest conversation"
+  second_restored_session_id="$(restore_offered_session "$restored_session_id" "$shutdown_generation" "$ORIGINAL_CONVERSATION")"
+  pass "a restored agent restores again resuming its conversation, with its brief"
 
   # The exec-in-place update: the daemon replaces its own image at the same pid and keeps running its
   # sessions, so it has nothing to offer back and records nothing.
-  wait_for_identified_agent "$second_restored_session_id"
+  wait_for_identified_agent "$second_restored_session_id" "$ORIGINAL_CONVERSATION"
   "${PROFILE_ENV[@]}" "$SPACES_CLI" daemon apply-update >/dev/null
   local deadline=$((SECONDS + 30))
   while ! daemon_owns_socket; do
@@ -388,7 +407,22 @@ main() {
     || fail "the exec handoff recorded sessions to restore, which its successor is still running"
   pass "an exec handoff hands its agents to the successor instead of offering them back"
 
-  "${PROFILE_ENV[@]}" "$SPACES_E2E" terminate-terminal-session "$second_restored_session_id" >/dev/null 2>&1 || true
+  # Skip: the daemon shuts down gracefully with the second restored agent running, and the offer it
+  # captures is answered with a discard instead of a restore. Skipping says those agents should stay
+  # gone, so the brief their conversation saved goes with them.
+  [[ "$(db_query "SELECT COUNT(*) FROM agent_conversation_briefs")" == "1" ]] \
+    || fail "the conversation's brief was not saved before the skip"
+  stop_daemon -TERM "$second_restored_session_id"
+  start_daemon
+  local skip_generation skip_response
+  skip_generation="$(assert_session_is_offered "$second_restored_session_id")"
+  skip_response="$(device_request discardRestorableSessions "{\"generation\":\"$skip_generation\"}")"
+  [[ "$(json_field "$skip_response" 'str(d["ok"])')" == "True" ]] || fail "skipping the offer failed: $skip_response"
+  [[ "$(db_query "SELECT COUNT(*) FROM restorable_sessions")" == "0" ]] || fail "the offer survived being skipped"
+  [[ "$(db_query "SELECT COUNT(*) FROM agent_conversation_briefs")" == "0" ]] \
+    || fail "skipping the offer left the skipped conversation's brief behind"
+  pass "skipping an offer deletes the briefs of the conversations it discards"
+
   printf 'Spaces session-restore E2E passed\n'
 }
 

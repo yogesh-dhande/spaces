@@ -26,12 +26,9 @@ extension CodingAgent {
     /// spacing in the rest of the command (a leading environment prefix, flags, a trailing prompt, the rest
     /// of a chain) survive untouched.
     public static func resumeCommand(launchCommand: String, sessionKey: String?) -> String {
-        guard let key = sessionKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return launchCommand }
-        guard let agent = matching(command: launchCommand) else { return launchCommand }
-        // A one-shot run takes no resume selector at all (see `launchIsOneShotJob`). The capture already
-        // drops such a command's conversation id so the offer says it comes back as a new run; this guard
-        // is what makes the rewrite itself total, for a caller that still holds one.
-        guard !launchIsOneShotJob(launchCommand: launchCommand) else { return launchCommand }
+        guard let key = resumableSessionKey(launchCommand: launchCommand, sessionKey: sessionKey), let agent = matching(command: launchCommand) else {
+            return launchCommand
+        }
         // Claude Code's `--session-id` names the id a NEW conversation is to be created under, and Claude
         // refuses it alongside `--resume`, so a command carrying one has it dropped: the relaunch is
         // resuming the conversation the capture named, not starting the one the original command asked for.
@@ -47,6 +44,19 @@ extension CodingAgent {
             let segment = CodingAgent.firstCommandSegmentRange(inCommand: command)
             return command.replacingCharacters(in: segment.upperBound..<segment.upperBound, with: " -s \(key)")
         }
+    }
+
+    /// The trimmed `sessionKey` when `resumeCommand` would actually resume it, else nil: the key is
+    /// non-empty, the command launches a supported agent, and the command is not a one-shot run, which
+    /// takes no resume selector at all (see `launchIsOneShotJob`). The capture already drops such a
+    /// command's conversation id so the offer says it comes back as a new run; the one-shot check here is
+    /// what makes the rewrite itself total, for a caller that still holds one. A restore hands this to the
+    /// relaunched row as its conversation id, so the row claims exactly the conversations the command
+    /// resumes and no other.
+    public static func resumableSessionKey(launchCommand: String, sessionKey: String?) -> String? {
+        guard let key = sessionKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
+        guard matching(command: launchCommand) != nil, !launchIsOneShotJob(launchCommand: launchCommand) else { return nil }
+        return key
     }
 
     /// Whether the command launches a run this rewrite must leave exactly as written rather than a

@@ -58,6 +58,10 @@ export default function RestartsDocsPage() {
           resumes), has no conversation to resume, so it comes back as another run of the same command
           instead.
         </Prose>
+        <Prose>
+          A resumed agent brings its <DocLink href="/docs/coding-agents#briefs">brief</DocLink> back
+          with it. Skipping deletes the briefs of the agents you skip.
+        </Prose>
       </Section>
 
       <Section id="updates" title="Updates">
