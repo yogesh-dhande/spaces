@@ -10123,9 +10123,18 @@
         /// no-ops on `isOwner`. Waiting for both puts the ownership grant last, which is where the rest of
         /// the test needs it. `latestState` is the signal for the read because it stays nil until that
         /// read lands.
+        ///
+        /// The third window is the cold open's twin of the redial case in `waitForRedialBootstrapToLand`
+        /// (issue #720): the ownerless bootstrap snapshot arms an automatic takeover in the same main-actor
+        /// turn that applies it, and that reclaim clears ownership and input readiness, holds the model
+        /// busy, and ends with a `takeover_confirmation` `.state` read stamped newer than the grant. A
+        /// grant made while it is in flight is taken back off, so `sendKey` no-ops on `isOwner` or
+        /// `acceptsInput` and the keystroke never reaches the transport. The flag clears once the
+        /// confirmation read has applied and is never set when no takeover is attempted, so those opens
+        /// return at once.
         private func waitForColdOpenToSettle(_ model: TerminalViewerModel) async {
-            await waitUntil("the cold open's stream to install and its bootstrap state read to land") {
-                model.hasInstalledStreamForTesting && model.latestState != nil
+            await waitUntil("the cold open's stream to install, its bootstrap state read to land, and the reclaim it starts to finish") {
+                model.hasInstalledStreamForTesting && model.latestState != nil && !model.hasAutomaticTakeoverInFlightForTesting
             }
         }
 
