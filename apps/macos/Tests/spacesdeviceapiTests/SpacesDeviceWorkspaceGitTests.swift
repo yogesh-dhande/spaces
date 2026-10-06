@@ -81,7 +81,13 @@ private func makeNestedSubmoduleSuperproject() throws -> NestedSubmoduleFixture 
 /// multi-word match stays one word, while the asterisks around it are left to glob. The sleep's output goes
 /// to `/dev/null` so the straggler cannot hold the captured pipe open after the caller's timeout kills the
 /// shim.
-private func makeGitInvocationRecorder(at directory: URL, log: URL, stall: (match: String, seconds: Int)? = nil) throws -> URL {
+///
+/// The client's metadata probes get 60s instead of the 2s default: the wrapper doubles every git spawn and
+/// these tests never exercise that cap, so a loaded machine must not fail them on it. The tick-budget stalls
+/// they do exercise run against the separate 30s shared budget.
+private func makeRecordingGitClient(
+    at directory: URL, log: URL, stall: (match: String, seconds: Int)? = nil
+) throws -> RemoteWorkspaceGitClient {
     let script = directory.appendingPathComponent("recording-git")
     let stallLine = stall.map { "case \"$*\" in *\"\($0.match)\"*) sleep \($0.seconds) >/dev/null 2>&1 ;; esac" } ?? ""
     try """
@@ -91,7 +97,7 @@ private func makeGitInvocationRecorder(at directory: URL, log: URL, stall: (matc
     exec /usr/bin/env git "$@"
     """.write(to: script, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-    return script
+    return RemoteWorkspaceGitClient(gitExecutable: script.path, metadataCommandTimeout: 60)
 }
 
 @discardableResult private func makeFixtureRepository(at url: URL, file: String, contents: String) throws -> URL {
@@ -958,7 +964,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         let fixture = try makeNestedSubmoduleSuperproject()
         defer { try? FileManager.default.removeItem(at: fixture.container) }
         let log = fixture.container.appendingPathComponent("git-invocations.log")
-        let client = RemoteWorkspaceGitClient(gitExecutable: try makeGitInvocationRecorder(at: fixture.container, log: log).path)
+        let client = try makeRecordingGitClient(at: fixture.container, log: log)
         let cache = RepositoryContributionCache()
 
         _ = try SpacesDeviceWorkspaceDiffEngine.scopeSignature(
@@ -2730,8 +2736,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         let fixture = try makeNestedSubmoduleSuperproject()
         defer { try? FileManager.default.removeItem(at: fixture.container) }
         let log = fixture.container.appendingPathComponent("git-invocations.log")
-        let client = RemoteWorkspaceGitClient(
-            gitExecutable: try makeGitInvocationRecorder(at: fixture.container, log: log, stall: (match: "/A/B ls-files", seconds: 20)).path)
+        let client = try makeRecordingGitClient(at: fixture.container, log: log, stall: (match: "/A/B ls-files", seconds: 20))
 
         // Most of the request's window is already spent when the listing starts, so the stalled command in
         // `A/B` runs past what is left of it rather than getting 30 seconds of its own.
@@ -3244,7 +3249,7 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         let fixture = try makeNestedSubmoduleSuperproject()
         defer { try? FileManager.default.removeItem(at: fixture.container) }
         let log = fixture.container.appendingPathComponent("git-invocations.log")
-        let client = RemoteWorkspaceGitClient(gitExecutable: try makeGitInvocationRecorder(at: fixture.container, log: log).path)
+        let client = try makeRecordingGitClient(at: fixture.container, log: log)
 
         let caches = SpacesDeviceWorkspaceFileListEngine.MembershipCaches()
         guard
@@ -3270,14 +3275,12 @@ private func commitFixtureAll(_ repo: URL, message: String) throws {
         let fixture = try makeNestedSubmoduleSuperproject()
         defer { try? FileManager.default.removeItem(at: fixture.container) }
         let submoduleLog = fixture.container.appendingPathComponent("submodule-stall.log")
-        let submoduleClient = RemoteWorkspaceGitClient(
-            gitExecutable: try makeGitInvocationRecorder(at: fixture.container, log: submoduleLog, stall: (match: "/A/B status", seconds: 5)).path)
+        let submoduleClient = try makeRecordingGitClient(
+            at: fixture.container, log: submoduleLog, stall: (match: "/A/B status", seconds: 5))
         let rootDirectory = fixture.container.appendingPathComponent("root-stall", isDirectory: true)
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
-        let rootClient = RemoteWorkspaceGitClient(
-            gitExecutable: try makeGitInvocationRecorder(
-                at: rootDirectory, log: rootDirectory.appendingPathComponent("root-stall.log"), stall: (match: "/super status", seconds: 5)
-            ).path)
+        let rootClient = try makeRecordingGitClient(
+            at: rootDirectory, log: rootDirectory.appendingPathComponent("root-stall.log"), stall: (match: "/super status", seconds: 5))
 
         // Most of the tick's window is already spent when these ticks start, so a five second stall outlasts
         // whatever is left of it wherever the stall happens to be.

@@ -45,6 +45,8 @@ let ghosttyKitTargetDependencies: [Target.Dependency] = [
 // XCTest/swift-testing helpers can `import spacestestsupport` without pulling `@testable` access
 // into shared code; only public API of its dependencies may be used here.
 let macTestSupportTargets: [Target] = [
+    // Installs a signal handler that prints the crash reason and stack of a dying test process.
+    .target(name: "spacestestcrashreport"),
     .target(
         name: "spacestestsupport",
         dependencies: ["workspacecore", "spacesterminalcore", "spacesdevicecore"]
@@ -297,7 +299,9 @@ let executableTargets: [Target] = [
         // fixture databases through the product's own types so it tests against the real schema.
         .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore", "ghosttyvtshim", "spacesdatabase", "spacesclientcore"]),
         .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty", "ghosttyvtshim"]),
-        .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
+        // One dependency on spacestestcrashreport covers the whole `swift test` process: SwiftPM links
+        // every test target into one test bundle, and the XCTest and Swift Testing runners both load it.
+        .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore", "spacestestcrashreport"]),
         .testTarget(name: "spacesdTests", dependencies: ["spacesd", "spacesterminalcore"]),
         .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
         .testTarget(
