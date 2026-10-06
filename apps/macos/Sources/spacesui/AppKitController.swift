@@ -90,6 +90,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// modal, so a path a test asserts never raises an error needs somewhere for a regression's error to
     /// land instead of blocking the run. Nil in production, so this changes nothing there.
     var showErrorOverrideForTesting: ((any Error) -> Void)?
+    /// Test-only override that replaces the dismissal request to a device, so a test can record which keys
+    /// each device is asked to dismiss without a daemon. Nil in production, so this changes nothing there.
+    var dismissAlertsOverrideForTesting: (([String], String) async -> Result<Void, Error>)?
     private var splitView: NSSplitView?
     let outlineView = SidebarOutlineView()
     lazy var sidebar = SidebarController(host: self)

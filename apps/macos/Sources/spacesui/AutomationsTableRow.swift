@@ -173,8 +173,7 @@ import spacesterminalcore
     /// next-run chip). A plain `NSControl` test would be wrong here: the row's labels are `NSTextField`s,
     /// which are controls too, and they cover most of the row the gesture is meant to serve.
     func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
-        let location = convert(event.locationInWindow, from: nil)
-        var hit = hitTest(location)
+        var hit = deepestView(at: event)
         while let view = hit, view !== self {
             if view is NSButton || view is NSSwitch { return false }
             hit = view.superview
