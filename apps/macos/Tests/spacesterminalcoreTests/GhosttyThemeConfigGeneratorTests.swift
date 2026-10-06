@@ -27,6 +27,12 @@ final class GhosttyThemeConfigGeneratorTests: XCTestCase {
         XCTAssertTrue(contents.contains("clipboard-write-limit-bytes = 1048576"))
     }
 
+    func testRootConfigCapsScrollbackAtTheClientReadBudgetUnderTheGhosttyKeyName() {
+        let contents = GhosttyThemeConfigGenerator.rootConfigContents(lightThemePath: "/l", darkThemePath: "/d")
+
+        XCTAssertTrue(contents.contains("\nscrollback-limit-bytes = \(TerminalScrollbackBudget.defaultMaxBytes)\n"))
+    }
+
     func testWriteConfigurationGeneratesFilesUnderConfigRootAndRegenerates() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

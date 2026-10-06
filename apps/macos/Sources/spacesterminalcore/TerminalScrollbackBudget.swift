@@ -1,5 +1,7 @@
 public enum TerminalScrollbackBudget {
-    /// Matches Ghostty's default `scrollback-limit`, which is measured in bytes.
+    /// Bytes of scrollback history, in Ghostty's `scrollback-limit-bytes` units. Both hosts are
+    /// configured with it (the macOS Ghostty config, the Linux `libghostty-vt` session) and it is the
+    /// most any client reads, so history a host keeps is always history a client can reach.
     public static let defaultMaxBytes = 10_000_000
 
     /// The transcript a client prefetches for its client-local scrollback replay right after a session's
