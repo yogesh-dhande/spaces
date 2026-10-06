@@ -1157,7 +1157,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 /// Covers `CodePaneContentController`'s hibernation seam: `contentView` is a stable container that
 /// survives the controller's whole lifetime, while the `WKWebView` itself is created by `activate()` and
 /// torn down by `deactivate()` — the expensive resource a hidden tab must not keep alive.
-@MainActor @Suite(.serialized) struct CodePaneContentControllerTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(1))) struct CodePaneContentControllerTests {
     // Held by the suite instance (Swift Testing gives each test its own), not created inline as a
     // call-site temporary: `CodePaneContentController.hosting` is `weak`, so a temporary with no
     // other strong reference would be deallocated the instant `init` returns.
@@ -3740,10 +3740,18 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(await gateway.fileListSignatureSubscribeAttemptCount() == 1)
 
         // The woken retry rescheduled itself (a second sleep); releasing it drives the real reconnect.
+        // The held attempt must finish discarding its dead handle (and clear its in-flight marker)
+        // before the retry runs: a retry that sees the marker still set schedules a third retry
+        // instead of reconnecting.
         await sleeper.waitForRequestedCount(2)
-        _ = await gateway.completeHeldFileListSignatureSubscribeCall(at: 0)
+        let attempt = content.fileListSignatureSubscribeAttemptTask
+        let deadHandle = await gateway.completeHeldFileListSignatureSubscribeCall(at: 0)
+        await attempt?.value
+        #expect(deadHandle.stopCount == 1)
+        let secondRetry = content.fileListSignatureReconnectTask
         sleeper.releaseNext()
-        await gateway.waitForFileListSignatureSubscribeAttemptCount(2)
+        await secondRetry?.value
+        await content.fileListSignatureSubscribeAttemptTask?.value
         #expect(await gateway.fileListSignatureSubscribeAttemptCount() == 2)
     }
 

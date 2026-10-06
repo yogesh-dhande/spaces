@@ -222,6 +222,10 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
     var diffSignatureReconnectTask: Task<Void, Never>?
     var fileSignatureReconnectTask: Task<Void, Never>?
     var fileListSignatureReconnectTask: Task<Void, Never>?
+    /// The most recent file-list-signature subscribe attempt. Internal so a test can order a retry
+    /// against the attempt's completion: a retry that runs before the attempt clears its in-flight
+    /// marker schedules another retry instead of seeing the dead handle discarded.
+    var fileListSignatureSubscribeAttemptTask: Task<Void, Never>?
 
     /// Bumped on every `workspaceFileRead` call whose dispatch is a NAVIGATION — i.e. it changes which
     /// path the pane is showing (`pathChanged == true`), as opposed to a same-path reread of the file
@@ -3138,7 +3142,7 @@ enum CodePaneInitialModePolicy: Equatable, Sendable {
             attemptState.markDisconnected()
             Task { @MainActor in self?.handleFileListSignatureDisconnect(subscriptionGeneration: subscriptionGeneration) }
         }
-        Task { [weak self] in
+        fileListSignatureSubscribeAttemptTask = Task { [weak self] in
             do {
                 let client = try await deviceGateway.subscribeWorkspaceFileListSignature(
                     workspaceID: workspaceID, device: device, onFrame: onFrame, onDisconnect: onDisconnect)
