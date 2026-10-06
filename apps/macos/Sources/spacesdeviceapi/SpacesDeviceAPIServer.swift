@@ -3956,7 +3956,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
         if error is SpacesDevicePairingError { return .unauthorized }
-        // The daemon's host is missing the Spaces CLI every hook command needs; the request was well
+        // The daemon's host has no installed Spaces CLI, which every hook command needs; the request was well
         // formed, so this is the host lacking a capability rather than a client mistake.
         if error is AgentHookInstallerError { return .capabilityMissing }
         return SpacesDeviceWireErrorClassification.errorCode(error)

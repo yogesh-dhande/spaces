@@ -60,18 +60,19 @@
 
         @discardableResult private func install(
             _ kinds: [CodingAgent], home: URL, fileManager: FileManager? = nil, shell: ShellProbeSpy = ShellProbeSpy(),
-            codex: FakeCodexAppServer = FakeCodexAppServer()
+            codex: FakeCodexAppServer = FakeCodexAppServer(), environment: [String: String]? = nil
         ) throws -> AgentHookInstallOutcome {
             try AgentHookInstaller.install(
-                kinds, home: home, fileManager: fileManager ?? HomeScopedFileManager(home: home), environment: environment,
+                kinds, home: home, fileManager: fileManager ?? HomeScopedFileManager(home: home), environment: environment ?? self.environment,
                 shellPathDirectoryResolver: shell.resolver, codexAppServer: codex.launcher)
         }
 
         private func status(
-            home: URL, fileManager: FileManager? = nil, shell: ShellProbeSpy = ShellProbeSpy(), codex: FakeCodexAppServer = FakeCodexAppServer()
+            home: URL, fileManager: FileManager? = nil, shell: ShellProbeSpy = ShellProbeSpy(), codex: FakeCodexAppServer = FakeCodexAppServer(),
+            environment: [String: String]? = nil
         ) -> [AgentHookStatus] {
             AgentHookInstaller.status(
-                home: home, fileManager: fileManager ?? HomeScopedFileManager(home: home), environment: environment,
+                home: home, fileManager: fileManager ?? HomeScopedFileManager(home: home), environment: environment ?? self.environment,
                 shellPathDirectoryResolver: shell.resolver, codexAppServer: codex.launcher)
         }
 
@@ -110,7 +111,8 @@
         }
 
         /// Every install resolves the Spaces CLI to embed in the hook commands, so a home that has agents
-        /// but no `spaces` cannot install anything. Tests that install put both in `~/.local/bin`.
+        /// but no installed `spaces` cannot install anything. Tests that install give it an installed Spaces
+        /// and put the agents in `~/.local/bin`.
         private func makeAgentsAvailable(_ kinds: [CodingAgent], home: URL) throws {
             try makeSpacesCLIAvailable(home: home)
             for name in Set(kinds.flatMap(\.executableNames)) {
@@ -164,11 +166,31 @@
             exit 64
             """#
 
-        @discardableResult private func makeSpacesCLIAvailable(home: URL) throws -> URL {
-            try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: home.appendingPathComponent(".local/bin", isDirectory: true))
+        /// Installs Spaces the way the macOS app does: the CLI lives in an app bundle and `~/.spaces/bin/spaces`
+        /// links to it. The bundle sits under the fixture home, so no test touches `/Applications`.
+        @discardableResult private func makeSpacesCLIAvailable(home: URL, bundleName: String = "Spaces.app") throws -> URL {
+            let bundleCLI = try makeExecutable(
+                name: AgentHookCommand.spacesExecutableName,
+                directory: home.appendingPathComponent("Applications/\(bundleName)/Contents/Resources", isDirectory: true))
+            let link = installedCLILink(home: home)
+            try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: link)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: bundleCLI)
+            return bundleCLI
         }
 
-        private func spacesCLIPath(home: URL) -> String { home.appendingPathComponent(".local/bin/\(AgentHookCommand.spacesExecutableName)").path }
+        private func installedCLILink(home: URL) -> URL { home.appendingPathComponent(".spaces/bin/\(AgentHookCommand.spacesExecutableName)") }
+
+        /// The path hooks name for the installed CLI: the bundle the link points into.
+        private func spacesCLIPath(home: URL) -> String { installedCLILink(home: home).resolvingSymlinksInPath().path }
+
+        /// A `spaces` built into a repo checkout, which a repo-built daemon finds first because it prepends
+        /// its own executable directory to PATH. Returns the PATH that finds it.
+        private func makeDevBuildCLI(home: URL) throws -> (path: String, environment: [String: String]) {
+            let directory = home.appendingPathComponent("work/apps/macos/.build/debug", isDirectory: true)
+            let cli = try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: directory)
+            return (cli.path, ["PATH": directory.path])
+        }
 
         @discardableResult private func makeExecutable(name: String, directory: URL, contents: String = "#!/bin/sh\n") throws -> URL {
             let file = directory.appendingPathComponent(name)
@@ -616,9 +638,8 @@
             try (read(configURL) + userTable).write(to: configURL, atomically: true, encoding: .utf8)
             let approved = withoutSpacesMCPServer(read(configURL))
 
-            try FileManager.default.removeItem(atPath: spacesCLIPath(home: home))
-            let movedCLI = try makeExecutable(
-                name: AgentHookCommand.spacesExecutableName, directory: home.appendingPathComponent("bin", isDirectory: true))
+            try makeSpacesCLIAvailable(home: home, bundleName: "Moved.app")
+            let movedCLI = URL(fileURLWithPath: spacesCLIPath(home: home))
             #expect(codexInstallState(home: home) == .outdated)
 
             try install([.codex], home: home)
@@ -1134,9 +1155,7 @@
             defer { try? FileManager.default.removeItem(at: home) }
             let shimDirectory = home.appendingPathComponent(".asdf/shims", isDirectory: true)
             try makeExecutable(name: "codex", directory: shimDirectory, contents: Self.codexFeatureCLIScript)
-            // `spaces` lives there too, so resolving it, resolving codex, and the trailing status all ride
-            // the same probe rather than spawning a shell each.
-            try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: shimDirectory)
+            try makeSpacesCLIAvailable(home: home)
             let shell = ShellProbeSpy(directories: [shimDirectory.path])
 
             let outcome = try install([.codex], home: home, shell: shell)
@@ -1186,35 +1205,121 @@
             #expect(!contents.contains("\"command\" : \"spaces agent signal"))
         }
 
-        @Test func installedLinuxReleasePathUsesTheStableSpacesCLI() throws {
-            let home = try makeHome()
-            defer { try? FileManager.default.removeItem(at: home) }
-            let releaseBin = home.appendingPathComponent(".spaces/daemon/releases/1.2.3/bin", isDirectory: true)
-            try makeExecutable(name: "spaces", directory: releaseBin)
-            try makeExecutable(name: "claude", directory: releaseBin)
-            let stableCLI = try makeExecutable(name: "spaces", directory: home.appendingPathComponent(".spaces/bin", isDirectory: true))
+        // MARK: - Hooks always call the installed Spaces CLI
 
-            let outcome = try AgentHookInstaller.install(
-                [.claudeCode], home: home, fileManager: HomeScopedFileManager(home: home), environment: ["PATH": releaseBin.path],
-                shellPathDirectoryResolver: ShellProbeSpy().resolver, codexAppServer: FakeCodexAppServer().launcher)
-
-            #expect(outcome.failures.isEmpty)
-            #expect(read(home.appendingPathComponent(".claude/settings.json")).contains("'\(stableCLI.path)' agent signal"))
+        private func hookFiles(home: URL) -> [URL] {
+            [
+                home.appendingPathComponent(".claude/settings.json"), home.appendingPathComponent(".codex/hooks.json"),
+                home.appendingPathComponent(".codex/config.toml"), home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"),
+            ]
         }
 
-        @Test func installedLinuxReleasePathFailsWhenTheStableSpacesCLIIsMissing() throws {
+        /// A repo-built daemon prepends its own build directory to PATH, so its `spaces` is found first.
+        /// Hooks written from it would send the installed app's agents to the development profile.
+        @Test func installWritesTheInstalledCLIEvenWhenADevBuildCLIIsFirstOnPath() throws {
             let home = try makeHome()
             defer { try? FileManager.default.removeItem(at: home) }
-            let releaseBin = home.appendingPathComponent(".spaces/daemon/releases/1.2.3/bin", isDirectory: true)
-            try makeExecutable(name: "spaces", directory: releaseBin)
-            try makeExecutable(name: "claude", directory: releaseBin)
+            try makeAgentsAvailable(CodingAgent.allCases, home: home)
+            let dev = try makeDevBuildCLI(home: home)
+            let installed = spacesCLIPath(home: home)
 
-            #expect(throws: AgentHookInstallerError.spacesCLINotFound) {
-                try AgentHookInstaller.install(
-                    [.claudeCode], home: home, fileManager: HomeScopedFileManager(home: home), environment: ["PATH": releaseBin.path],
-                    shellPathDirectoryResolver: ShellProbeSpy().resolver, codexAppServer: FakeCodexAppServer().launcher)
+            let outcome = try install(CodingAgent.allCases, home: home, environment: dev.environment)
+
+            #expect(outcome.failures.isEmpty)
+            let claude = read(home.appendingPathComponent(".claude/settings.json"))
+            let codex = read(home.appendingPathComponent(".codex/hooks.json"))
+            let opencode = read(home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"))
+            #expect(claude.contains("'\(installed)' agent signal"))
+            #expect(codex.contains("'\(installed)' agent signal"))
+            #expect(opencode.contains("const SPACES_CLI = \"\(installed)\""))
+            for contents in [claude, codex, opencode] { #expect(!contents.contains(dev.path)) }
+            #expect(codexMCPEntry(home: home)?["command"] as? String == installed)
+        }
+
+        /// The installed macOS app's daemon finds the CLI beside its own symlink-resolved executable in the
+        /// bundle, so the path it has always written is the bundle's `spaces`.
+        @Test func installedAppInstallWritesTheBundledCLIPath() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.claudeCode], home: home)
+            let bundleCLI = home.appendingPathComponent("Applications/Spaces.app/Contents/Resources/spaces").resolvingSymlinksInPath().path
+
+            try install([.claudeCode], home: home)
+
+            #expect(read(home.appendingPathComponent(".claude/settings.json")).contains("'\(bundleCLI)' agent signal"))
+        }
+
+        @Test func installRefusesWithoutAnInstalledCLIAndLeavesEveryConfigUntouched() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable(CodingAgent.allCases, home: home)
+            let dev = try makeDevBuildCLI(home: home)
+            try FileManager.default.removeItem(at: installedCLILink(home: home))
+            let files = hookFiles(home: home)
+            let userConfigs = ["{ \"model\": \"opus\" }\n", "{}\n", "[features]\nhooks = true\n", "// user plugin\n"]
+            for (file, contents) in zip(files, userConfigs) {
+                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try contents.write(to: file, atomically: true, encoding: .utf8)
             }
-            #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".claude").path))
+
+            #expect(throws: AgentHookInstallerError.spacesCLINotFound) { try install(CodingAgent.allCases, home: home, environment: dev.environment) }
+
+            #expect(files.map(read) == userConfigs)
+        }
+
+        @Test func theNotFoundMessageSaysSpacesMustBeInstalledFirst() {
+            #expect(AgentHookInstallerError.spacesCLINotFound.errorDescription?.contains("Install Spaces first") == true)
+        }
+
+        /// Hooks a development build wrote name its CLI. They read out of date for every agent so Update is
+        /// offered, and a reinstall moves them to the installed CLI.
+        @Test func hooksPoisonedWithADevBuildCLIReadOutdatedUntilReinstalled() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable(CodingAgent.allCases, home: home)
+            let dev = try makeDevBuildCLI(home: home)
+            let installed = spacesCLIPath(home: home)
+            try install(CodingAgent.allCases, home: home)
+            try trust(.codex, home: home)
+            #expect(status(home: home).allSatisfy { $0.installState == .current })
+
+            for file in hookFiles(home: home).filter({ $0.pathExtension != "toml" }) {
+                try read(file).replacingOccurrences(of: installed, with: dev.path).write(to: file, atomically: true, encoding: .utf8)
+            }
+
+            let poisoned = status(home: home, environment: dev.environment)
+            #expect(poisoned.map(\.installState) == [.outdated, .outdated, .outdated])
+
+            try install(CodingAgent.allCases, home: home, environment: dev.environment)
+            try trust(.codex, home: home)
+            #expect(status(home: home, environment: dev.environment).allSatisfy { $0.installState == .current })
+            #expect(!read(home.appendingPathComponent(".claude/settings.json")).contains(dev.path))
+            #expect(!read(home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js")).contains(dev.path))
+        }
+
+        /// A development daemon on a machine with the installed app reports the installed app's hooks as
+        /// current, so its launch setup step has nothing to offer.
+        @Test func aDevDaemonReadsTheInstalledAppsHooksAsCurrent() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable(CodingAgent.allCases, home: home)
+            try install(CodingAgent.allCases, home: home)
+            try trust(.codex, home: home)
+            let dev = try makeDevBuildCLI(home: home)
+
+            #expect(status(home: home, environment: dev.environment).allSatisfy { $0.installState == .current })
+        }
+
+        /// `NSHomeDirectory()` ignores an overridden `HOME`, which let an isolated-home process act on the
+        /// real account's agent configs.
+        @Test func defaultHomeFollowsAnOverriddenHOME() throws {
+            let isolated = try makeHome()
+            defer { try? FileManager.default.removeItem(at: isolated) }
+            let previousHome = getenv("HOME").map { String(cString: $0) }
+            setenv("HOME", isolated.path, 1)
+            defer { if let previousHome { setenv("HOME", previousHome, 1) } else { unsetenv("HOME") } }
+
+            #expect(AgentHookInstaller.defaultHome().standardizedFileURL.path == isolated.standardizedFileURL.path)
         }
 
         @Test func hookCommandShellQuotesAPathContainingSpaces() {
@@ -1473,7 +1578,7 @@
             defer { try? FileManager.default.removeItem(at: home) }
             let realBinDirectory = home.appendingPathComponent("real-agent-bin", isDirectory: true)
             try makeExecutable(name: "codex", directory: realBinDirectory, contents: Self.codexFeatureCLIScript)
-            try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: realBinDirectory)
+            try makeSpacesCLIAvailable(home: home)
             let laterDirectory = home.appendingPathComponent("later-bin", isDirectory: true)
             try makeExecutable(name: "codex", directory: laterDirectory, contents: "#!/bin/sh\nexit 1\n")
             let multishellParent = home.appendingPathComponent("multishell", isDirectory: true)
@@ -1490,32 +1595,5 @@
             #expect(outcome.agents.first { $0.kind == .codex }?.installState == .awaitingTrust)
         }
 
-        /// The companion contract: when the per-shell directory is never deleted (the common case: most
-        /// users have no exit hook that removes it), the resolver
-        /// must still prefer that original path over the canonical one, because that is the exact path a
-        /// hook config's persisted `spaces` command already names.
-        @Test func executableResolvedThroughASurvivingPerShellSymlinkKeepsItsOriginalPathOverTheCanonicalOne() throws {
-            let home = try makeHome()
-            defer { try? FileManager.default.removeItem(at: home) }
-            let realBinDirectory = home.appendingPathComponent("real-agent-bin", isDirectory: true)
-            try makeExecutable(name: "claude", directory: realBinDirectory)
-            try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: realBinDirectory)
-            let multishellParent = home.appendingPathComponent("multishell", isDirectory: true)
-            let fakeLoginShell = try makeEphemeralMultishellLoginShell(
-                home: home, multishellParent: multishellParent, realBinDirectory: realBinDirectory, deleteOnExit: false)
-
-            let outcome = try AgentHookInstaller.install(
-                [.claudeCode], home: home, fileManager: HomeScopedFileManager(home: home),
-                environment: ["PATH": "/usr/bin:/bin", "SHELL": fakeLoginShell.path],
-                shellPathDirectoryResolver: AgentHookInstaller.loginShellPathDirectories, codexAppServer: FakeCodexAppServer().launcher)
-
-            #expect(outcome.failures.isEmpty)
-            let settings = read(home.appendingPathComponent(".claude/settings.json"))
-            // The persisted command names the per-shell symlink path (still under `multishellParent`):
-            // `ExecutableResolver` tries original directories before canonical ones, and the original
-            // directory here was never deleted, so it wins.
-            #expect(settings.contains(multishellParent.path))
-            #expect(!settings.contains(realBinDirectory.path))
-        }
     }
 #endif

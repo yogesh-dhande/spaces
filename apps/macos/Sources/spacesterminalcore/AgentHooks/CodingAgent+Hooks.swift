@@ -117,21 +117,26 @@ extension CodingAgent {
     /// are ordered by what fixes them. Entries an older Spaces wrote, or the feature flag being off, are
     /// `.outdated` because reinstalling fixes both, and reinstalling first is what makes the trust
     /// question worth asking, since it is the entries this build writes that the user is asked to trust.
-    func configState(home: URL, fileManager: FileManager, agentExecutablePath: String?) -> AgentHookInstallState {
+    ///
+    /// Every agent's hook commands must name `spacesExecutablePath`, the installed CLI, to read `current`.
+    func configState(home: URL, fileManager: FileManager, agentExecutablePath: String?, spacesExecutablePath: String?) -> AgentHookInstallState {
         switch self {
         case .claudeCode:
             return AgentHookJSONWriter.installState(
-                fileURL: configDirectoryURL(home: home).appendingPathComponent("settings.json"), bindings: jsonEventBindings, fileManager: fileManager
-            )
+                fileURL: configDirectoryURL(home: home).appendingPathComponent("settings.json"), bindings: jsonEventBindings,
+                spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         case .codex:
             let codexDir = configDirectoryURL(home: home)
             let json = AgentHookJSONWriter.installState(
-                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings, fileManager: fileManager)
+                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings, spacesExecutablePath: spacesExecutablePath,
+                fileManager: fileManager)
             guard json != .notInstalled else { return .notInstalled }
             guard let agentExecutablePath else { return .outdated }
             let enabled = AgentHookCodexFeatureToggle.isEnabled(executablePath: agentExecutablePath, codexHome: codexDir)
             return json == .current && enabled ? .current : .outdated
-        case .opencode: return AgentHookOpencodePluginWriter.installState(pluginURL: opencodePluginURL(home: home), fileManager: fileManager)
+        case .opencode:
+            return AgentHookOpencodePluginWriter.installState(
+                pluginURL: opencodePluginURL(home: home), spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         }
     }
 

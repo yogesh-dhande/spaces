@@ -65,14 +65,13 @@ public struct AgentHookInstallOutcome: Sendable, Equatable, Codable {
 
 /// A failure that stops the whole install request rather than one agent's share of it.
 public enum AgentHookInstallerError: Error, LocalizedError, Sendable, Equatable {
-    /// Every hook command invokes the Spaces CLI by absolute path, so without it there is nothing
-    /// worth writing: the hooks would install and then silently never fire.
+    /// Every hook command invokes the installed Spaces CLI by absolute path, so without an installed
+    /// Spaces there is nothing worth writing: the hooks would install and then silently never fire.
     case spacesCLINotFound
 
     public var errorDescription: String? {
         switch self {
-        case .spacesCLINotFound:
-            return "Cannot install hooks because the `spaces` CLI was not found on this machine. Install the Spaces CLI, then retry."
+        case .spacesCLINotFound: return "Cannot install hooks because Spaces is not installed on this machine. Install Spaces first, then retry."
         }
     }
 }
@@ -125,7 +124,9 @@ public enum AgentHookInstaller {
             home: home, fileManager: fileManager, executableResolver: &executableResolver, codexAppServer: AgentHookCodexAppServer.launchProcess)
     }
 
-    public static func defaultHome() -> URL { URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true) }
+    /// The profile's home, which honors an overridden `HOME`. `NSHomeDirectory()` ignores it, so an
+    /// isolated-home process (an E2E lane) would otherwise read and write the real account's agent configs.
+    public static func defaultHome() -> URL { SpacesProfile.currentHomeDirectory() }
 
     // MARK: - Test seams
     //
@@ -191,8 +192,9 @@ public enum AgentHookInstaller {
         _ kinds: [CodingAgent], home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver,
         codexAppServer: AgentHookCodexAppServer.Launcher
     ) throws -> AgentHookInstallOutcome {
-        guard let spacesExecutablePath = hookSpacesExecutablePath(home: home, fileManager: fileManager, executableResolver: &executableResolver)
-        else { throw AgentHookInstallerError.spacesCLINotFound }
+        guard let spacesExecutablePath = AgentHookInstalledCLI.path(home: home, fileManager: fileManager) else {
+            throw AgentHookInstallerError.spacesCLINotFound
+        }
         var failures: [AgentHookInstallFailure] = []
         for kind in kinds {
             guard let agentExecutablePath = resolvedExecutablePath(for: kind, executableResolver: &executableResolver) else {
@@ -216,8 +218,9 @@ public enum AgentHookInstaller {
         _ kind: CodingAgent, home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver,
         codexAppServer: AgentHookCodexAppServer.Launcher
     ) throws -> AgentHookInstallOutcome {
-        guard let spacesExecutablePath = hookSpacesExecutablePath(home: home, fileManager: fileManager, executableResolver: &executableResolver)
-        else { throw AgentHookInstallerError.spacesCLINotFound }
+        guard let spacesExecutablePath = AgentHookInstalledCLI.path(home: home, fileManager: fileManager) else {
+            throw AgentHookInstallerError.spacesCLINotFound
+        }
         var failures: [AgentHookInstallFailure] = []
         if kind != .codex {
             failures.append(.init(kind: kind, message: "\(kind.displayName) does not ask to trust its hooks."))
@@ -258,15 +261,16 @@ public enum AgentHookInstaller {
     private static func status(
         home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver, codexAppServer: AgentHookCodexAppServer.Launcher
     ) -> [AgentHookStatus] {
-        CodingAgent.allCases.map { kind in
+        let spacesExecutablePath = AgentHookInstalledCLI.path(home: home, fileManager: fileManager)
+        return CodingAgent.allCases.map { kind in
             let executablePath = resolvedExecutablePath(for: kind, executableResolver: &executableResolver)
-            var installState = kind.configState(home: home, fileManager: fileManager, agentExecutablePath: executablePath)
+            var installState = kind.configState(
+                home: home, fileManager: fileManager, agentExecutablePath: executablePath, spacesExecutablePath: spacesExecutablePath)
             var untrustedEntries: [AgentHookEntry] = []
             if kind == .codex, installState == .current, let executablePath {
-                // Without a `spaces` CLI to resolve there is no command to match the entries against,
+                // Without an installed `spaces` CLI there is no command to match the entries against,
                 // and an install, which this state offers, is what reports the missing CLI.
-                if let spacesExecutablePath = hookSpacesExecutablePath(home: home, fileManager: fileManager, executableResolver: &executableResolver)
-                {
+                if let spacesExecutablePath {
                     let reading = AgentHookCodexTrust.status(
                         codexExecutablePath: executablePath, codexHome: kind.configDirectoryURL(home: home),
                         spacesExecutablePath: spacesExecutablePath, launcher: codexAppServer)
@@ -350,25 +354,6 @@ public enum AgentHookInstaller {
         ]
     }
 
-    /// The `spaces` path this device's hook commands carry, or nil when no CLI resolves.
-    private static func hookSpacesExecutablePath(home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver) -> String? {
-        guard let resolvedPath = executableResolver.resolve(named: AgentHookCommand.spacesExecutableName) else { return nil }
-        return hookSpacesExecutablePath(resolvedPath: resolvedPath, home: home, fileManager: fileManager)
-    }
-
-    /// Linux releases live under a versioned directory, but the installer also maintains one stable
-    /// CLI symlink. Persisting the release path in an agent config would pin hooks to an old CLI after
-    /// the daemon updates. Normalize only this known installed layout; development and other CLI paths
-    /// remain the exact executable the resolver found.
-    private static func hookSpacesExecutablePath(resolvedPath: String, home: URL, fileManager: FileManager) -> String? {
-        let releasesPath = home.appendingPathComponent(".spaces/daemon/releases", isDirectory: true).standardizedFileURL.path
-        let candidatePath = URL(fileURLWithPath: resolvedPath).standardizedFileURL.path
-        guard candidatePath.hasPrefix(releasesPath + "/") else { return candidatePath }
-
-        let stablePath = home.appendingPathComponent(".spaces/bin/spaces").standardizedFileURL.path
-        return fileManager.isExecutableFile(atPath: stablePath) ? stablePath : nil
-    }
-
     private static func orderedUnique(_ directories: [String]) -> [String] {
         var seen: Set<String> = []
         var result: [String] = []
@@ -435,8 +420,7 @@ public enum AgentHookInstaller {
 
         /// Each original PATH directory immediately followed by its canonical (symlink-resolved) form,
         /// in PATH order. `ExecutableResolver` dedups this list and checks it in order, so an original
-        /// directory that still exists wins over its own canonical form (keeping the exact path a hook
-        /// config persists for the `spaces` CLI unchanged), the canonical form is only a fallback for
+        /// directory that still exists wins over its own canonical form, the canonical form is only a fallback for
         /// that same directory (such as fnm's per-shell multishell symlink, deleted by the shell between
         /// printing its PATH and the resolver checking it), and PATH precedence across distinct
         /// directories is preserved: a directory later on PATH is never checked before an earlier
