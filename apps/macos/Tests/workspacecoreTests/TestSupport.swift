@@ -135,9 +135,13 @@ private func bindTestPlaceholderSocket(port: Int) -> Int32? {
 /// Candidates start above `PortRange.default` and stay below the OS ephemeral range (49152+ on macOS)
 /// that outgoing connections draw from, so a probe here neither collides with a real daemon's
 /// reservations nor races the kernel handing the same port to an unrelated socket mid-probe.
+///
+/// Each call starts from its own claimed slot (`claimTestPortSlot`), so fixtures running at the same time
+/// never share a range. They must not: allocation probes the machine, so a fixture whose range overlaps
+/// another's live placeholder sockets would allocate around them and get different ports than it expects.
 func probeBindablePortRange(count: Int = 4) throws -> PortRange {
-    var base = 31000
-    while base + count < 49000 {
+    for _ in 0..<testPortSlotCount {
+        let base = try claimTestPortSlot()
         var boundFDs: [Int32] = []
         defer { for fd in boundFDs { Darwin.close(fd) } }
         var allBound = true
@@ -149,9 +153,31 @@ func probeBindablePortRange(count: Int = 4) throws -> PortRange {
             boundFDs.append(fd)
         }
         if allBound { return PortRange(start: base, end: base + count - 1) }
-        base += 100
     }
     throw XCTSkip("No contiguous bindable port range found for test fixtures.")
+}
+
+/// 100-port slots between 31000 and 49000.
+private let testPortSlotCount = (49000 - 31000) / 100
+
+/// Returns the first port of the next slot, round robin, from a counter file every test process shares under
+/// an exclusive lock. Parallel test workers are separate processes, so an in-process counter alone would
+/// still hand two workers the same slot.
+private func claimTestPortSlot() throws -> Int {
+    let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("spaces-test-port-slot")
+    let fd = open(path, O_RDWR | O_CREAT, 0o644)
+    guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { Darwin.close(fd) }
+    guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { flock(fd, LOCK_UN) }
+    var buffer = [UInt8](repeating: 0, count: 32)
+    let readCount = read(fd, &buffer, buffer.count)
+    let claimed = readCount > 0 ? Int(String(decoding: buffer.prefix(readCount), as: UTF8.self)) ?? 0 : 0
+    let next = Array(String((claimed + 1) % testPortSlotCount).utf8)
+    guard ftruncate(fd, 0) == 0, pwrite(fd, next, next.count, 0) == next.count else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    return 31000 + (claimed % testPortSlotCount) * 100
 }
 
 /// Seeds `store`'s port-allocation range with a contiguous range this test process has just verified it

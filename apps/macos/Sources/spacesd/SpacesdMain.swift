@@ -2305,11 +2305,12 @@ enum SpacesDaemonErrorClassification {
         do {
             let orchestrator = try makeProfileOrchestrator()
             let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
-            try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: true)
+            let outcome = try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: true)
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
             let profile = TerminalServiceProfileCommandResponse(
                 message: restartIfRunning ? "Workspace restarted." : "Workspace is running.",
-                workspace: profileWorkspaceRecord(workspace, projectKind: try profileWorkspaceProjectKind(workspace, orchestrator: orchestrator)))
+                workspace: profileWorkspaceRecord(workspace, projectKind: try profileWorkspaceProjectKind(workspace, orchestrator: orchestrator)),
+                notice: outcome.notice)
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return Self.failureResponse(error) }
     }

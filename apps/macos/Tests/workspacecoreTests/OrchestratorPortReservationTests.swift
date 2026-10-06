@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 import spacesterminalcore
@@ -92,6 +93,51 @@ extension OrchestratorTests {
         XCTAssertTrue(
             PortReserver.shared.reservedPorts().isDisjoint(with: assignedPorts),
             "A reserved ad-hoc terminal launch must release the workspace's assigned ports before it is spawned.")
+    }
+
+    /// The foreign holder shares the port the way another profile's placeholder or an opted-in server does
+    /// (`SO_REUSEPORT`), which is why it can sit beside this profile's placeholder and why Start must find
+    /// it only after the placeholders are released.
+    func testStartingAStoppedWorkspaceWhoseAssignedPortIsHeldStartsAndReportsTheHolder() throws {
+        let (orchestrator, store, workspace, assignedPorts) = try makePortReservationWorkspace()
+        let port = try XCTUnwrap(assignedPorts.first)
+        try PortReservationReconciler(store: store).reconcile()
+        let holder = try XCTUnwrap(openTestSocket(.reusePortListener, port: port, listening: true))
+        addTeardownBlock { holder.close() }
+
+        let outcome = try orchestrator.launchWorkspace(workspaceID: workspace.id)
+
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertEqual(try store.workspacePorts(workspaceID: workspace.id), [port], "An assigned port is never moved.")
+        var name = [CChar](repeating: 0, count: 256)
+        proc_name(getpid(), &name, UInt32(name.count))
+        XCTAssertEqual(
+            outcome.notice,
+            "web's port \(port) is in use by \(String(cString: name)) (pid \(getpid())), so web's requests may reach that program instead.")
+    }
+
+    /// Restarting a workspace that is stopped is a start, so it reports a held port like Start does.
+    func testRestartingAStoppedWorkspaceWhoseAssignedPortIsHeldReportsTheHolder() throws {
+        let (orchestrator, store, workspace, assignedPorts) = try makePortReservationWorkspace()
+        let port = try XCTUnwrap(assignedPorts.first)
+        try PortReservationReconciler(store: store).reconcile()
+        let holder = try XCTUnwrap(openTestSocket(.reusePortListener, port: port, listening: true))
+        addTeardownBlock { holder.close() }
+
+        let outcome = try orchestrator.restartWorkspace(workspaceID: workspace.id)
+
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertTrue(try XCTUnwrap(outcome.notice).hasPrefix("web's port \(port) is in use by "))
+    }
+
+    func testStartingAStoppedWorkspaceWithFreePortsReportsNothing() throws {
+        let (orchestrator, store, workspace, _) = try makePortReservationWorkspace()
+        try PortReservationReconciler(store: store).reconcile()
+
+        let outcome = try orchestrator.launchWorkspace(workspaceID: workspace.id)
+
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertNil(outcome.notice)
     }
 
     /// A stopped workspace with one assigned service port and a stubbed terminal launcher. `onLaunch` runs

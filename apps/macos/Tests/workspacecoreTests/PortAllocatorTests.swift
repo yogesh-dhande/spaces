@@ -13,21 +13,23 @@ final class PortAllocatorTests: XCTestCase {
         let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(workspace: workspaceA)
         try store.upsert(workspace: workspaceB)
-        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001], names: ["reserved-api", "reserved-web"])
+        // New assignments probe the machine, so the range is one this process has just found free.
+        let range = try probeBindablePortRange(count: 4)
+        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [range.start, range.start + 1], names: ["reserved-api", "reserved-web"])
 
         let allocator = PortAllocator(store: store)
         let definitions = [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")]
-        let ports = try allocator.allocatePorts(workspaceID: workspaceB.id, definitions: definitions, range: PortRange(start: 20000, end: 20003))
+        let ports = try allocator.allocatePorts(workspaceID: workspaceB.id, definitions: definitions, range: range)
 
-        XCTAssertEqual(ports, [20002, 20003])
+        XCTAssertEqual(ports, [range.start + 2, range.start + 3])
         let stored = try store.workspacePorts(workspaceID: workspaceB.id)
-        XCTAssertEqual(stored, [20002, 20003])
+        XCTAssertEqual(stored, [range.start + 2, range.start + 3])
         let named = try store.workspacePortsNamed(workspaceID: workspaceB.id)
         XCTAssertEqual(named.count, 2)
         XCTAssertEqual(named[0].name, "api")
-        XCTAssertEqual(named[0].port, 20002)
+        XCTAssertEqual(named[0].port, range.start + 2)
         XCTAssertEqual(named[1].name, "web")
-        XCTAssertEqual(named[1].port, 20003)
+        XCTAssertEqual(named[1].port, range.start + 3)
     }
 
     func testAllocateThrowsWhenInsufficientPorts() throws {
@@ -77,16 +79,16 @@ final class PortAllocatorTests: XCTestCase {
 
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20010], names: ["api"])
+        let range = try probeBindablePortRange(count: 4)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [range.start], names: ["api"])
 
         let allocator = PortAllocator(store: store)
         let ports = try allocator.syncPorts(
-            workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")],
-            range: PortRange(start: 20010, end: 20020))
+            workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")], range: range)
 
-        XCTAssertEqual(ports, [20010, 20011])
+        XCTAssertEqual(ports, [range.start, range.start + 1])
         let named = try store.workspacePortsNamed(workspaceID: workspace.id)
-        XCTAssertEqual(named.map(\.port), [20010, 20011])
+        XCTAssertEqual(named.map(\.port), [range.start, range.start + 1])
         XCTAssertEqual(named.map(\.name), ["api", "web"])
     }
 
@@ -102,15 +104,16 @@ final class PortAllocatorTests: XCTestCase {
         let api = ServiceDefinition(id: "port-api", name: "api")
         let web = ServiceDefinition(id: "port-web", name: "web")
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [api])
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20010], names: [api.name], definitionIDs: [api.id])
+        let range = try probeBindablePortRange(count: 4)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [range.start], names: [api.name], definitionIDs: [api.id])
 
         let allocator = PortAllocator(store: store)
-        let ports = try allocator.syncPorts(workspaceID: workspace.id, definitions: [web, api], range: PortRange(start: 20010, end: 20020))
+        let ports = try allocator.syncPorts(workspaceID: workspace.id, definitions: [web, api], range: range)
 
-        XCTAssertEqual(ports, [20011, 20010])
+        XCTAssertEqual(ports, [range.start + 1, range.start])
         let assigned = try store.workspacePortsAssigned(workspaceID: workspace.id)
         XCTAssertEqual(assigned.map(\.name), [web.name, api.name])
-        XCTAssertEqual(assigned.map(\.port), [20011, 20010])
+        XCTAssertEqual(assigned.map(\.port), [range.start + 1, range.start])
         XCTAssertEqual(assigned.map(\.definitionID), [web.id, api.id])
     }
 
@@ -137,5 +140,51 @@ final class PortAllocatorTests: XCTestCase {
         XCTAssertEqual(named.map(\.port), [20001])
         XCTAssertEqual(named.map(\.name), ["frontend"])
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: workspace.id).map(\.definitionID), [web.id])
+    }
+
+    func testAllocateSkipsPortsSomethingIsListeningOn() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        try store.upsert(project: project)
+        let holder = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(workspace: holder)
+        try store.upsert(workspace: workspace)
+        let range = try probeBindablePortRange(count: 5)
+
+        // The lowest port has a foreign listener and the next is assigned to another workspace.
+        let listener = try XCTUnwrap(openTestSocket(.ipv4Any, port: range.start, listening: true))
+        addTeardownBlock { listener.close() }
+        try store.setWorkspacePorts(workspaceID: holder.id, ports: [range.start + 1], names: ["held"])
+
+        let ports = try PortAllocator(store: store).allocatePorts(
+            workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")], range: range)
+
+        XCTAssertEqual(ports, [range.start + 2, range.start + 3])
+    }
+
+    func testSyncPortsSkipsPortsSomethingIsListeningOnButKeepsExistingAssignments() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(workspace: workspace)
+        let range = try probeBindablePortRange(count: 5)
+
+        // The existing assignment is held by a foreign listener and still stays with the workspace.
+        let listener = try XCTUnwrap(openTestSocket(.ipv4Loopback, port: range.start, listening: true))
+        let nextListener = try XCTUnwrap(openTestSocket(.ipv4Any, port: range.start + 1, listening: true))
+        addTeardownBlock {
+            listener.close()
+            nextListener.close()
+        }
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [range.start], names: ["api"])
+
+        let ports = try PortAllocator(store: store).syncPorts(
+            workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")], range: range)
+
+        XCTAssertEqual(ports, [range.start, range.start + 2])
     }
 }
