@@ -95,10 +95,10 @@ jobs:
       - name: Upload Linux spacesd artifact
         uses: actions/upload-artifact@v4
         with:
-          name: spacesd-ubuntu-24.04-${{ matrix.arch }}
+          name: spacesd-linux-${{ matrix.arch }}
           path: |
-            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz
-            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz.sha256
+            dist/linux/spacesd-linux-${{ matrix.arch }}.tar.gz
+            dist/linux/spacesd-linux-${{ matrix.arch }}.tar.gz.sha256
 
   release:
     needs: linux-spacesd-artifact
@@ -290,22 +290,22 @@ jobs:
       - name: Download Linux x86_64 spacesd artifact
         uses: actions/download-artifact@v4
         with:
-          name: spacesd-ubuntu-24.04-x86_64
+          name: spacesd-linux-x86_64
           path: dist/remote
 
       - name: Download Linux arm64 spacesd artifact
         uses: actions/download-artifact@v4
         with:
-          name: spacesd-ubuntu-24.04-arm64
+          name: spacesd-linux-arm64
           path: dist/remote
 
       - name: Verify remote spacesd artifacts
         run: |
           cd dist/remote
-          shasum -a 256 -c spacesd-ubuntu-24.04-x86_64.tar.gz.sha256
-          shasum -a 256 -c spacesd-ubuntu-24.04-arm64.tar.gz.sha256
-          tar -tzf spacesd-ubuntu-24.04-x86_64.tar.gz >/dev/null
-          tar -tzf spacesd-ubuntu-24.04-arm64.tar.gz >/dev/null
+          shasum -a 256 -c spacesd-linux-x86_64.tar.gz.sha256
+          shasum -a 256 -c spacesd-linux-arm64.tar.gz.sha256
+          tar -tzf spacesd-linux-x86_64.tar.gz >/dev/null
+          tar -tzf spacesd-linux-arm64.tar.gz >/dev/null
 
       - name: Install remote artifact signing dependency
         run: python3 -m pip install --user --break-system-packages cryptography
@@ -332,10 +332,10 @@ jobs:
             "$DMG_PATH"
             "$ZIP_PATH"
             "dist/updates/appcast.xml"
-            "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz"
-            "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
-            "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz"
-            "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz.sha256"
+            "dist/remote/spacesd-linux-x86_64.tar.gz"
+            "dist/remote/spacesd-linux-x86_64.tar.gz.sha256"
+            "dist/remote/spacesd-linux-arm64.tar.gz"
+            "dist/remote/spacesd-linux-arm64.tar.gz.sha256"
             "dist/remote/spaces-remote-artifacts.json"
             "dist/remote/spaces-remote-artifacts.json.sig"
           )

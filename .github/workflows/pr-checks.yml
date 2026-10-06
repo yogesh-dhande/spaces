@@ -250,6 +250,9 @@ jobs:
             "$builder_image" \
             bash -lc 'apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
 
+      - name: Smoke the artifact on other Linux distributions
+        run: apps/macos/scripts/smoke_linux_spacesd_artifact_on_distros.sh --arch ${{ matrix.arch }}
+
       # The artifact build above stages the Linux libghostty-vt into .local/ghosttyvt/lib-linux,
       # which is exactly what the unit lane needs; one architecture's run suffices for unit
       # coverage. The named volumes start empty on a fresh runner — the lane builds its own
@@ -269,10 +272,10 @@ jobs:
       - name: Upload Linux spacesd artifact
         uses: actions/upload-artifact@v7
         with:
-          name: spacesd-ubuntu-24.04-${{ matrix.arch }}
+          name: spacesd-linux-${{ matrix.arch }}
           path: |
-            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz
-            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz.sha256
+            dist/linux/spacesd-linux-${{ matrix.arch }}.tar.gz
+            dist/linux/spacesd-linux-${{ matrix.arch }}.tar.gz.sha256
 
   # The single required check. Every other job is skippable (a docs-only change runs none of them),
   # and a skipped job reports nothing at all -- branch protection reads that as forever-pending, not

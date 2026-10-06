@@ -1,7 +1,7 @@
 import Foundation
 
 /// The single user-runnable Linux install/upgrade path. Renders the one-liner a user runs on an
-/// Ubuntu 24.04 device to install or update the Spaces daemon. The install script is served at
+/// Linux device to install or update the Spaces daemon. The install script is served at
 /// `usespaces.dev/install.sh` (the web build's prebuild copies `scripts/spaces-install-linux.sh`
 /// into the published site); it is not a per-release GitHub asset. SSH provisioning is Linux-only and
 /// client-initiated: the client runs this installer over SSH during a user-initiated pairing and from

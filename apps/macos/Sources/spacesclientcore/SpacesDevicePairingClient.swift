@@ -132,11 +132,6 @@ public enum SpacesDevicePairingClient {
         os="$(uname -s 2>/dev/null || true)"
         arch="$(uname -m 2>/dev/null || true)"
         printf 'os=%s\narch=%s\n' "$os" "$arch"
-        if [ "$os" = "Linux" ]; then
-          linux_id="$(awk -F= '$1=="ID"{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
-          linux_version_id="$(awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
-          printf 'linux_id=%s\nlinux_version_id=%s\n' "$linux_id" "$linux_version_id"
-        fi
         """#
 
     public static func pairRemoteDevice(_ request: SpacesRemoteDevicePairingRequest) throws -> SpacesRemoteDevicePairingResult {
@@ -437,9 +432,7 @@ public enum SpacesDevicePairingClient {
             throw SpacesRemoteDevicePairingError.remoteInstallPreflightFailed(
                 "SSH connected to \(destination), but the remote Spaces install check returned invalid output.")
         }
-        return RemoteInstallProbe(
-            operatingSystem: operatingSystem, architecture: normalized(pairs["arch"]), linuxID: normalized(pairs["linux_id"]),
-            linuxVersionID: normalized(pairs["linux_version_id"]))
+        return RemoteInstallProbe(operatingSystem: operatingSystem, architecture: normalized(pairs["arch"]))
     }
 
     private static func normalizedSSHHost(_ value: String) throws -> String {
@@ -642,7 +635,7 @@ public enum SpacesDevicePairingClient {
     /// and the copyable one-liner beside it; a remote Mac has no such path, so its guidance asks the user
     /// to install and open the Spaces app on the device.
     static func installGuidanceMessage(lead: String, probe: RemoteInstallProbe) -> String {
-        if probe.operatingSystem == "Linux" { return "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again." }
+        if probe.operatingSystem == "Linux" { return "\(lead) Install or update Spaces on the Linux device, then pair again." }
         return "\(lead) Install the Spaces app on the remote Mac, open it once, then pair again."
     }
 
@@ -911,8 +904,6 @@ struct RemotePairCommand: Equatable, Sendable {
 struct RemoteInstallProbe: Equatable, Sendable {
     let operatingSystem: String
     let architecture: String?
-    let linuxID: String?
-    let linuxVersionID: String?
 }
 
 // Kept internal (not `private`) rather than `private` to this file: the JSON round-trip test in

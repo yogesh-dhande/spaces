@@ -140,7 +140,7 @@ export const faqItems: FaqItem[] = [
       <ul className="ml-4 list-disc space-y-1">
         <li>macOS 14 Sonoma or later</li>
         <li>Google Chrome, used for browser sessions</li>
-        <li>Ubuntu 24.04 for a Linux server</li>
+        <li>A Linux server (Ubuntu, Debian, Fedora, or AlmaLinux) with systemd</li>
         <li>iOS 17 or later for the iPhone beta</li>
       </ul>
     ),
@@ -169,7 +169,7 @@ export const faqItems: FaqItem[] = [
     question: "Can I run agents on another Mac or a Linux server?",
     answer: (
       <>
-        Yes. Pair another Mac or a Linux server (Ubuntu 24.04) over SSH. Each machine runs the Spaces service and shows up as
+        Yes. Pair another Mac or a Linux server (Ubuntu, Debian, Fedora, AlmaLinux) over SSH. Each machine runs the Spaces service and shows up as
         its own section in the sidebar, so you manage its projects,
         workspaces, terminals, and agents from the Mac in front of you.
         Sessions run on that service, so a remote build or agent keeps

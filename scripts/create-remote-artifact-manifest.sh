@@ -37,8 +37,8 @@ manifest_path = pathlib.Path(manifest_path)
 signature_path = pathlib.Path(signature_path)
 
 specs = [
-    ("spacesd-ubuntu-24.04-x86_64", "ubuntu-24.04", "x86_64", "spacesd-ubuntu-24.04-x86_64.tar.gz"),
-    ("spacesd-ubuntu-24.04-arm64", "ubuntu-24.04", "arm64", "spacesd-ubuntu-24.04-arm64.tar.gz"),
+    ("spacesd-linux-x86_64", "linux", "x86_64", "spacesd-linux-x86_64.tar.gz"),
+    ("spacesd-linux-arm64", "linux", "arm64", "spacesd-linux-arm64.tar.gz"),
 ]
 
 artifacts = []

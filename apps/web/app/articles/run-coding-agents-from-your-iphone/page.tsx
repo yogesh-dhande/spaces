@@ -277,7 +277,7 @@ const article: ArticleData = {
             "**No push notifications.** Spaces does not notify your phone when an agent finishes or gets stuck. The Alerts tab lists blocked and finished agents, exited processes and terminals, terminal bells, failed or timed-out automation runs, and rows you marked Come Back Later across every paired machine, with a badge count, but you see it when you open the app. If push matters most to you, Remote Control, Codex Remote, and the SSH-plus-push setups all have it.",
             "**A question in plain text reads as done.** An agent that asks you something in its output, rather than through a permission prompt, shows as done instead of blocked, because no hook fires for a plain-text question. Check Done as well as Blocked.",
             "**Invite-only TestFlight beta.** The app runs on iPhone and iPad with iOS 17 or later. [Ask for an invite](/docs/ios#availability) by opening an issue on GitHub.",
-            "**Apple clients only.** The clients are the Mac app and the iPhone and iPad app. There is no Android, Windows, or web client. Agents run on Macs and Linux servers (Ubuntu 24.04).",
+            "**Apple clients only.** The clients are the Mac app and the iPhone and iPad app. There is no Android, Windows, or web client. Agents run on Macs and Linux servers (Ubuntu, Debian, Fedora, AlmaLinux).",
             "**Some things stay on the Mac.** Installing the status hooks and creating or editing automations happen in the Mac app."
           ]
         }
