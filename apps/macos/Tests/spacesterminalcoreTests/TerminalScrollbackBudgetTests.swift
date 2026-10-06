@@ -3,7 +3,7 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalScrollbackBudgetTests: XCTestCase {
-    func testDefaultMaxBytesMatchesGhosttyDefaultScrollbackLimit() { XCTAssertEqual(TerminalScrollbackBudget.defaultMaxBytes, 10_000_000) }
+    func testDefaultMaxBytesIsTenMegabytes() { XCTAssertEqual(TerminalScrollbackBudget.defaultMaxBytes, 10_000_000) }
 
     func testDefaultMaxBytesCanHoldLargeRemoteScrollFixture() {
         let fixtureLineCount = 6000
