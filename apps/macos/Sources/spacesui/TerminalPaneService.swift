@@ -643,8 +643,10 @@ import workspacecore
             // The Mac's paired-device pane always wants the screen on an acknowledgment that carries state.
             // `DeviceTerminalSessionStateModel.apply` orders every payload by `emittedAt`, so a frameless
             // acknowledgment that outran the transfer's own broadcast would make the pane discard that
-            // broadcast as older and leave it holding no frame for the new owner epoch.
-            includesRenderUpdate: true)
+            // broadcast as older and leave it holding no frame for the new owner epoch. A heartbeat is the
+            // exception: the pane reads only whether the daemon still holds its client, so a screen on it
+            // would be a full snapshot export every interval, discarded.
+            includesRenderUpdate: action != .heartbeat)
     }
 
     /// Whether a pane's keep-alive heartbeat should keep running after the daemon answered it. Only the

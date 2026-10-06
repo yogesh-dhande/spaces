@@ -543,8 +543,8 @@ import workspacecore
                 isFromHiddenWorkspace: isFromHiddenWorkspace,
                 items: [
                     AppKitController.AlertsAttentionEntry(
-                        attentionID: "alert:\(workspaceID)", kind: .bell, icon: "terminal", iconTint: .terminal, label: "shell-1", detail: nil, shortcut: "",
-                        processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                        attentionID: "alert:\(workspaceID)", kind: .bell, icon: "terminal", iconTint: .terminal, label: "shell-1", detail: nil,
+                        shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
                         focusRequest: .terminalSession(workspaceID: workspaceID, sessionID: "session-1"))
                 ])
         }
@@ -697,8 +697,9 @@ import workspacecore
             projects: overview.projects, workspaces: overview.workspaces, sessions: [], dismissedAlertKeys: [exitKey])
         let dismissedAlerts = AlertsController.buildOverviewAlertsGroups(from: dismissedOverview, deviceID: "local")
         let dismissedRow = try #require(
-            CommandPaletteController.buildCommandPaletteItems(overview: dismissedOverview, alertsGroups: dismissedAlerts)
-                .first { $0.source == .workspaceTarget && $0.kind == .process })
+            CommandPaletteController.buildCommandPaletteItems(overview: dismissedOverview, alertsGroups: dismissedAlerts).first {
+                $0.source == .workspaceTarget && $0.kind == .process
+            })
         guard case .idle = dismissedRow.status else {
             Issue.record("expected an acknowledged exit to read as idle")
             return
@@ -767,8 +768,9 @@ import workspacecore
                 isFromHiddenWorkspace: false,
                 items: [
                     AppKitController.AlertsAttentionEntry(
-                        attentionID: "remote-bell-alert", kind: .bell, icon: "terminal", iconTint: .terminal, label: "shell-1", detail: "  vim remote.swift  ",
-                        shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil, focusRequest: focusRequest)
+                        attentionID: "remote-bell-alert", kind: .bell, icon: "terminal", iconTint: .terminal, label: "shell-1",
+                        detail: "  vim remote.swift  ", shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                        focusRequest: focusRequest)
                 ])
         ]
 
@@ -1387,6 +1389,17 @@ import workspacecore
 
         #expect(request.action == .takeover)
         #expect(request.includesRenderUpdate)
+    }
+
+    /// A pane's keep-alive heartbeat only renews the lease and reads the daemon's verdict on it; asking
+    /// for the screen would make the daemon export a full snapshot every 20 s per pane just to discard it.
+    @Test func deviceTerminalControlRequestAsksForNoScreenOnAHeartbeat() throws {
+        let control = TerminalControlRequest(command: .heartbeat(TerminalControlClientPayload(clientID: "mac-client")))
+
+        let request = try TerminalPaneService.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .heartbeat)
+        #expect(!request.includesRenderUpdate)
     }
 
     @Test func deviceTerminalControlRequestCarriesMouseButtonAndPointerToTheDaemon() throws {

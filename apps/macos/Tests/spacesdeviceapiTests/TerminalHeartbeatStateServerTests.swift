@@ -47,6 +47,36 @@
             }
         }
 
+        /// A heartbeat that wants no screen (a pane's periodic keep-alive) still gets the session's state
+        /// back, read as metadata only so the core exports no snapshot for it.
+        func testHeartbeatWithoutARenderUpdateReadsMetadataOnly() throws {
+            try withTemporaryProfile { _ in
+                let sessionID = "session-heartbeat-metadata-\(UUID().uuidString)"
+                let paths = try seedRunningSession(sessionID: sessionID)
+
+                let controlServer = TerminalControlServer(
+                    socketPath: paths.controlSocketPath, queue: DispatchQueue(label: "spaces.device.api.heartbeat-metadata.test")
+                ) { _ in TerminalControlResponse(ok: true, message: "Renewed lease.") }
+                try controlServer.start()
+                defer { controlServer.stop() }
+
+                let observedRead = OneShotStateReadRecorder()
+                let response = try send(
+                    command: .terminalControl(
+                        SpacesDeviceTerminalControlRequest(
+                            action: .heartbeat, sessionID: sessionID, clientID: "client-heartbeat-metadata", includesRenderUpdate: false)),
+                    liveTerminalSessionStateProvider: { requestedSessionID, requestedRead in
+                        observedRead.record(requestedRead)
+                        guard requestedSessionID == sessionID else { return nil }
+                        return Self.statePayload(sessionID: sessionID)
+                    })
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertEqual(response.sessionState?.sessionID, sessionID)
+                XCTAssertEqual(observedRead.value, .metadataOnly)
+            }
+        }
+
         /// A viewer whose lease the daemon expired while the app was suspended gets the error it already
         /// routes to a reattach, with no state to mistake for a live session's.
         func testRejectedHeartbeatCarriesNoSessionState() throws {
