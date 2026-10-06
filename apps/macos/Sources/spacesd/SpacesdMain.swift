@@ -467,8 +467,26 @@ enum SpacesDaemonErrorClassification {
         // Reconcile stale runtime rows AFTER handoff adoption so the adopted sessions are exempt: the
         // sweep repairs any live-state row that claims this pid but was not adopted, which is the backstop
         // for a predecessor's exited-state write that was dropped across `execv` (see recoverStaleSessions).
-        try recoverStaleSessions(adoptedSessionIDs: adoptedSessionIDs)
+        let strandedSessionIDs = try recoverStaleSessions(adoptedSessionIDs: adoptedSessionIDs)
+        settleAlertsForSessionsEndedByDaemonExit(strandedSessionIDs: strandedSessionIDs, adoptedSessionIDs: adoptedSessionIDs)
         try await startSharedServices()
+    }
+
+    /// Settles what the previous daemon's exit ended (see `DaemonExitAlertSettle`). After stale recovery,
+    /// whose repairs it reads, and before `startSharedServices`, which starts the process-exit monitor
+    /// that would otherwise run on-exit policy for the released process rows and opens the listeners that
+    /// would serve the alerts.
+    ///
+    /// A failure is logged rather than thrown: the settle only spares the user alerts, and a device must
+    /// still start and serve its sessions without it. The record stays for the next start to retry.
+    private func settleAlertsForSessionsEndedByDaemonExit(strandedSessionIDs: [String], adoptedSessionIDs: Set<String>) {
+        #if canImport(spacesdeviceapi)
+            do {
+                try DaemonExitAlertSettle.settle(
+                    store: try SQLiteStore(path: try DatabaseLocator.defaultPath()), strandedSessionIDs: strandedSessionIDs,
+                    adoptedSessionIDs: adoptedSessionIDs)
+            } catch { writeStandardError("spacesd daemon_exit_settle_failed error=\(Self.errorMessage(error))\n") }
+        #endif
     }
 
     /// Starts the shared (non-per-session) services. Shared by the normal `start()` tail and the
@@ -847,6 +865,7 @@ enum SpacesDaemonErrorClassification {
         // engine queue) and is refused instead of leaking a child `exit(0)` never reaps. Monotonic: the
         // process exits, so it is never cleared.
         shutdownInProgress = true
+        await recordSessionsEndedByShutdown()
         await drainLiveSessionPersistenceForCapture()
         captureRestorableSessionsForShutdown()
         await stopSharedServices()
@@ -867,6 +886,19 @@ enum SpacesDaemonErrorClassification {
         // SQLite's busy timeout plus the bounded exited-state retry, so a blocking drain is acceptable.
         for core in terminatedCores { await core.drainPersistenceForShutdown() }
         await awaitSessionExitRunningFlagReconciles()
+    }
+
+    /// Names the sessions this shutdown is about to end, so the next daemon start can settle them (see
+    /// `DaemonExitAlertSettle`). First in `shutdown()`, before anything is terminated: a kill landing
+    /// after the terminate would otherwise leave `.exited` rows that stale recovery never reports as
+    /// stranded, and a logout gives shutdown only a few seconds. The snapshot hops the engine with the
+    /// async `run`, like the termination below. A failure is logged rather than thrown, for the reason
+    /// `captureRestorableSessionsForShutdown()` gives.
+    private func recordSessionsEndedByShutdown() async {
+        let sessionIDs = await TerminalEngineActor.run { Array(self.sessionCores.keys) }
+        do {
+            try WorkspaceOrchestrator(store: try SQLiteStore(path: try DatabaseLocator.defaultPath())).recordSessionsEndedByDaemonShutdown(sessionIDs)
+        } catch { writeStandardError("spacesd shutdown_session_record_failed error=\(Self.errorMessage(error))\n") }
     }
 
     /// Suspends until every running-flag reconcile a natural session exit queued has finished, so `exit(0)`
@@ -3537,7 +3569,7 @@ enum SpacesDaemonErrorClassification {
     /// write rows, and this runs ahead of `installProcessWideOrchestratorHooks` anyway. It also runs ahead
     /// of `startSharedServices`, so it is the only party in this process that can hold a workspace
     /// lifecycle gate and it lands before either request listener opens.
-    private func recoverStaleSessions(adoptedSessionIDs: Set<String> = []) throws {
+    private func recoverStaleSessions(adoptedSessionIDs: Set<String> = []) throws -> [String] {
         let orchestrator = WorkspaceOrchestrator(store: try SQLiteStore(path: try DatabaseLocator.defaultPath()))
         let result = try orchestrator.recoverStaleTerminalSessions(
             adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: handoffGeneration != 0, isProcessAlive: { Self.isProcessAlive(pid: Int($0)) })
@@ -3546,6 +3578,7 @@ enum SpacesDaemonErrorClassification {
         // strand is observable rather than silent.
         for sessionID in result.unrepaired { writeStandardError("spacesd stale_session_repair_failed session=\(sessionID)\n") }
         captureRestorableSessions(strandedSessionIDs: result.sessionsStrandedByUncleanExit)
+        return result.sessionsStrandedByUncleanExit
     }
 
     /// Writer two of the restorable record: the coding agents an unclean exit stranded, named by the

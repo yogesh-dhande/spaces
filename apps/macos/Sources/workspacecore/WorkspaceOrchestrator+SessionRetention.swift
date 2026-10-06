@@ -83,7 +83,7 @@ extension WorkspaceOrchestrator {
     /// deletes the process's tracked terminal window (matched exactly as `stopRunningProcess` does), the
     /// `running_processes` row, then marks the workspace stopped if it has no remaining tracked runtime
     /// indicators. No termination is issued — the process is gone.
-    private func releaseEndedRunningProcessRow(_ process: RunningProcessRecord) throws {
+    func releaseEndedRunningProcessRow(_ process: RunningProcessRecord) throws {
         let workspaceID = process.workspaceID
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
             try store.deleteWindow(id: terminalWindow.id)
