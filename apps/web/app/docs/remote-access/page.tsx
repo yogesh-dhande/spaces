@@ -48,8 +48,10 @@ export default function RemoteAccessDocsPage() {
         <p className={paragraphClass}>
           The installer registers <InlineCode>spacesd.service</InlineCode> as a systemd user service and
           starts it, and enables lingering (<InlineCode>loginctl enable-linger</InlineCode>) so it keeps
-          running after you disconnect, without a login session open. Ubuntu 24.04 on x86_64 or arm64 is
-          supported.
+          running after you disconnect, without a login session open. It is tested on Ubuntu 24.04 and
+          26.04, Debian 13, Fedora 43, and AlmaLinux 10, on x86_64 or arm64. Other Linux distributions
+          with glibc 2.38 or newer and systemd should work but are not tested. The installer checks
+          these requirements and stops without installing anything if the machine does not meet them.
         </p>
         <p className={paragraphClass}>
           To pair another Mac instead, install the Mac app there the same way you installed it on this

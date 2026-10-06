@@ -132,9 +132,7 @@ import workspacecore
     /// building the pane.
     nonisolated static func expansion(after current: DeviceRowExpansion?, activating activated: DeviceRowExpansion, currentPanelIsLive: Bool)
         -> DeviceRowExpansion?
-    {
-        current == activated && currentPanelIsLive ? nil : activated
-    }
+    { current == activated && currentPanelIsLive ? nil : activated }
 
     /// True while a remote-device connect or install attempt is running. The add-remote disclosure stays
     /// open for the length of an attempt because its inline status label is where the result is reported.
@@ -261,9 +259,8 @@ import workspacecore
     private func captureRemoteDeviceFormDraft() {
         guard expandedDeviceRow == .addRemoteDevice, let sshHostField = remoteDeviceSSHHostField else { return }
         remoteDeviceFormDraft = RemoteDeviceFormDraft(
-            sshHost: sshHostField.stringValue, name: remoteDeviceNameField?.stringValue ?? "",
-            sshUser: remoteDeviceSSHUserField?.stringValue ?? "", sshPort: remoteDeviceSSHPortField?.stringValue ?? "",
-            advancedExpanded: remoteDeviceAdvancedRow?.isHidden == false)
+            sshHost: sshHostField.stringValue, name: remoteDeviceNameField?.stringValue ?? "", sshUser: remoteDeviceSSHUserField?.stringValue ?? "",
+            sshPort: remoteDeviceSSHPortField?.stringValue ?? "", advancedExpanded: remoteDeviceAdvancedRow?.isHidden == false)
     }
 
     private func refreshVisibleDeviceSettings(_ response: SpacesDeviceAPIControlResponse) {
@@ -330,8 +327,7 @@ import workspacecore
     /// no live window exists yet — a remote device's window is opened asynchronously, and every window expires
     /// — so the row falls back to a plain row rather than showing a code that would not work.
     private func devicePairingPanel(for device: ClientConnectedDevice, response: SpacesDeviceAPIControlResponse) -> NSView? {
-        guard
-            let window = visibleClientDevicePairingWindow(response: response, pairingWindow: visibleDevicePairingWindow(for: response)),
+        guard let window = visibleClientDevicePairingWindow(response: response, pairingWindow: visibleDevicePairingWindow(for: response)),
             window.deviceID == device.id
         else { return nil }
 
@@ -491,9 +487,7 @@ import workspacecore
     private func deviceRowMenu(for device: ClientConnectedDevice, response: SpacesDeviceAPIControlResponse) -> NSMenu {
         let menu = NSMenu()
         if device.isLocal {
-            if !response.ok,
-                Self.localDaemonRestartActionIsAvailable(responseMessage: response.message, isRelaunching: isRelaunchingLocalDaemon)
-            {
+            if !response.ok, Self.localDaemonRestartActionIsAvailable(responseMessage: response.message, isRelaunching: isRelaunchingLocalDaemon) {
                 let restartItem = NSMenuItem(
                     title: "Restart Local Daemon", action: #selector(DevicePairingController.restartLocalDaemon), keyEquivalent: "")
                 restartItem.target = self
@@ -572,8 +566,7 @@ import workspacecore
 
         // A labeled button rather than a bare icon: pairing a phone is the pane's primary job and was not
         // discoverable as an unlabeled glyph.
-        let pairButton = NSButton(
-            title: "Pair iPhone", target: self, action: #selector(DevicePairingController.togglePairingForConnectedDevice(_:)))
+        let pairButton = NSButton(title: "Pair iPhone", target: self, action: #selector(DevicePairingController.togglePairingForConnectedDevice(_:)))
         pairButton.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
         pairButton.imagePosition = .imageLeading
         pairButton.imageHugsTitle = true
@@ -662,8 +655,8 @@ import workspacecore
         NSLayoutConstraint.activate([
             container.heightAnchor.constraint(equalToConstant: qrSize), container.widthAnchor.constraint(equalToConstant: qrSize),
             qrView.widthAnchor.constraint(equalToConstant: qrSize), qrView.heightAnchor.constraint(equalToConstant: qrSize),
-            qrView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            qrView.topAnchor.constraint(equalTo: container.topAnchor), qrView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            qrView.centerXAnchor.constraint(equalTo: container.centerXAnchor), qrView.topAnchor.constraint(equalTo: container.topAnchor),
+            qrView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         return container
     }
@@ -674,7 +667,7 @@ import workspacecore
         var rows: [NSView] = []
         rows.append(
             devicePairingInstructionLabel(
-                "Enter the SSH details for a Mac or Linux device. A Mac needs the Spaces app installed and opened once; an Ubuntu 24.04 device without Spaces is installed over SSH as part of connecting."
+                "Enter the SSH details for a Mac or Linux device. A Mac needs the Spaces app installed and opened once; a Linux device without Spaces is installed over SSH as part of connecting."
             ))
 
         let sshHostField = NSTextField()
@@ -696,7 +689,8 @@ import workspacecore
 
         // Username and port are optional (they default to the SSH login and port 22), so they live
         // behind a collapsed "Advanced" disclosure to keep the common case a single host field.
-        let advancedToggle = NSButton(title: "Advanced", target: self, action: #selector(DevicePairingController.toggleRemoteDeviceAdvancedFields(_:)))
+        let advancedToggle = NSButton(
+            title: "Advanced", target: self, action: #selector(DevicePairingController.toggleRemoteDeviceAdvancedFields(_:)))
         advancedToggle.isBordered = false
         advancedToggle.bezelStyle = .inline
         advancedToggle.setButtonType(.momentaryChange)
@@ -1421,8 +1415,8 @@ import workspacecore
         let localIsAvailable = response.ok && localStatus != nil
         let local = ClientConnectedDevice(
             id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", host: localHost, port: localStatus?.port, sshHost: nil, sshUser: nil,
-            sshPort: nil, isLocal: true, isAvailable: localIsAvailable, requiresReconnect: false,
-            status: localIsAvailable ? .reachable : .unreachable)
+            sshPort: nil, isLocal: true, isAvailable: localIsAvailable, requiresReconnect: false, status: localIsAvailable ? .reachable : .unreachable
+        )
         let remote = pairedDevices().map {
             let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(device: $0)
             return ClientConnectedDevice(
@@ -1502,6 +1496,4 @@ import workspacecore
 /// daemon restart each rebuild the Devices pane, which would take the running attempt's form away with the
 /// fields it holds and the status label it reports through. The trailing row buttons are disabled directly;
 /// a menu is built with its row but presented later, so its items answer here instead.
-extension DevicePairingController: NSMenuItemValidation {
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { !isRemoteDeviceAttemptInFlight }
-}
+extension DevicePairingController: NSMenuItemValidation { func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { !isRemoteDeviceAttemptInFlight } }

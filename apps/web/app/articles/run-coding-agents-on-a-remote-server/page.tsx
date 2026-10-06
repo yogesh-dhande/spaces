@@ -128,7 +128,7 @@ const article: ArticleData = {
         {
           "type": "ul",
           "items": [
-            "**Install.** On Ubuntu 24.04 (x86_64 or arm64), run `curl -fsSL https://usespaces.dev/install.sh | bash`. The installer registers the Spaces service as a systemd user service and enables lingering, so it keeps running with no one logged in. You can also skip this step: pairing over SSH installs Spaces on an Ubuntu 24.04 machine that doesn't have it yet.",
+            "**Install.** On a Linux server with systemd (x86_64 or arm64; Ubuntu, Debian, Fedora, and AlmaLinux are tested), run `curl -fsSL https://usespaces.dev/install.sh | bash`. The installer registers the Spaces service as a systemd user service and enables lingering, so it keeps running with no one logged in. You can also skip this step: pairing over SSH installs Spaces on a Linux machine that doesn't have it yet.",
             "**Pair.** In the Mac app, open Settings → Devices → Add remote device over SSH, or run `spaces device pair --ssh user@host`. SSH has to work without prompts: key-based access, with the server's host key already recorded.",
             "**Connect.** After pairing, your Mac and iPhone talk to the Spaces service on the server directly, on port 47847. Terminals and agents never go through SSH. SSH is still used for remote browser sessions and for opening a workspace in an external editor such as VS Code or Zed. The docs recommend putting the server, the Mac, and the phone on one Tailscale tailnet, so neither port has to be open to the internet. See [Tailscale](/docs/remote-access#tailscale).",
             "**Run.** Every terminal you open on the server, and every agent in it, lives in the Spaces service there. The Mac app and the iPhone app attach and detach."
@@ -242,7 +242,7 @@ const article: ArticleData = {
             "**Who can pair.** Pairing gives a client full control of that server's Spaces service, so pair only your own devices.",
             "**Credentials on the server.** Each agent signs in there, and the git credentials it pushes with live there too.",
             "**Uptime.** Restore brings agents back after a reboot, but anything a process held only in memory is lost.",
-            "**The platforms.** The server is Ubuntu 24.04 (or another Mac). The clients are the Mac app and the iPhone and iPad app, which is an invite-only TestFlight beta. There is no Windows or Android support and no web client."
+            "**The platforms.** The server is a Linux machine with systemd (Ubuntu, Debian, Fedora, and AlmaLinux are tested) or another Mac. The clients are the Mac app and the iPhone and iPad app, which is an invite-only TestFlight beta. There is no Windows or Android support and no web client."
           ]
         }
       ]

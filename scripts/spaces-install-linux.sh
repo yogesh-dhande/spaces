@@ -5,9 +5,13 @@
 # This is the single, user-runnable install/upgrade path for Linux devices. It
 # downloads the signed remote-artifact manifest for the requested (or latest)
 # version, verifies its Ed25519 signature against the embedded public key,
-# downloads and checksums the matching Ubuntu 24.04 archive, then runs the
-# bundled install.sh (which lays out ~/.spaces, ~/.local/bin/spaces, and the
-# systemd user service).
+# downloads and checksums the matching Linux archive, then checks that the
+# bundled binaries load on this machine and runs the bundled install.sh (which
+# lays out ~/.spaces, ~/.local/bin/spaces, and the systemd user service).
+#
+# The installer checks what the daemon needs (Linux, systemd, a supported CPU
+# architecture, and glibc plus the bundled libraries loading) instead of
+# naming distributions.
 #
 # Served at https://usespaces.dev/install.sh via the web app's prebuild copy
 # (apps/web/package.json). Two invocations:
@@ -41,21 +45,25 @@ else
 fi
 
 for tool in curl tar sha256sum openssl python3; do
-    command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
+    command -v "$tool" >/dev/null 2>&1 \
+        || die "required tool not found: $tool. Install it with this machine's package manager, then run the installer again."
 done
 
 os="$(uname -s 2>/dev/null || true)"
 [[ "$os" == "Linux" ]] || die "the Spaces daemon installs on Linux only (detected $os)."
-# shellcheck disable=SC1091
-. /etc/os-release 2>/dev/null || die "could not read /etc/os-release to identify this Linux distribution."
-[[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "24.04" ]] \
-    || die "the Spaces daemon supports Ubuntu 24.04 (detected ${ID:-unknown} ${VERSION_ID:-unknown})."
+# The standard sd_booted test: systemd is this machine's running init.
+[[ -d /run/systemd/system ]] \
+    || die "the Spaces daemon runs as a systemd user service and this machine is not running systemd."
 case "$(uname -m 2>/dev/null || true)" in
     x86_64 | amd64) arch="x86_64" ;;
     aarch64 | arm64) arch="arm64" ;;
     *) die "the Spaces daemon supports x86_64 and arm64 (detected $(uname -m))." ;;
 esac
-platform="ubuntu-24.04"
+# Releases whose manifest names the platform "ubuntu-24.04" are not installable through this
+# script, by decision: there is no compatibility path for them. A Mac pinned to such a release
+# installs again once it updates, and the unversioned install works once a release that names
+# "linux" is the promoted latest, so the gap closes on its own.
+platform="linux"
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
@@ -127,6 +135,15 @@ tar -xzf "$archive_path" -C "$extract_dir"
 install_script="$(find "$extract_dir" -maxdepth 2 -type f -name install.sh | head -n 1)"
 [[ -n "$install_script" ]] || die "the Linux daemon artifact did not contain install.sh."
 chmod +x "$install_script"
+
+# The archive bundles the Swift runtime but is built against glibc 2.38 and links the system's
+# OpenSSL 3, SQLite, zlib and libstdc++, the same set for the CLI and the daemon binary. So the
+# unpacked CLI fails to load exactly when the daemon could not run here. Running it before
+# install.sh leaves such a machine untouched.
+load_check_log="$workdir/load-check.log"
+if ! "$(dirname "$install_script")/bin/spaces" --version >/dev/null 2>"$load_check_log"; then
+    die "this machine cannot run the Spaces daemon. It needs glibc 2.38 or newer and the system libraries the daemon links against. The loader reported: $(head -n 1 "$load_check_log")"
+fi
 
 echo "spaces-install-linux: installing Spaces daemon $version ($platform $arch)..."
 SPACESD_VERSION="$version" bash "$install_script"

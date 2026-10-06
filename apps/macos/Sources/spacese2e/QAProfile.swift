@@ -131,8 +131,10 @@ private struct QAProfileDeployRemoteCommand: ParsableCommand {
         try QAProfileLane.refuseRedirectingEnvironment(action: "deploy the remote QA daemon")
         let version = try QAProfileLane.installedAppVersion()
         let tag = "v\(version)"
-        let architecture = try QAProfileLane.remoteUbuntuArchitecture(device: device)
-        let archiveName = "spacesd-ubuntu-24.04-\(architecture).tar.gz"
+        let architecture = try QAProfileLane.remoteLinuxArchitecture(device: device)
+        // An installed app whose release still names its archive for Ubuntu 24.04 fails the download
+        // below until the app updates; like the installer, there is no compatibility path for it.
+        let archiveName = "spacesd-linux-\(architecture).tar.gz"
 
         let downloadDirectory = try QAProfileLane.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: downloadDirectory) }
@@ -337,20 +339,14 @@ private enum QAProfileLane {
         return version
     }
 
-    /// The device's architecture, refusing anything the released artifacts are not built for. The daemon
-    /// artifacts are published for Ubuntu 24.04 only, so the probe reports the device's distribution too
-    /// and the refusal names what it found.
-    static func remoteUbuntuArchitecture(device: RemoteDevice) throws -> String {
+    /// The device's architecture, refusing a device that is not Linux or whose architecture the released
+    /// daemon artifacts are not built for.
+    static func remoteLinuxArchitecture(device: RemoteDevice) throws -> String {
         let output = try device.run(
             script: """
                 set -u
                 printf 'os=%s\\n' "$(uname -s)"
                 printf 'arch=%s\\n' "$(uname -m)"
-                if [ -r /etc/os-release ]; then
-                    . /etc/os-release
-                    printf 'linux_id=%s\\n' "${ID:-}"
-                    printf 'linux_version_id=%s\\n' "${VERSION_ID:-}"
-                fi
                 """)
         var fields: [String: String] = [:]
         for line in output.split(whereSeparator: \.isNewline) {
@@ -358,10 +354,10 @@ private enum QAProfileLane {
             guard parts.count == 2 else { continue }
             fields[String(parts[0])] = String(parts[1]).trimmingCharacters(in: .whitespaces)
         }
-        guard fields["os"] == "Linux", fields["linux_id"] == "ubuntu", fields["linux_version_id"] == "24.04" else {
+        guard fields["os"] == "Linux" else {
             throw ValidationError(
-                "\(device.destination) is not an Ubuntu 24.04 Linux device (os=\(fields["os"] ?? "") id=\(fields["linux_id"] ?? "") "
-                    + "version=\(fields["linux_version_id"] ?? "")), and released Spaces daemon artifacts are built only for that.")
+                "\(device.destination) is not a Linux device (os=\(fields["os"] ?? "")), and released Spaces daemon artifacts are built only for Linux."
+            )
         }
         switch fields["arch"] ?? "" {
         case "x86_64", "amd64", "x64": return "x86_64"

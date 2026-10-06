@@ -92,7 +92,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 
 ### SSH
 - Pairing over SSH (the Mac's add-remote-device form, or `spaces device pair --ssh`) never prompts: SSH must work with key-based auth and a host key already in `known_hosts`. It runs the device's own `spaces device pair --json` and pairs at the host SSH actually resolves to.
-- An Ubuntu 24.04 device without Spaces is installed over SSH as part of pairing, with no second step. A failed install reports the failure and the exact install command to run on the device by hand. A remote Mac cannot be installed over SSH, so pairing one without Spaces fails with guidance to install the app there.
+- A Linux device without Spaces is installed over SSH as part of pairing, with no second step. The installer accepts any Linux that can run the daemon (x86_64 or arm64, glibc 2.38 or newer, and systemd) and refuses any other with the reason, installing nothing. The tested distributions are Ubuntu 24.04 and 26.04, Debian 13, Fedora 43, and AlmaLinux 10; other distributions that meet those requirements should work but are not tested. A failed install reports the failure and the exact install command to run on the device by hand. A remote Mac cannot be installed over SSH, so pairing one without Spaces fails with guidance to install the app there.
 - SSH is needed only for pairing, remote browser sessions (an SSH local forward), and opening a remote workspace in an external editor. Remote terminals use the paired connection and never need SSH.
 - An external editor opens a remote workspace over SSH as a local window, and reopening it focuses that window instead of opening another. When VS Code lacks its Remote-SSH extension, Spaces offers to install it first. The built-in Editor needs no SSH. Reveal in Finder works only for workspaces on this Mac.
 
@@ -550,7 +550,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 ### Releases
 - Every release is published as a pre-release first and reaches everyone only when promoted; promotion changes nothing about the build. A release superseded before promotion is never promoted.
 - "Receive pre-release updates" (off by default) switches the Mac between promoted releases and every published release, from the next update check and without reinstalling. A Mac on pre-releases moves to the superseding release at its next check, so a bad pre-release corrects itself.
-- Upgrading Spaces on Ubuntu with a running daemon keeps the daemon's process and sessions through an in-place handoff, even while a long transcript replay keeps it briefly unavailable. When the handoff cannot be accepted or does not reach the installed build, the installer reports an error and leaves the running daemon alone.
+- Upgrading Spaces on Linux with a running daemon keeps the daemon's process and sessions through an in-place handoff, even while a long transcript replay keeps it briefly unavailable. When the handoff cannot be accepted or does not reach the installed build, the installer reports an error and leaves the running daemon alone.
 - Launched from `/Applications`, the app keeps its helper links and LaunchAgent aligned with the installed bundle without restarting the daemon.
 
 ### Daemon compatibility and restart

@@ -239,24 +239,15 @@ valid_cached_archive() {
 probe_output="$(
   ssh "${ssh_args[@]}" "$ssh_destination" 'set -eu
     printf "os=%s\n" "$(uname -s)"
-    printf "arch=%s\n" "$(uname -m)"
-    if [ "$(uname -s)" = "Linux" ] && [ -r /etc/os-release ]; then
-      . /etc/os-release
-      printf "linux_id=%s\n" "${ID:-}"
-      printf "linux_version_id=%s\n" "${VERSION_ID:-}"
-    fi'
+    printf "arch=%s\n" "$(uname -m)"'
 )"
 
 os_name=""
 arch_raw=""
-linux_id=""
-linux_version_id=""
 while IFS='=' read -r key value; do
   case "$key" in
     os) os_name="$value" ;;
     arch) arch_raw="$value" ;;
-    linux_id) linux_id="$value" ;;
-    linux_version_id) linux_version_id="$value" ;;
   esac
 done <<<"$probe_output"
 
@@ -264,19 +255,15 @@ if [[ "$os_name" != "Linux" ]]; then
   echo "Remote E2E artifact helper only supports Linux remotes. Found $os_name." >&2
   exit 1
 fi
-if [[ "$linux_id" != "ubuntu" || "$linux_version_id" != "24.04" ]]; then
-  echo "Remote E2E artifact helper requires Ubuntu 24.04. Found id=$linux_id version=$linux_version_id." >&2
-  exit 1
-fi
 
 arch="$(normalize_arch "$arch_raw")"
 case "$arch" in
   x86_64)
-    artifact_id="spacesd-ubuntu-24.04-x86_64"
+    artifact_id="spacesd-linux-x86_64"
     docker_platform="linux/amd64"
     ;;
   arm64)
-    artifact_id="spacesd-ubuntu-24.04-arm64"
+    artifact_id="spacesd-linux-arm64"
     docker_platform="linux/arm64"
     ;;
   *)

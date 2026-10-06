@@ -59,7 +59,7 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Error: Docker is required to build Ubuntu remote spacesd artifacts." >&2
+  echo "Error: Docker is required to build Linux remote spacesd artifacts." >&2
   exit 1
 fi
 
@@ -154,17 +154,17 @@ fi
 echo "✓ Code signing complete"
 echo ""
 
-echo "🐧 Step 4/13: Building and smoke-testing Ubuntu remote spacesd artifacts..."
+echo "🐧 Step 4/13: Building and smoke-testing Linux remote spacesd artifacts..."
 rm -rf "$REMOTE_ARTIFACT_DIR"
 mkdir -p "$REMOTE_ARTIFACT_DIR"
 build_linux_remote_artifact x86_64 linux/amd64
 build_linux_remote_artifact arm64 linux/arm64
-echo "✓ Ubuntu remote artifacts built"
+echo "✓ Linux remote artifacts built"
 echo ""
 
 echo "🔎 Step 5/13: Verifying and signing remote artifact manifest..."
-verify_remote_artifact "spacesd-ubuntu-24.04-x86_64.tar.gz"
-verify_remote_artifact "spacesd-ubuntu-24.04-arm64.tar.gz"
+verify_remote_artifact "spacesd-linux-x86_64.tar.gz"
+verify_remote_artifact "spacesd-linux-arm64.tar.gz"
 "$SCRIPTS_DIR/create-remote-artifact-manifest.sh" "$VERSION" "$TAG" "$REMOTE_ARTIFACT_DIR"
 echo "✓ Remote artifact manifest signed"
 echo ""
@@ -270,10 +270,10 @@ release_assets=(
   "$DMG_PATH"
   "$ZIP_PATH"
   "$APPCAST_PATH"
-  "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz"
-  "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
-  "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-arm64.tar.gz"
-  "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-arm64.tar.gz.sha256"
+  "$REMOTE_ARTIFACT_DIR/spacesd-linux-x86_64.tar.gz"
+  "$REMOTE_ARTIFACT_DIR/spacesd-linux-x86_64.tar.gz.sha256"
+  "$REMOTE_ARTIFACT_DIR/spacesd-linux-arm64.tar.gz"
+  "$REMOTE_ARTIFACT_DIR/spacesd-linux-arm64.tar.gz.sha256"
   "$REMOTE_ARTIFACT_DIR/spaces-remote-artifacts.json"
   "$REMOTE_ARTIFACT_DIR/spaces-remote-artifacts.json.sig"
 )
