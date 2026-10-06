@@ -70,8 +70,8 @@ extension SpacesDeviceOverviewPayload {
             guard let bellAt = session.bellAt, let date = Self.alertDate(bellAt) else { continue }
             candidates.append(
                 SpacesDeviceAlertCandidate(
-                    key: "bell:\(session.id):\(bellAt)", kind: .bell, workspaceID: session.workspaceID, sessionID: session.id,
-                    subjectID: session.id, date: date))
+                    key: "bell:\(session.id):\(bellAt)", kind: .bell, workspaceID: session.workspaceID, sessionID: session.id, subjectID: session.id,
+                    date: date))
         }
 
         for run in automationRuns {
@@ -98,6 +98,18 @@ extension SpacesDeviceOverviewPayload {
         return candidates
     }
 
+    /// The keys of the end-of-session alerts (a terminal or configured process that exited or failed) that
+    /// belong to `sessionIDs`. Bells, agent alerts, automation runs, and flags are never included: a
+    /// session ending does not answer them.
+    public func endOfSessionAlertKeys(forSessionIDs sessionIDs: Set<String>) -> [String] {
+        alertCandidates().filter { candidate in
+            switch candidate.kind {
+            case .terminalExited, .terminalFailed, .processExited: candidate.sessionID.map(sessionIDs.contains) ?? false
+            case .agentWaiting, .agentDone, .bell, .automationRunFailed, .automationRunTimedOut, .comeBackLater: false
+            }
+        }.map(\.key)
+    }
+
     /// This overview with `comeBackLaterFlags` and `dismissedAlertKeys` narrowed to what is still
     /// meaningful: flags whose row exists, dismissals whose alert is still a candidate. The daemon
     /// publishes this view; the stored rows it came from are pruned only by the alert mutations (see
@@ -118,20 +130,15 @@ extension SpacesDeviceOverviewPayload {
     )? {
         for workspace in workspaces {
             switch flag.rowKind {
-            case .agent:
-                if let row = workspace.codingAgentRows.first(where: { $0.id == flag.rowID }) { return (workspace.id, row.sessionID) }
-            case .process:
-                if let row = workspace.processRows.first(where: { $0.id == flag.rowID }) { return (workspace.id, row.sessionID) }
-            case .terminal:
-                if let row = workspace.terminalRows.first(where: { $0.id == flag.rowID }) { return (workspace.id, row.sessionID) }
+            case .agent: if let row = workspace.codingAgentRows.first(where: { $0.id == flag.rowID }) { return (workspace.id, row.sessionID) }
+            case .process: if let row = workspace.processRows.first(where: { $0.id == flag.rowID }) { return (workspace.id, row.sessionID) }
+            case .terminal: if let row = workspace.terminalRows.first(where: { $0.id == flag.rowID }) { return (workspace.id, row.sessionID) }
             }
         }
         return nil
     }
 
-    private static func alertDate(_ value: String) -> Date? {
-        value.isEmpty ? nil : GhosttyRemoteSessionStateTimestamp.date(from: value)
-    }
+    private static func alertDate(_ value: String) -> Date? { value.isEmpty ? nil : GhosttyRemoteSessionStateTimestamp.date(from: value) }
 
     private static func terminalAlertKind(for state: TerminalSessionState) -> SpacesDeviceAlertKind? {
         switch state {

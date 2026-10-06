@@ -24,6 +24,17 @@ extension WorkspaceOrchestrator {
         try applyAlertStateChange(dismissing: dismissing, clearingFlags: clearingFlags, candidateKeys: candidateKeys)
     }
 
+    /// Records dismissals for alerts that exist right now and prunes nothing, unlike `dismissAlerts`. The
+    /// daemon's startup settle uses it: it runs against an overview built before the daemon serves, and
+    /// must not delete a dismissal whose alert that overview does not list yet.
+    public func recordAlertDismissals(keys: [String]) throws {
+        let stored = try store.alertDismissalKeys()
+        let new = keys.filter { !stored.contains($0) }
+        guard !new.isEmpty else { return }
+        try store.applyAlertStateChange(
+            dismissing: new, dismissedAt: GhosttyRemoteSessionStateTimestamp.string(from: Date()), clearingFlags: [], pruning: [])
+    }
+
     /// A visit dismisses the done/exited alerts of the session and clears the flags on its rows, but only
     /// those the client names in `keys`: the keys whose own dwell completed. A key the client has not
     /// named (a mark first seen mid-visit, or one it has not received yet) is never touched, whatever
@@ -42,9 +53,8 @@ extension WorkspaceOrchestrator {
         let named = Set(keys)
         let dismissing = candidates.filter { $0.sessionID == sessionID && $0.clearsOnVisit && named.contains($0.key) }.map(\.key)
         let clearingFlags = overview.comeBackLaterFlags.filter { flag in
-            guard named.contains(flag.alertKey),
-                let row = SpacesDeviceOverviewPayload.comeBackLaterRow(for: flag, in: overview.workspaces), row.sessionID == sessionID,
-                let flaggedAt = GhosttyRemoteSessionStateTimestamp.date(from: flag.flaggedAt)
+            guard named.contains(flag.alertKey), let row = SpacesDeviceOverviewPayload.comeBackLaterRow(for: flag, in: overview.workspaces),
+                row.sessionID == sessionID, let flaggedAt = GhosttyRemoteSessionStateTimestamp.date(from: flag.flaggedAt)
             else { return false }
             // Backstop for a mark re-set on another device while the visit keeps seeing the same key; only
             // there is it sensitive to request latency, since clients never name a mark they saw

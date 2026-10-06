@@ -38,6 +38,11 @@ export default function AlertsDocsPage() {
             <DocLink href="/docs/alerts#come-back-later">Come Back Later</DocLink>.
           </li>
         </ul>
+        <Prose>
+          Terminals and processes ended by a Mac restart or logout, or by the Spaces service
+          restarting or crashing, raise no exited alert, and those processes show as not started.
+          A terminal&apos;s bell and failed automation runs still alert.
+        </Prose>
       </Section>
 
       <Section id="where" title="Where alerts show">
