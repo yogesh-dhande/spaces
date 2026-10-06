@@ -75,6 +75,8 @@ typedef GhosttyResult (*GhosttyTerminalSelectionFormatAllocFn)(
     GhosttyTerminal, const GhosttyAllocator *, GhosttyTerminalSelectionFormatOptions, uint8_t **, size_t *
 );
 typedef size_t (*GhosttyTerminalTakeRenderScrollRectsFn)(GhosttyTerminal, GhosttyTerminalScrollRect *, size_t, bool *);
+typedef GhosttyResult (*GhosttyTerminalSetActiveScreenFn)(GhosttyTerminal, GhosttyTerminalScreen);
+typedef GhosttyResult (*GhosttyTerminalTabstopFn)(GhosttyTerminal, uint16_t, bool *);
 
 // Every libghostty-vt entry point the shim calls, as (table field, function-pointer type, library
 // function). This one list drives the symbol table's layout, how it is filled, and the completeness
@@ -132,7 +134,9 @@ typedef size_t (*GhosttyTerminalTakeRenderScrollRectsFn)(GhosttyTerminal, Ghostt
     X(terminal_grid_ref, GhosttyTerminalGridRefFn, ghostty_terminal_grid_ref)                                                  \
     X(terminal_point_from_grid_ref, GhosttyTerminalPointFromGridRefFn, ghostty_terminal_point_from_grid_ref)                   \
     X(terminal_selection_format_alloc, GhosttyTerminalSelectionFormatAllocFn, ghostty_terminal_selection_format_alloc)         \
-    X(terminal_take_render_scroll_rects, GhosttyTerminalTakeRenderScrollRectsFn, ghostty_terminal_take_render_scroll_rects)
+    X(terminal_take_render_scroll_rects, GhosttyTerminalTakeRenderScrollRectsFn, ghostty_terminal_take_render_scroll_rects) \
+    X(terminal_set_active_screen, GhosttyTerminalSetActiveScreenFn, ghostty_terminal_set_active_screen)                        \
+    X(terminal_tabstop, GhosttyTerminalTabstopFn, ghostty_terminal_tabstop)
 
 typedef struct {
     void *handle;
@@ -2469,6 +2473,119 @@ static bool spaces_ghostty_vt_measure_cursor_origin(
     return true;
 }
 
+// The alternate-screen modes, in the order the preamble enters them. 1049 comes first because it is
+// the only one that saves the primary screen's cursor, and that save must happen while the primary
+// screen is still the active one; a later 1047/47 then finds the alternate screen already active and
+// switches nothing.
+static const uint16_t kSpacesGhosttyVtAltScreenModes[] = {1049, 1047, 47};
+
+static bool spaces_ghostty_vt_is_alt_screen_mode(uint16_t value, bool ansi) {
+    if (ansi) return false;
+    for (size_t i = 0; i < sizeof(kSpacesGhosttyVtAltScreenModes) / sizeof(kSpacesGhosttyVtAltScreenModes[0]); i++) {
+        if (kSpacesGhosttyVtAltScreenModes[i] == value) return true;
+    }
+    return false;
+}
+
+// Emits the tab stops when they differ from the fresh terminal's default stops: clear all, then set each
+// live stop (CHA to the column, HTS). Stops past the width a preamble is replayed at clamp onto the last
+// column, where a stop is harmless. Cursor position is left unspecified; the caller positions it later.
+static bool spaces_ghostty_vt_preamble_append_tabstops(
+    SpacesGhosttyVtSession *session,
+    GhosttyTerminal reference,
+    uint16_t columns,
+    SpacesGhosttyVtPreambleBuffer *buf
+) {
+    bool differs = false;
+    for (uint16_t column = 0; column < columns; column++) {
+        bool live_set = false;
+        bool ref_set = false;
+        if (
+            session->symbols.terminal_tabstop(session->terminal, column, &live_set) != GHOSTTY_SUCCESS ||
+            session->symbols.terminal_tabstop(reference, column, &ref_set) != GHOSTTY_SUCCESS
+        ) {
+            return false;
+        }
+        if (live_set != ref_set) differs = true;
+    }
+    if (!differs) return true;
+
+    spaces_ghostty_vt_preamble_append(buf, "\x1b[3g");
+    for (uint16_t column = 0; column < columns; column++) {
+        bool live_set = false;
+        if (session->symbols.terminal_tabstop(session->terminal, column, &live_set) != GHOSTTY_SUCCESS) return false;
+        if (live_set) spaces_ghostty_vt_preamble_append(buf, "\x1b[%uG\x1bH", (unsigned)column + 1);
+    }
+    return true;
+}
+
+// Reads the saved cursor (DECSC) of the screen that is currently active. `*out_present` is false when
+// that screen has none.
+static bool spaces_ghostty_vt_read_saved_cursor(
+    SpacesGhosttyVtSession *session,
+    uint16_t *out_column,
+    uint16_t *out_row,
+    bool *out_origin,
+    bool *out_present
+) {
+    *out_present = false;
+    GhosttyResult result = session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SAVED_CURSOR_X, out_column);
+    if (result == GHOSTTY_NO_VALUE) return true;
+    if (result != GHOSTTY_SUCCESS) return false;
+    if (
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SAVED_CURSOR_Y, out_row) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SAVED_CURSOR_ORIGIN, out_origin) != GHOSTTY_SUCCESS
+    ) {
+        return false;
+    }
+    *out_present = true;
+    return true;
+}
+
+// Re-creates the active screen's saved cursor: moves the cursor to the saved cell under the saved
+// origin-mode setting and issues DECSC, so a later DECRC (or 1049 exit) lands where the original would.
+// The position is absolute because the margins are still the paint-neutral full extent (C2), where
+// region-relative and absolute coincide. Origin mode is then put back to its live value; the caller
+// positions the cursor afterwards. The saved pen, charset and pending wrap are the neutral ones the
+// repaint leaves behind (see ACCEPTED GAPS).
+static bool spaces_ghostty_vt_preamble_append_saved_cursor(
+    SpacesGhosttyVtSession *session,
+    SpacesGhosttyVtPreambleBuffer *buf,
+    bool live_origin_mode
+) {
+    uint16_t column = 0;
+    uint16_t row = 0;
+    bool origin = false;
+    bool present = false;
+    if (!spaces_ghostty_vt_read_saved_cursor(session, &column, &row, &origin, &present)) return false;
+    if (!present) return true;
+    spaces_ghostty_vt_preamble_append(
+        buf, "\x1b[?6%c\x1b[%u;%uH\x1b" "7\x1b[?6%c", origin ? 'h' : 'l', (unsigned)row + 1, (unsigned)column + 1,
+        live_origin_mode ? 'h' : 'l');
+    return true;
+}
+
+// The per-screen portion of a preamble, for the screen that is currently active: Kitty keyboard flags
+// (a per-screen stack), the grid repaint (C3), and, unless the screen's entry sequence recreates it, the
+// saved cursor.
+static bool spaces_ghostty_vt_preamble_append_screen_contents(
+    SpacesGhosttyVtSession *session,
+    SpacesGhosttyVtPreambleBuffer *buf,
+    bool restore_saved_cursor,
+    bool live_origin_mode
+) {
+    uint8_t kitty_flags = 0;
+    if (
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &kitty_flags) == GHOSTTY_SUCCESS &&
+        kitty_flags != 0
+    ) {
+        spaces_ghostty_vt_preamble_append(buf, "\x1b[=%u;1u", (unsigned)kitty_flags);
+    }
+    if (!spaces_ghostty_vt_preamble_append_grid(session, buf)) return false;
+    if (restore_saved_cursor) return spaces_ghostty_vt_preamble_append_saved_cursor(session, buf, live_origin_mode);
+    return true;
+}
+
 // Serializes the session's current persistent terminal state as escape sequences, diffed against a
 // fresh reference terminal created at the same cols/rows via the already-loaded symbols. Only state
 // that differs from a brand-new terminal is emitted, so the library's own defaults define "emit
@@ -2480,10 +2597,11 @@ static bool spaces_ghostty_vt_measure_cursor_origin(
 // has to produce the same terminal either way. The order below is what makes that true, and every step of
 // it is load-bearing. The constraints, each with the failure it prevents:
 //
-//   C1. Modes before everything else. Alt-screen entry must precede the grid repaint and the cursor, or
-//       both land on the wrong screen. DECLRMM (69) must precede any DECSLRM, which the library ignores
-//       while the mode is off. DECOM (6) must precede the cursor because ENABLING it homes the cursor,
-//       so it cannot be turned on afterwards to fix up an absolute position.
+//   C1. Modes before everything else, except the alternate-screen modes. Those are entered at the point
+//       the screen order below dictates, so the primary grid is painted on the primary screen and the
+//       alternate grid on the alternate one. DECLRMM (69) must precede any DECSLRM, which the library
+//       ignores while the mode is off. DECOM (6) must precede the cursor because ENABLING it homes the
+//       cursor, so it cannot be turned on afterwards to fix up an absolute position.
 //   C2. Paint-neutral margins and charset invocation before the grid repaint. The repaint is a top-down
 //       flow paint, so a scrolling region left on the target terminal would make its line feeds scroll
 //       that region instead of stepping to the next row; and a non-default charset left invoked on GL
@@ -2505,32 +2623,51 @@ static bool spaces_ghostty_vt_measure_cursor_origin(
 //   C6. SGR reset last. It moves nothing and clears no cells, so it is safe anywhere after the repaint;
 //       it sits at the end so the pen is deterministic whatever the steps above emitted.
 //
+// Screen order. When the alternate screen is active, the preamble paints the PRIMARY screen first and
+// enters the alternate screen afterwards, using the same mode (1049, 1047 or 47) the program used; a
+// retained exit (`CSI ? 1049 l` and friends) then returns to the primary screen the program covered.
+// What each entry mode needs from the primary screen decides what is emitted for it:
+//   - 1049 saves the primary cursor on entry and restores it on exit, so the primary cursor is placed at
+//     the primary's saved cursor and the entry itself re-creates the save. No separate DECSC is emitted.
+//     The entry saves the origin mode in force when it runs, so DECOM is set to the saved cursor's
+//     value around the entry and put back to the live value afterwards.
+//   - 1047 and 47 copy the cursor between screens in both directions and never read the saved cursor,
+//     so the primary's own saved cursor (if any) is re-created with DECSC and the cursor is left at the
+//     primary's live position.
+// Entering the alternate screen does not clear it for 47/1047 and clears it for 1049; either way it is
+// blank when a preamble is replayed into a blank terminal, and the alternate repaint paints over it.
+//
 // Emission order following from those:
-//   1. Modes (ANSI: CSI <n> h/l; DEC private: CSI ? <n> h/l), including alt-screen, DECOM and DECLRMM.
-//   2. Kitty keyboard flags (CSI = <flags> ; 1 u) when nonzero.
-//   3. Paint-neutral state: full-extent margins in their width- and height-independent form
+//   1. Modes (ANSI: CSI <n> h/l; DEC private: CSI ? <n> h/l), including DECOM and DECLRMM, but not the
+//      alternate-screen modes.
+//   2. Paint-neutral state: full-extent margins in their width- and height-independent form
 //      (CSI r, CSI 1 ; 0 s) and a normalized charset invocation (ESC ( B, SI). Emitted unconditionally —
 //      all four are no-ops on a terminal that is already neutral, which is every from-blank replay.
-//   4. Grid repaint of the active screen (top-down flow paint, per `spaces_ghostty_vt_preamble_append_grid`).
-//   5. Scrolling region and charset designations/shifts (`spaces_ghostty_vt_copy_replay_root_state`).
-//   6. Cursor position (CSI <y+1> ; <x+1> H), region-relative under DECOM.
-//   7. SGR reset (CSI 0 m).
+//   3. Tab stops, when they differ from the default every-8-columns stops (CSI 3 g, then CHA + HTS per stop).
+//   4. When the alternate screen is active: the primary screen's contents (Kitty keyboard flags, grid
+//      repaint, saved cursor via DECSC), its cursor, and the alternate-screen entry modes.
+//   5. The active screen's contents, as in 4 (for a primary-only terminal this is the only screen).
+//   6. Scrolling region and charset designations/shifts (`spaces_ghostty_vt_copy_replay_root_state`).
+//   7. Cursor position (CSI <y+1> ; <x+1> H), region-relative under DECOM.
+//   8. SGR reset (CSI 0 m).
 //
-// RESTORED beyond modes/cursor: the ACTIVE screen's visible grid (cell text, colors, and style flags)
-// via the grid repaint, so cells drawn before the preamble that the following bytes never redraw
-// survive a replay that starts here, plus the scrolling region and charset designations, without which
-// the bytes that follow the preamble would be interpreted against the wrong terminal and render a wrong
-// screen rather than an incomplete one.
+// RESTORED beyond modes/cursor: both screens' visible grids (cell text, colors, and style flags) via the
+// grid repaint, so cells drawn before the preamble that the following bytes never redraw survive a
+// replay that starts here, the saved cursor (DECSC) of each screen, the tab stops, and the scrolling
+// region and charset designations, without which the bytes that follow the preamble would be
+// interpreted against the wrong terminal and render a wrong screen rather than an incomplete one.
 //
-// ACCEPTED GAPS (intentionally NOT restored): the INACTIVE screen's grid (render state exposes only
-// the active screen) and scrollback content above the grid (inherent to trimming — those bytes are
-// dropped). Also not restored: tab stops, saved-cursor (DECSC), pending-wrap at the bottom-right corner
-// (unrestorable — painting cannot re-arm it without scrolling), OSC color/title overrides, a pending
-// single shift (SS2/SS3 applies to the next printed cell only, and a preamble can only land between one
-// and its character if a PTY read ended inside a two-byte sequence), and the live pen's SGR (reset to
-// default). A slot that held UTF-8 also ends up designated ASCII by step 3, since the library has no
-// per-slot UTF-8 designator; the two are the same charset to its print path, which uses both unmapped.
-// In addition, the pinned libghostty-vt exposes no cursor-SHAPE getter
+// ACCEPTED GAPS (intentionally NOT restored): scrollback content above either grid (inherent to
+// trimming — those bytes are dropped), the pen, charset and pending-wrap parts of a saved cursor (DECRC
+// restores the neutral ones; its position and origin mode are exact), pending-wrap at the bottom-right
+// corner (unrestorable — painting cannot re-arm it without scrolling), OSC color/title overrides, a
+// pending single shift (SS2/SS3 applies to the next printed cell only, and a preamble can only land
+// between one and its character if a PTY read ended inside a two-byte sequence), and the live pen's SGR
+// (reset to default). A slot that held UTF-8 also ends up designated ASCII by step 2, since the library
+// has no per-slot UTF-8 designator; the two are the same charset to its print path, which uses both
+// unmapped. A stale alternate-screen mode flag left set after the program exited by a different mode
+// (enter 1047, leave 1049) is not carried: it only changes what a later toggle does for a program that
+// mixes modes. In addition, the pinned libghostty-vt exposes no cursor-SHAPE getter
 // (GHOSTTY_TERMINAL_DATA_CURSOR_STYLE returns the pen SGR style, not a block/underline/bar shape), so
 // DECSCUSR is not emitted. These are acceptable because they cannot change how the bytes following the
 // preamble lay out on the screen: a program that depends on one of them re-establishes it as part of
@@ -2543,9 +2680,11 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
 
     uint16_t columns = 0;
     uint16_t rows = 0;
+    GhosttyTerminalScreen active_screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
     if (
         session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
         session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_ROWS, &rows) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &active_screen) != GHOSTTY_SUCCESS ||
         columns == 0 || rows == 0
     ) {
         return false;
@@ -2567,7 +2706,13 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
     SpacesGhosttyVtPreambleBuffer buf = {0};
     buf.ok = true;
 
-    // 1. Modes.
+    bool origin_mode = false;
+    if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, session->terminal, ghostty_mode_new(6, false), &origin_mode) != GHOSTTY_SUCCESS) {
+        buf.ok = false;
+    }
+
+    // 1. Modes. The alternate-screen modes are entered in step 4/5's screen order instead.
+    bool alt_screen_mode_set[sizeof(kSpacesGhosttyVtAltScreenModes) / sizeof(kSpacesGhosttyVtAltScreenModes[0])] = {false};
     for (size_t i = 0; i < sizeof(kSpacesGhosttyVtPreambleModes) / sizeof(kSpacesGhosttyVtPreambleModes[0]); i++) {
         SpacesGhosttyVtPreambleMode entry = kSpacesGhosttyVtPreambleModes[i];
         GhosttyMode mode = ghostty_mode_new(entry.value, entry.ansi);
@@ -2575,28 +2720,25 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
         bool ref_set = false;
         if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, session->terminal, mode, &live_set) != GHOSTTY_SUCCESS) continue;
         if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, reference, mode, &ref_set) != GHOSTTY_SUCCESS) continue;
+        if (spaces_ghostty_vt_is_alt_screen_mode(entry.value, entry.ansi)) {
+            for (size_t j = 0; j < sizeof(kSpacesGhosttyVtAltScreenModes) / sizeof(kSpacesGhosttyVtAltScreenModes[0]); j++) {
+                if (kSpacesGhosttyVtAltScreenModes[j] == entry.value) alt_screen_mode_set[j] = live_set;
+            }
+            continue;
+        }
         if (live_set == ref_set) continue;
         spaces_ghostty_vt_preamble_append(
             &buf, "\x1b[%s%u%c", entry.ansi ? "" : "?", (unsigned)entry.value, live_set ? 'h' : 'l');
     }
 
-    // 2. Kitty keyboard flags. A fresh terminal reports 0, so nonzero is the diff.
-    uint8_t kitty_flags = 0;
-    if (
-        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &kitty_flags) == GHOSTTY_SUCCESS &&
-        kitty_flags != 0
-    ) {
-        spaces_ghostty_vt_preamble_append(&buf, "\x1b[=%u;1u", (unsigned)kitty_flags);
-    }
-
-    // 3. Paint-neutral state (C2): full-extent margins, then G0 designated ASCII and GL locked to it, so
+    // 2. Paint-neutral state (C2): full-extent margins, then G0 designated ASCII and GL locked to it, so
     //    the repaint's line feeds cannot scroll a region and its bytes cannot be charset-mapped.
     //
     //    Both margins use the sequences' DEFAULT extent parameters rather than this session's measured
     //    size, which is what keeps them correct when the preamble is replayed at another width or height
     //    (a handoff or tail after the terminal was resized past the last trim). DECSTBM with no params
     //    and DECSLRM with a 0 right param both resolve against the REPLAYING terminal's own bounds; an
-    //    explicit column count would pin the captured width, and since step 5 emits no DECSLRM at all
+    //    explicit column count would pin the captured width, and since step 6 emits no DECSLRM at all
     //    when the captured margins were already full, nothing later would widen it back out.
     //
     //    DECSTBM can be written bare, DECSLRM cannot: `CSI s` with no parameters is ambiguous — the
@@ -2605,13 +2747,67 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
     //    every width.
     spaces_ghostty_vt_preamble_append(&buf, "\x1b[r\x1b[1;0s\x1b(B\x0f");
 
-    // 4. Grid repaint of the active screen (C3). A snapshot-read failure fails the whole preamble rather
-    //    than emitting a partially painted grid.
-    if (!spaces_ghostty_vt_preamble_append_grid(session, &buf)) {
+    // 3. Tab stops.
+    if (!spaces_ghostty_vt_preamble_append_tabstops(session, reference, columns, &buf)) {
         buf.ok = false;
     }
 
-    // 5. Scrolling region and charsets (C4). A failed read fails the whole preamble rather than emitting
+    // 4. The primary screen, when the alternate screen covers it. The session is switched to the primary
+    //    screen to read it and is always switched back, whatever fails in between.
+    if (buf.ok && active_screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE) {
+        bool entered_with_1049 = alt_screen_mode_set[0];
+        bool any_entry_mode = false;
+        for (size_t j = 0; j < sizeof(alt_screen_mode_set) / sizeof(alt_screen_mode_set[0]); j++) {
+            any_entry_mode = any_entry_mode || alt_screen_mode_set[j];
+        }
+        // An active alternate screen was entered by one of these modes and only a mode change leaves it,
+        // so none being set means the state is not one a terminal can be in.
+        if (!any_entry_mode) buf.ok = false;
+
+        if (buf.ok && session->symbols.terminal_set_active_screen(session->terminal, GHOSTTY_TERMINAL_SCREEN_PRIMARY) != GHOSTTY_SUCCESS) {
+            buf.ok = false;
+        } else if (buf.ok) {
+            if (!spaces_ghostty_vt_preamble_append_screen_contents(session, &buf, !entered_with_1049, origin_mode)) {
+                buf.ok = false;
+            }
+
+            uint16_t cursor_x = 0;
+            uint16_t cursor_y = 0;
+            bool saved_present = false;
+            bool saved_origin = false;
+            if (entered_with_1049) {
+                if (!spaces_ghostty_vt_read_saved_cursor(session, &cursor_x, &cursor_y, &saved_origin, &saved_present)) buf.ok = false;
+            }
+            if (!saved_present && (
+                    session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_CURSOR_X, &cursor_x) != GHOSTTY_SUCCESS ||
+                    session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cursor_y) != GHOSTTY_SUCCESS)) {
+                buf.ok = false;
+            }
+            // The 1049 save records the origin mode in force when the program entered, which a program may
+            // have changed since. The synthetic entry saves whatever is live when it runs, so set the
+            // saved value first. Enabling DECOM homes the cursor, so it precedes the CUP; the position is
+            // absolute because the margins are still the paint-neutral full extent.
+            if (saved_present) spaces_ghostty_vt_preamble_append(&buf, "\x1b[?6%c", saved_origin ? 'h' : 'l');
+            spaces_ghostty_vt_preamble_append(&buf, "\x1b[%u;%uH", (unsigned)cursor_y + 1, (unsigned)cursor_x + 1);
+
+            for (size_t j = 0; j < sizeof(alt_screen_mode_set) / sizeof(alt_screen_mode_set[0]); j++) {
+                if (alt_screen_mode_set[j]) spaces_ghostty_vt_preamble_append(&buf, "\x1b[?%uh", (unsigned)kSpacesGhosttyVtAltScreenModes[j]);
+            }
+            // Back to the live origin mode before the alternate screen is painted.
+            if (saved_present) spaces_ghostty_vt_preamble_append(&buf, "\x1b[?6%c", origin_mode ? 'h' : 'l');
+        }
+        if (session->symbols.terminal_set_active_screen(session->terminal, GHOSTTY_TERMINAL_SCREEN_ALTERNATE) != GHOSTTY_SUCCESS) {
+            buf.ok = false;
+        }
+    }
+
+    // 5. The active screen's contents (C3). A snapshot-read failure fails the whole preamble rather than
+    //    emitting a partially painted grid.
+    if (buf.ok && !spaces_ghostty_vt_preamble_append_screen_contents(session, &buf, true, origin_mode)) {
+        buf.ok = false;
+    }
+
+    // 6. Scrolling region and charsets (C4). A failed read fails the whole preamble rather than emitting
     //    a replay root that cannot interpret the bytes following it.
     uint8_t *replay_root_state = NULL;
     size_t replay_root_state_len = 0;
@@ -2623,16 +2819,13 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
         buf.ok = false;
     }
 
-    // 6. Cursor position (C5). The getters are absolute and 0-indexed; CUP is 1-indexed, and relative to
-    //    the region's top-left corner whenever DECOM is set, so subtract the origin step 5's bytes
+    // 7. Cursor position (C5). The getters are absolute and 0-indexed; CUP is 1-indexed, and relative to
+    //    the region's top-left corner whenever DECOM is set, so subtract the origin step 6's bytes
     //    establish. A cursor outside the region cannot be expressed at all (CUP clamps into it), so it is
     //    placed on the region's first row/column — the same cell the terminal itself would clamp to.
-    bool origin_mode = false;
     uint16_t origin_row = 0;
     uint16_t origin_column = 0;
-    if (spaces_ghostty_vt_terminal_mode_get(&session->symbols, session->terminal, ghostty_mode_new(6, false), &origin_mode) != GHOSTTY_SUCCESS) {
-        buf.ok = false;
-    } else if (origin_mode && !spaces_ghostty_vt_measure_cursor_origin(
+    if (origin_mode && !spaces_ghostty_vt_measure_cursor_origin(
                    session, reference, replay_root_state, replay_root_state_len, &origin_row, &origin_column)) {
         buf.ok = false;
     }
@@ -2648,7 +2841,7 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
         spaces_ghostty_vt_preamble_append(&buf, "\x1b[%u;%uH", row + 1, column + 1);
     }
 
-    // 7. SGR reset (C6).
+    // 8. SGR reset (C6).
     spaces_ghostty_vt_preamble_append(&buf, "\x1b[0m");
 
     free(replay_root_state);
