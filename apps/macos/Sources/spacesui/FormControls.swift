@@ -274,9 +274,6 @@ import systembridge
     let rule = TextEditorHeightRule(bounds: lines, font: textView.font ?? Typography.body, verticalInset: textInset)
     textView.minSize = NSSize(width: 0, height: rule.minimumHeight)
     let scroll = AutoGrowingTextScrollView(editor: textView, rule: rule)
-    scroll.hasVerticalScroller = true
-    scroll.hasHorizontalScroller = false
-    scroll.autohidesScrollers = true
     scroll.borderType = .noBorder
     scroll.drawsBackground = true
     scroll.backgroundColor = inputBg
