@@ -9,9 +9,9 @@ import workspacecore
 /// the answer.
 extension AppKitController {
     /// Sends `request` to the device and applies the overview it answers with.
-    private func performAlertRequest(
-        deviceID: String, _ request: @escaping @Sendable (DeviceRequestContext) throws -> SpacesDeviceAPIResponse
-    ) async -> Result<Void, Error> {
+    private func performAlertRequest(deviceID: String, _ request: @escaping @Sendable (DeviceRequestContext) throws -> SpacesDeviceAPIResponse) async
+        -> Result<Void, Error>
+    {
         guard let device = deviceForMutation(deviceID: deviceID) else { return .failure(deviceUnavailableError(deviceID: deviceID)) }
         let epoch = panelCoordinator.paneReplacementEpoch
         let result = await Self.deviceMutation(device: device) { device in
@@ -26,7 +26,8 @@ extension AppKitController {
     }
 
     func dismissAlerts(keys: [String], deviceID: String) async -> Result<Void, Error> {
-        await performAlertRequest(deviceID: deviceID) { try SpacesDeviceClient.dismissAlerts(keys: keys, context: $0) }
+        if let dismissAlertsOverrideForTesting { return await dismissAlertsOverrideForTesting(keys, deviceID) }
+        return await performAlertRequest(deviceID: deviceID) { try SpacesDeviceClient.dismissAlerts(keys: keys, context: $0) }
     }
 
     func setComeBackLater(rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String, isOn: Bool, deviceID: String) {
@@ -63,8 +64,7 @@ extension AppKitController {
             clearables: { [unowned self] terminal in
                 deviceSection(id: terminal.deviceID)?.overview.map { TerminalVisitTracker.clearables(overview: $0, sessionID: terminal.sessionID) }
                     ?? TerminalVisitTracker.Clearables()
-            },
-            currentFocus: { [unowned self] in visitedTerminalIfActive() },
+            }, currentFocus: { [unowned self] in visitedTerminalIfActive() },
             sendVisit: { [unowned self] terminal, focusedFor, keys in
                 await sendTerminalVisit(
                     deviceID: terminal.deviceID, sessionID: terminal.sessionID, focusedForSeconds: focusedFor, keys: keys.sorted())
@@ -75,9 +75,7 @@ extension AppKitController {
     /// Called wherever either can change (the focused pane of a layout, the key window, the main
     /// window's detail pane, app activation) and from the overview install funnel, which is also what
     /// tells the tracker a new alert arrived.
-    func refreshTerminalVisit() {
-        terminalVisits.update(focus: visitedTerminalIfActive(), isActive: NSApp.isActive)
-    }
+    func refreshTerminalVisit() { terminalVisits.update(focus: visitedTerminalIfActive(), isActive: NSApp.isActive) }
 
     /// The terminal a visit is to: the one in the focused pane of what the key window shows (the pane
     /// the workspace footer or a global window's identity strip names), nil when Spaces is not

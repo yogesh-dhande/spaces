@@ -173,7 +173,8 @@ import workspacecore
                         label: automation.automationName, detail: automation.outcome,
                         automationRunTarget: AutomationRunAlertTarget(deviceID: automation.deviceID, runID: automation.runID)))
             case .agentWaiting, .agentDone:
-                guard let workspaceID = candidate.workspaceID, let agent = workspacesByID[workspaceID]?.codingAgentRows.first(where: { $0.id == candidate.subjectID })
+                guard let workspaceID = candidate.workspaceID,
+                    let agent = workspacesByID[workspaceID]?.codingAgentRows.first(where: { $0.id == candidate.subjectID })
                 else { continue }
                 // Both states keep the cpu.fill agent identity; the tint alone carries the state:
                 // `waiting` (blocked on the user) is amber and `done` is blue, the same colors the row wears
@@ -186,7 +187,8 @@ import workspacecore
                         agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue),
                         focusRequest: agentFocusRequest(agent, workspaceID: workspaceID)))
             case .processExited:
-                guard let workspaceID = candidate.workspaceID, let process = workspacesByID[workspaceID]?.processRows.first(where: { $0.id == candidate.subjectID })
+                guard let workspaceID = candidate.workspaceID,
+                    let process = workspacesByID[workspaceID]?.processRows.first(where: { $0.id == candidate.subjectID })
                 else { continue }
                 itemsByWorkspace[workspaceID, default: []].append(
                     entry(
@@ -386,9 +388,7 @@ import workspacecore
 
     // MARK: - Alerts content
 
-    private func buildAlertsGroups() -> [AlertsGroup] {
-        Self.visibleAlertsGroups(in: host.deviceModel.alertsGroups)
-    }
+    private func buildAlertsGroups() -> [AlertsGroup] { Self.visibleAlertsGroups(in: host.deviceModel.alertsGroups) }
 
     /// The groups the user sees: everything derived from the overviews minus what the owning device has
     /// recorded as dismissed (by a click, or by the user having watched the session a bell rang in) and
@@ -567,8 +567,7 @@ import workspacecore
                     attentionID: entry.attentionID, icon: entry.icon, iconTint: entry.iconTint, shortcutIndex: row.shortcutIndex,
                     processStatus: entry.processStatus, agentStatus: entry.agentStatus, focusRequestKey: entry.focusRequest?.signatureKey,
                     hasTitle: Self.alertsRowHasTitle(entry: entry), projectName: row.projectName, isAutomationsRow: row.isAutomationsRow,
-                    workspaceName: row.workspaceName, deviceText: row.deviceText, isOffline: row.isOffline,
-                    canDismiss: row.canDismiss))
+                    workspaceName: row.workspaceName, deviceText: row.deviceText, isOffline: row.isOffline, canDismiss: row.canDismiss))
         }
         return AlertsRenderSignature(showsDeviceColumn: plan.showsDeviceColumn, rows: rows, text: text)
     }
@@ -678,6 +677,16 @@ import workspacecore
 
     func dismissAlertsAttentionItem(_ attentionID: String) { dismissAlertsAttentionItems([attentionID]) }
 
+    /// Dismisses every row the pane lists whose device can take the request, with no confirmation. It
+    /// reads the rendered rows, not the raw alert groups, so an alert the pane does not list (a hidden
+    /// workspace's) is left alone, and rows on an offline device are skipped rather than sent to fail.
+    func clearAllAlerts() {
+        guard let rendered = renderedAlerts else { return }
+        dismissAlertsAttentionItems(rendered.signature.rows.filter(\.canDismiss).map(\.attentionID))
+    }
+
+    @objc private func clearAllAlertsAction(_ sender: NSButton) { clearAllAlerts() }
+
     /// Whether the device that raised an alert can take a request, which is what the dismiss controls
     /// follow: a dismissal is recorded by the device, so one that is offline cannot take it.
     func canDismissAlert(attentionID: String) -> Bool {
@@ -761,6 +770,21 @@ import workspacecore
         headerRow.alignment = .centerY
         headerRow.spacing = 8
         headerRow.addArrangedSubview(headerTitle)
+        if !plan.rows.isEmpty {
+            // Disabled, not hidden, when every listed row is on an offline device: the list is still
+            // there, it just cannot take a dismissal. `canDismiss` is part of the render signature, so a
+            // device coming back online rebuilds the pane with the button enabled.
+            let canClearAny = plan.rows.contains(where: \.canDismiss)
+            let clearAllButton = NSButton(title: "Clear All", target: self, action: #selector(clearAllAlertsAction(_:)))
+            clearAllButton.setAccessibilityIdentifier("alerts.clear-all")
+            clearAllButton.isEnabled = canClearAny
+            Theme.applyTextStyle(to: clearAllButton, color: canClearAny ? Theme.accent : .tertiaryLabelColor)
+            let spacer = NSView()
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+            headerRow.addArrangedSubview(spacer)
+            headerRow.addArrangedSubview(clearAllButton)
+        }
 
         stack.addArrangedSubview(headerRow)
         constrainFormFieldToFillWidth(headerRow, in: stack)
@@ -949,7 +973,8 @@ import workspacecore
         if let automationID { container.setAccessibilityIdentifier("\(automationID)-row") }
 
         let statusView = Self.alertsStatusIndicator(
-            isComeBackLater: entry.kind == .comeBackLater, processStatus: entry.processStatus, agentStatus: entry.agentStatus, automationID: automationID)
+            isComeBackLater: entry.kind == .comeBackLater, processStatus: entry.processStatus, agentStatus: entry.agentStatus,
+            automationID: automationID)
 
         let shortcutLabel = NSTextField(labelWithString: shortcutText)
         shortcutLabel.font = Typography.monoBadge
@@ -1258,8 +1283,7 @@ import workspacecore
 @MainActor final class AlertsRowGestureDelegate: NSObject, NSGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
         guard let view = gestureRecognizer.view else { return true }
-        let location = view.convert(event.locationInWindow, from: nil)
-        var hit = view.hitTest(location)
+        var hit = view.deepestView(at: event)
         while let candidate = hit, candidate !== view {
             if candidate is NSButton { return false }
             hit = candidate.superview

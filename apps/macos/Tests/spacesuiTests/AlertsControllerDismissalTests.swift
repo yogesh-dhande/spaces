@@ -47,17 +47,15 @@ extension ProcessProfileEnvironmentSuites {
             return AppKitController(launchContext: context)
         }
 
-        private func section(_ deviceID: String, isLocal: Bool, _ loadState: AppKitController.SidebarDeviceLoadState) -> AppKitController.DeviceSection {
-            AppKitController.DeviceSection(deviceID: deviceID, deviceName: deviceID, isLocal: isLocal, loadState: loadState)
-        }
+        private func section(_ deviceID: String, isLocal: Bool, _ loadState: AppKitController.SidebarDeviceLoadState)
+            -> AppKitController.DeviceSection
+        { AppKitController.DeviceSection(deviceID: deviceID, deviceName: deviceID, isLocal: isLocal, loadState: loadState) }
 
         @Test func dismissingFollowsTheReachabilityOfTheDeviceThatRaisedTheAlert() {
             let host = makeHost()
             host.deviceModel.deviceSections = [
-                section(SpacesPairedDeviceRecord.localDeviceID, isLocal: true, .loaded),
-                section("linux-box", isLocal: false, .loaded),
-                section("offline-box", isLocal: false, .offline("unreachable")),
-                section("loading-box", isLocal: false, .loading),
+                section(SpacesPairedDeviceRecord.localDeviceID, isLocal: true, .loaded), section("linux-box", isLocal: false, .loaded),
+                section("offline-box", isLocal: false, .offline("unreachable")), section("loading-box", isLocal: false, .loading),
             ]
             let alerts = host.alerts
 
@@ -90,6 +88,71 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(errors.count == 1)
             #expect(host.deviceModel.alertsGroups.flatMap(\.items).map(\.attentionID) == [entry.attentionID])
+        }
+
+        private func bellEntry(device: String, session: String) -> AlertsController.AlertsAttentionEntry {
+            AlertsController.AlertsAttentionEntry(
+                attentionID: "alert:\(device):bell:\(session):t1", kind: .bell, deviceID: device, alertKey: "bell:\(session):t1", icon: "terminal",
+                iconTint: .terminal, label: session, detail: nil, shortcut: "", countsTowardBadge: true, eventDate: nil)
+        }
+
+        private func group(device: String, _ entries: [AlertsController.AlertsAttentionEntry], hidden: Bool = false) -> AlertsController.AlertsGroup {
+            AlertsController.AlertsGroup(
+                projectName: "p", workspaceID: "ws-\(device)", workspaceName: "w", workspaceBranch: nil, isFromHiddenWorkspace: hidden,
+                items: entries, deviceID: device)
+        }
+
+        private func clearAllButton(_ host: AppKitController) -> NSButton? {
+            func walk(_ view: NSView) -> NSButton? {
+                if let button = view as? NSButton, button.accessibilityIdentifier() == "alerts.clear-all" { return button }
+                for subview in view.subviews { if let found = walk(subview) { return found } }
+                return nil
+            }
+            return walk(host.detailContainer)
+        }
+
+        private func waitForRequests(_ count: Int, _ requests: () -> Int) async throws {
+            for _ in 0..<50 where requests() < count { try await Task.sleep(for: .milliseconds(20)) }
+        }
+
+        @Test func clearAllDismissesEveryListedRowOnEachOnlineDeviceAndNothingOnAnOfflineOne() async throws {
+            let host = makeHost()
+            host.deviceModel.deviceSections = [
+                section(SpacesPairedDeviceRecord.localDeviceID, isLocal: true, .loaded), section("linux-box", isLocal: false, .loaded),
+                section("offline-box", isLocal: false, .offline("unreachable")),
+            ]
+            host.deviceModel.alertsGroups = [
+                group(device: SpacesPairedDeviceRecord.localDeviceID, [bellEntry(device: SpacesPairedDeviceRecord.localDeviceID, session: "s1")]),
+                group(device: "linux-box", [bellEntry(device: "linux-box", session: "s2"), bellEntry(device: "linux-box", session: "s3")]),
+                group(device: "offline-box", [bellEntry(device: "offline-box", session: "s4")]),
+                group(device: "linux-box", [bellEntry(device: "linux-box", session: "hidden")], hidden: true),
+            ]
+            var requests: [String: Set<String>] = [:]
+            host.dismissAlertsOverrideForTesting = { keys, deviceID in
+                requests[deviceID, default: []].formUnion(keys)
+                return .success(())
+            }
+            host.alerts.showAlertsDetail()
+
+            host.alerts.clearAllAlerts()
+            try await waitForRequests(2) { requests.count }
+
+            #expect(requests == [SpacesPairedDeviceRecord.localDeviceID: ["bell:s1:t1"], "linux-box": ["bell:s2:t1", "bell:s3:t1"]])
+        }
+
+        @Test func clearAllIsAbsentWhenNothingIsListedAndDisabledWhenEveryRowIsOffline() {
+            let host = makeHost()
+            host.deviceModel.deviceSections = [section("offline-box", isLocal: false, .offline("unreachable"))]
+            host.alerts.showAlertsDetail()
+            #expect(clearAllButton(host) == nil)
+
+            host.deviceModel.alertsGroups = [group(device: "offline-box", [bellEntry(device: "offline-box", session: "s1")])]
+            host.alerts.showAlertsDetail()
+            #expect(clearAllButton(host)?.isEnabled == false)
+
+            host.deviceModel.deviceSections = [section("offline-box", isLocal: false, .loaded)]
+            host.alerts.showAlertsDetail()
+            #expect(clearAllButton(host)?.isEnabled == true)
         }
     }
 }
