@@ -4028,9 +4028,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // the round trip it makes when it returns from the background, so carrying state on it is what lets
         // that resume skip a second request. Local panes heartbeat on a timer and want no state at all.
         //
-        // Every Device API heartbeat answers with state; there is no request-side opt-in, because the only
-        // Device API heartbeat caller is the iOS foreground resume, which always consumes it. The wire
-        // version gate keeps a client that would ignore it from pairing at all.
+        // Every Device API heartbeat answers with state; there is no request-side opt-in. What the state
+        // carries follows `includesRenderUpdate`: a heartbeat that wants the screen (a viewer resuming from
+        // the background) gets it, or metadata only when its held frame is still current; a keep-alive that
+        // only needs the lease verdict sets it false and gets metadata alone, with no snapshot export.
         let includesSessionState = terminalCommand.includesSessionStateOnSuccess || payload.action == .heartbeat
         // The reader says whether its acknowledgment carries the screen, exactly as a `.state` request does,
         // because the two clients that take a session over need different answers and the action alone
