@@ -41,15 +41,14 @@ enum AgentHookOpencodePluginWriter {
 
     /// The ownership marker distinguishes the Spaces plugin from an unrelated file at the managed
     /// path; its version marker distinguishes this build's plugin from an older Spaces plugin; and,
-    /// like `AgentHookJSONWriter.installState`, a current plugin still reports `.outdated` once the
-    /// `spaces` path baked into its `SPACES_CLI` constant does not name an executable file on disk
-    /// (e.g. a deleted development worktree), since that is what re-offers the install that repairs it.
-    /// The check is existence only, never a match against the stable `~/.spaces/bin/spaces` location,
-    /// for the same reason: a development daemon deliberately points the plugin at its own sibling CLI.
-    static func installState(pluginURL: URL, fileManager: FileManager = .default) -> AgentHookInstallState {
+    /// like `AgentHookJSONWriter.installState`, a current plugin still reports `.outdated` unless the
+    /// `spaces` path baked into its `SPACES_CLI` constant is `spacesExecutablePath`, the installed CLI
+    /// (nil when none is installed, which nothing matches). That is what re-offers the install that moves
+    /// a plugin pointing at a development build's CLI back to the installed one.
+    static func installState(pluginURL: URL, spacesExecutablePath: String?, fileManager: FileManager = .default) -> AgentHookInstallState {
         guard let contents = try? String(contentsOf: pluginURL, encoding: .utf8), isSpacesOwned(contents) else { return .notInstalled }
         guard AgentHookCommand.isCurrent(contents) else { return .outdated }
-        guard let path = embeddedExecutablePath(in: contents), fileManager.isExecutableFile(atPath: path) else { return .outdated }
+        guard let spacesExecutablePath, embeddedExecutablePath(in: contents) == spacesExecutablePath else { return .outdated }
         return .current
     }
 

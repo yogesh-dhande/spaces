@@ -501,6 +501,9 @@ public struct SpacesProfile: Sendable, Equatable {
         #endif
     }
 
+    /// The home the running process serves right now, read from the live `HOME` the way `current()` reads it.
+    public static func currentHomeDirectory() -> URL { currentHomeDirectoryURL(environment: currentProcessEnvironment()) }
+
     private static func currentEnvironmentValue(for key: String) -> String? {
         guard let rawValue = getenv(key) else { return nil }
         return String(cString: rawValue)

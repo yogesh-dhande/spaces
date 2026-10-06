@@ -100,16 +100,17 @@ enum AgentHookJSONWriter {
     ///
     /// A file with no Spaces-owned entry at all is `.notInstalled`. Anything partial (a bound event with
     /// no entry, since this build added an event an older one did not write, an entry carrying an older
-    /// `AgentHookCommand.hookVersion`, or a current entry whose embedded `spaces` path does not name an
-    /// executable file) is `.outdated`, because reinstalling is what fixes it. A hook command embeds an
-    /// absolute path resolved at install time (see `AgentHookCommand`), and that path can go stale on
-    /// disk without the file that carries it ever changing, e.g. a development build's worktree gets
-    /// deleted; without this check such a config would keep reading `.current` forever and never be
-    /// offered the reinstall that repairs it. The check is existence only, never a match against the
-    /// stable `~/.spaces/bin/spaces` install location: a development daemon deliberately points its hooks
-    /// at its own sibling CLI so signals reach its own profile, and requiring the stable path would
-    /// misroute a dev profile's signals to the installed profile's daemon.
-    static func installState(fileURL: URL, bindings: [EventBinding], fileManager: FileManager = .default) -> AgentHookInstallState {
+    /// `AgentHookCommand.hookVersion`, or a current entry whose embedded `spaces` path is not
+    /// `spacesExecutablePath`) is `.outdated`, because reinstalling is what fixes it. A hook command embeds
+    /// an absolute path resolved at install time (see `AgentHookCommand`), and the right path can change
+    /// without the file that carries it ever changing: a config written by a development build names that
+    /// build's CLI, which would route the installed app's agents to the development profile, and a path
+    /// that has gone missing fires nothing. Without this match such a config would keep reading
+    /// `.current` and never be offered the reinstall that repairs it. `spacesExecutablePath` is the
+    /// installed CLI (see `AgentHookInstalledCLI`), nil when none is installed, which nothing matches.
+    static func installState(fileURL: URL, bindings: [EventBinding], spacesExecutablePath: String?, fileManager: FileManager = .default)
+        -> AgentHookInstallState
+    {
         guard !bindings.isEmpty, let root = try? loadRootObject(fileURL: fileURL, fileManager: fileManager),
             let hooks = root["hooks"] as? [String: Any]
         else { return .notInstalled }
@@ -122,8 +123,8 @@ enum AgentHookJSONWriter {
         guard ownedCommandsPerBinding.contains(where: { !$0.isEmpty }) else { return .notInstalled }
         let everyEventBound = ownedCommandsPerBinding.allSatisfy { !$0.isEmpty }
         let commandIsCurrent: (String) -> Bool = { command in
-            guard AgentHookCommand.isCurrent(command), let path = AgentHookCommand.embeddedExecutablePath(in: command) else { return false }
-            return fileManager.isExecutableFile(atPath: path)
+            guard AgentHookCommand.isCurrent(command), let spacesExecutablePath else { return false }
+            return AgentHookCommand.embeddedExecutablePath(in: command) == spacesExecutablePath
         }
         let everyCommandCurrent = ownedCommandsPerBinding.allSatisfy { $0.allSatisfy(commandIsCurrent) }
         return everyEventBound && everyCommandCurrent ? .current : .outdated
