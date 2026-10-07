@@ -215,8 +215,7 @@ extension OrchestratorTests {
             orchestrator: fixture.orchestrator, store: fixture.store, workspace: fixture.workspace, sessionID: "crashed-daemon-shell",
             state: .running, servicePID: 999_999)
 
-        let result = try fixture.orchestrator.recoverStaleTerminalSessions(
-            adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in false })
+        let result = try fixture.orchestrator.recoverStaleTerminalSessions(adoptedSessionIDs: [], resumedFromHandoff: false)
 
         XCTAssertEqual(result.finalized.map(\.sessionID), ["crashed-daemon-shell"])
         XCTAssertEqual(result.finalized.map(\.state), [.failed], "a daemon that vanished without finalizing the row did not end cleanly")
@@ -241,8 +240,7 @@ extension OrchestratorTests {
             orchestrator: fixture.orchestrator, store: fixture.store, workspace: fixture.workspace, sessionID: "exited-before-shutdown",
             state: .exited)
 
-        let result = try fixture.orchestrator.recoverStaleTerminalSessions(
-            adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in false })
+        let result = try fixture.orchestrator.recoverStaleTerminalSessions(adoptedSessionIDs: [], resumedFromHandoff: false)
 
         XCTAssertTrue(result.finalized.isEmpty, "a row that already reads ended has nothing to repair")
         XCTAssertFalse(
@@ -265,8 +263,7 @@ extension OrchestratorTests {
             orchestrator: fixture.orchestrator, store: fixture.store, workspace: fixture.workspace, sessionID: "adopted-shell", state: .running,
             orderIndex: 201)
 
-        let result = try fixture.orchestrator.recoverStaleTerminalSessions(
-            adoptedSessionIDs: ["adopted-shell"], resumedFromHandoff: true, isProcessAlive: { _ in false })
+        let result = try fixture.orchestrator.recoverStaleTerminalSessions(adoptedSessionIDs: ["adopted-shell"], resumedFromHandoff: true)
 
         XCTAssertEqual(result.finalized.map(\.sessionID), ["crashed-shell"], "an adopted session is live under this daemon and is not repaired")
         XCTAssertTrue(try XCTUnwrap(fixture.store.workspace(id: fixture.workspace.id)).isRunning)

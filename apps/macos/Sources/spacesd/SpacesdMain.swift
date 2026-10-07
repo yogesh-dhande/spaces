@@ -457,7 +457,7 @@ enum SpacesDaemonErrorClassification {
         // Startup is the one lifecycle transition NOT excluded against teardown (issue #391). A signal
         // landing in the adoption suspension below runs `shutdownOnce()` concurrently, so cores adopted
         // after its engine snapshot escape termination. Deferred rather than fixed here because that
-        // residue self-heals: an unterminated session's row falls to `recoverStaleSessions`' dead-pid
+        // residue self-heals: an unterminated session's row falls to `recoverStaleSessions`' foreign-pid
         // branch at the next daemon start. The window is also only the successor image's post-handoff
         // adoption: `resumeSessionsFromHandoffIfNeeded` returns without suspending on a fresh boot.
         // What such a signal cannot do is bring services back up behind the stop phase: whichever
@@ -3157,10 +3157,6 @@ enum SpacesDaemonErrorClassification {
                     ?? TerminalSessionRuntimeState(
                         sessionID: sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil, state: .exited,
                         updatedAt: now, exitedAt: now, workingDirectory: launchConfiguration.workingDirectory)
-                if runtimeState.servicePID != getpid(), Self.isLive(runtimeState), Self.isProcessAlive(pid: Int(runtimeState.servicePID)) {
-                    return TerminalServiceResponse(
-                        ok: false, message: "Terminal session \(sessionID) is owned by another process and was not stopped by spacesd.")
-                }
                 // `bellAt` carries forward: a session ending does not answer the bell it rang, and the
                 // client's alert (whose identity is that timestamp) must survive the exit write.
                 let exitedState = TerminalSessionRuntimeState(
@@ -3548,13 +3544,12 @@ enum SpacesDaemonErrorClassification {
 
     /// Single startup repair chokepoint for durable runtime rows a predecessor daemon image (or a
     /// crashed prior process) left in a live state. Runs once, AFTER handoff adoption, so the sessions
-    /// this image adopted (`adoptedSessionIDs`) are exempt. The full repair matrix (dead pid, repair
+    /// this image adopted (`adoptedSessionIDs`) are exempt. The full repair matrix (foreign pid, repair
     /// `.failed`; own pid not adopted, repair `.exited` after a handoff and `.failed` otherwise; own pid
-    /// adopted, live; other live pid, leave) lives in `TerminalSessionStaleRecovery.reconcile`, keyed on
-    /// the injected `getpid()` and the daemon's own `isProcessAlive` probe. The own-pid-not-adopted case
-    /// is what closes the lost-write-across-`execv` class (`execv` preserves the pid, so the plain
-    /// dead-pid check can never fire for a stranded row); a plain shutdown needs nothing more, since its
-    /// successor runs under a different pid and its rows fall to the dead-pid case.
+    /// adopted, live) lives in `TerminalSessionStaleRecovery.reconcile`, keyed on `getpid()`. The
+    /// own-pid-not-adopted case is what closes the lost-write-across-`execv` class (`execv` preserves the
+    /// pid, so the foreign-pid rule can never fire for a stranded row); a plain shutdown needs nothing
+    /// more, since its successor runs under a different pid and its rows fall to the foreign-pid case.
     ///
     /// `resumedFromHandoff` is what tells the two apart, and `handoffGeneration` is the fact that answers
     /// it: it is set only by `resumeSessionsFromHandoffIfNeeded` consuming a handoff table, so a zero
@@ -3571,11 +3566,10 @@ enum SpacesDaemonErrorClassification {
     /// lifecycle gate and it lands before either request listener opens.
     private func recoverStaleSessions(adoptedSessionIDs: Set<String> = []) throws -> [String] {
         let orchestrator = WorkspaceOrchestrator(store: try SQLiteStore(path: try DatabaseLocator.defaultPath()))
-        let result = try orchestrator.recoverStaleTerminalSessions(
-            adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: handoffGeneration != 0, isProcessAlive: { Self.isProcessAlive(pid: Int($0)) })
+        let result = try orchestrator.recoverStaleTerminalSessions(adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: handoffGeneration != 0)
         // A repair write that could not commit within the sweep's bounded retry leaves the row in its
-        // prior live state; it heals at the next daemon restart via the dead-pid branch. Log it so the
-        // strand is observable rather than silent.
+        // prior live state; the next daemon start repairs it again. Log it so the strand is observable
+        // rather than silent.
         for sessionID in result.unrepaired { writeStandardError("spacesd stale_session_repair_failed session=\(sessionID)\n") }
         captureRestorableSessions(strandedSessionIDs: result.sessionsStrandedByUncleanExit)
         return result.sessionsStrandedByUncleanExit
@@ -3634,10 +3628,6 @@ enum SpacesDaemonErrorClassification {
         guard pid > 0 else { return false }
         if kill(pid_t(pid), 0) == 0 { return true }
         return errno == EPERM
-    }
-
-    private nonisolated static func isLive(_ runtimeState: TerminalSessionRuntimeState) -> Bool {
-        runtimeState.state == .starting || runtimeState.state == .running
     }
 
     private nonisolated static func errorMessage(_ error: any Error) -> String {
