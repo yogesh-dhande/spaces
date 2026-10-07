@@ -16,8 +16,8 @@ import XCTest
 /// terminated whose exited write was lost (`resumedFromHandoff: true`, repaired `.exited`), or a row
 /// whose pid `launchd` reissued to a freshly booted daemon after the real owner vanished, the reboot
 /// case (`resumedFromHandoff: false`, repaired `.failed` so its coding agent is offered back). The plain
-/// dead-pid rule can never repair either shape (the pid is alive), so without this branch a row would be
-/// stranded forever.
+/// foreign-pid rule can never repair either shape (the pid is this image's own), so without this branch a
+/// row would be stranded forever.
 final class TerminalSessionStaleRecoveryTests: XCTestCase {
     private var originalDatabasePath: String?
     private var originalRuntimeDirectory: String?
@@ -76,13 +76,11 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let paths = try seedSession(sessionID: sessionID, servicePID: getpid(), state: .running)
         try seedLiveOwnerClient(sessionID: sessionID, paths: paths)
 
-        // This pid is ALIVE, so a dead-pid-only sweep (`guard !isProcessAlive(servicePID)`) would skip
-        // the row and leave it `.running` forever.
-        XCTAssertEqual(kill(getpid(), 0), 0, "own pid must be alive, which is exactly why the plain dead-pid rule can't repair it")
+        // The row's pid is this image's own, so the foreign-pid rule does not apply to it and only the
+        // own-pid branch can repair it.
         XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: paths).count == 1)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true, isProcessAlive: { _ in true })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true)
 
         XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .exited)])
         XCTAssertTrue(result.unrepaired.isEmpty)
@@ -104,8 +102,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let sessionID = "session-pid-reused-after-reboot"
         let paths = try seedSession(sessionID: sessionID, servicePID: getpid(), state: .running)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in true })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false)
 
         XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .failed)
@@ -121,8 +118,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let sessionID = "session-execv-successor"
         let paths = try seedSession(sessionID: sessionID, servicePID: getpid(), state: .running)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true, isProcessAlive: { _ in true })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true)
 
         XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .exited)])
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited)
@@ -135,8 +131,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let sessionID = "session-adopted"
         let paths = try seedSession(sessionID: sessionID, servicePID: getpid(), state: .running)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [sessionID], resumedFromHandoff: true, isProcessAlive: { _ in true })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [sessionID], resumedFromHandoff: true)
 
         XCTAssertTrue(result.finalized.isEmpty, "an adopted session is live under this pid and must not be touched")
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
@@ -149,8 +144,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let deadPID: Int32 = 999_999
         let paths = try seedSession(sessionID: sessionID, servicePID: deadPID, state: .running)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in false })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false)
 
         XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .failed)
@@ -168,8 +162,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let paths = try seedSession(sessionID: sessionID, servicePID: 999_999, state: .running, rootDirectory: foreignRoot.path)
         try FileManager.default.removeItem(at: foreignRoot)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in false })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false)
 
         XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .failed)
@@ -186,8 +179,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let bellAt = "2026-05-08T00:00:30Z"
         let paths = try seedSession(sessionID: sessionID, servicePID: 999_999, state: .running, bellAt: bellAt)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in false })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false)
 
         XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
         let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
@@ -195,16 +187,21 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         XCTAssertEqual(runtimeState.bellAt, bellAt)
     }
 
-    func testLiveForeignPidRowIsLeftRunning() throws {
-        let sessionID = "session-other-live-daemon"
-        let foreignPID: Int32 = 4242
-        let paths = try seedSession(sessionID: sessionID, servicePID: foreignPID, state: .running)
+    /// After a reboot the pre-reboot daemon's pid is reissued to an unrelated process (observed: a system
+    /// service), so a live process under the row's pid is not an owner.
+    func testForeignPidRowIsFinalizedFailedEvenWhenAnotherProcessNowHoldsThatPid() throws {
+        let sessionID = "session-pid-reissued-to-another-process"
+        // pid 1 (launchd/init) is always alive and is never this test process.
+        let reissuedPID: Int32 = 1
+        let paths = try seedSession(sessionID: sessionID, servicePID: reissuedPID, state: .running)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { $0 == foreignPID })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false)
 
-        XCTAssertTrue(result.finalized.isEmpty, "a live foreign daemon still owns its session; leave it")
-        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
+        XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
+        XCTAssertEqual(result.sessionsStrandedByUncleanExit, [sessionID])
+        let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(runtimeState.state, .failed)
+        XCTAssertEqual(runtimeState.servicePID, getpid())
     }
 
     // MARK: - Already-terminal rows are never revisited
@@ -213,8 +210,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let sessionID = "session-already-exited"
         let paths = try seedSession(sessionID: sessionID, servicePID: getpid(), state: .exited)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in true })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false)
 
         XCTAssertTrue(result.finalized.isEmpty)
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited)
@@ -268,8 +264,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         // otherwise cost real wall-clock time (production's `repairWriteRetryDelay` * (attempts - 1)); inject
         // a near-zero delay and a no-op sleep to virtualize that wait.
         let failedResult = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true, isProcessAlive: { _ in true }, repairWriteRetryDelay: 0.001,
-            sleep: { _ in })
+            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true, repairWriteRetryDelay: 0.001, sleep: { _ in })
 
         XCTAssertTrue(failedResult.finalized.isEmpty, "a repair whose write cannot commit must NOT be reported finalized (the pre-fix bug)")
         XCTAssertEqual(failedResult.unrepaired, [sessionID], "a repair that could not commit must be reported for the caller to log")
@@ -283,8 +278,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         if let originalPermissions { try fileManager.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: databasePath) }
         TerminalSessionPersistence.closeDatabaseConnection()
 
-        let healedResult = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true, isProcessAlive: { _ in true })
+        let healedResult = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true)
 
         XCTAssertEqual(
             healedResult.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .exited)],
@@ -305,50 +299,47 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
         XCTAssertTrue(FileManager.default.createFile(atPath: paths.subscriptionSocketPath, contents: Data()))
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in false })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false)
 
         XCTAssertTrue(result.finalized.isEmpty, "an already-ended row has nothing to repair")
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.controlSocketPath))
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
     }
 
-    /// The reclaim must never reach a session that is still being served: a live foreign pid means
-    /// another process owns those sockets and is listening on them.
-    func testSocketsOfASessionOwnedByALiveProcessAreLeftAlone() throws {
+    /// A live row under a foreign pid has no serving core in this daemon, so the repair that ends it also
+    /// reclaims its sockets.
+    func testSocketsOfAStrandedForeignPidSessionAreRemovedByItsRepair() throws {
         let sessionID = "session-live-with-sockets"
         let paths = try seedSession(sessionID: sessionID, servicePID: 4242, state: .running)
         try paths.ensureDirectories()
         XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
         XCTAssertTrue(FileManager.default.createFile(atPath: paths.subscriptionSocketPath, contents: Data()))
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in true })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: false)
 
-        XCTAssertTrue(result.finalized.isEmpty, "a row owned by a live process is left alone")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.controlSocketPath))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
+        XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.controlSocketPath))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
     }
 
-    // MARK: - sessionsStrandedByUncleanExit names only the dead-foreign-pid repair
+    // MARK: - sessionsStrandedByUncleanExit names only the foreign-pid repair
 
     /// `.failed` (a foreign daemon that vanished without finalizing its row) is a run cut short.
     /// `.exited` (this image's own pid, not adopted: a predecessor's exited write was lost) is a run the
     /// predecessor deliberately ended, just with a dropped write. Both are repaired by this pass, but
     /// only the first is the daemon's own record of "cut short" that a restorable-session capture reads.
-    func testSessionsStrandedByUncleanExitNamesOnlyTheDeadForeignPidSession() throws {
-        let deadPID: Int32 = 999_999
-        let deadForeignPidSession = "session-dead-foreign-pid"
+    func testSessionsStrandedByUncleanExitNamesOnlyTheForeignPidSession() throws {
+        let foreignPID: Int32 = 999_999
+        let foreignPidSession = "session-foreign-pid"
         let ownPidUnadoptedSession = "session-own-pid-unadopted"
-        _ = try seedSession(sessionID: deadForeignPidSession, servicePID: deadPID, state: .running)
+        _ = try seedSession(sessionID: foreignPidSession, servicePID: foreignPID, state: .running)
         _ = try seedSession(sessionID: ownPidUnadoptedSession, servicePID: getpid(), state: .running)
 
-        let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true, isProcessAlive: { $0 != deadPID })
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], resumedFromHandoff: true)
 
-        XCTAssertEqual(Set(result.finalized.map(\.sessionID)), [deadForeignPidSession, ownPidUnadoptedSession], "both rows are repaired")
+        XCTAssertEqual(Set(result.finalized.map(\.sessionID)), [foreignPidSession, ownPidUnadoptedSession], "both rows are repaired")
         XCTAssertEqual(
-            result.sessionsStrandedByUncleanExit, [deadForeignPidSession],
+            result.sessionsStrandedByUncleanExit, [foreignPidSession],
             "only the foreign daemon that vanished mid-run counts as cut short; the own-pid row was a deliberately-ended session whose write was lost"
         )
     }

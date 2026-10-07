@@ -95,7 +95,7 @@ final class DaemonExitAlertSettleTests: XCTestCase {
 
     /// What the daemon's startup runs: stale recovery, then the settle over what it stranded.
     private func restartDaemon() throws {
-        let result = try orchestrator.recoverStaleTerminalSessions(adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in false })
+        let result = try orchestrator.recoverStaleTerminalSessions(adoptedSessionIDs: [], resumedFromHandoff: false)
         try DaemonExitAlertSettle.settle(store: store, strandedSessionIDs: result.sessionsStrandedByUncleanExit, adoptedSessionIDs: [])
     }
 
@@ -210,6 +210,6 @@ final class DaemonExitAlertSettleTests: XCTestCase {
 
     /// Stale recovery without the settle, to show what the repair alone leaves alerting.
     private func restartDaemonWithoutSettle() throws {
-        try orchestrator.recoverStaleTerminalSessions(adoptedSessionIDs: [], resumedFromHandoff: false, isProcessAlive: { _ in false })
+        try orchestrator.recoverStaleTerminalSessions(adoptedSessionIDs: [], resumedFromHandoff: false)
     }
 }

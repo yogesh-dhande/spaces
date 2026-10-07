@@ -779,7 +779,7 @@ public enum TerminalSessionPersistence {
     /// attachments still active. The next restart's sweep skips terminal rows, so those ghost
     /// attachments on a dead session would never be cleaned. As one transaction any failure rolls back
     /// untouched, leaving the row in its prior live state so the next restart genuinely heals it via the
-    /// dead-pid branch. Kept separate from `writeRuntimeState`/`detachActiveClients`, which still serve
+    /// stale-recovery sweep. Kept separate from `writeRuntimeState`/`detachActiveClients`, which still serve
     /// their own single-purpose callers.
     ///
     /// The repair writes rows only and deliberately does not create the session's directory: it runs

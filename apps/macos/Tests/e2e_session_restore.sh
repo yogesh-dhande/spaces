@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verifies session restore (issue #715) against a real daemon, for both teardowns a device derives on its
-# own: a coding agent whose daemon is killed outright is captured as restorable at the next daemon start,
+# own: a coding agent whose daemon is killed outright is captured as restorable at the next daemon start
+# (including the reboot shape, where the dead daemon's pid is held by an unrelated live process),
 # and a coding agent running when the daemon is asked to shut down (what a restart, a logout, and a
 # `launchctl stop` deliver) is captured by that shutdown. Answering either offer with Restore brings the
 # agent back resuming its own conversation, and a restored agent restores again on the same terms with one
@@ -42,6 +43,8 @@ DEVICE_API_AUTH_TOKEN=""
 WORKSPACE_ID=""
 CAPTURED_SESSION_ID=""
 ORPHANED_CHILD_PID=""
+# Stand-in for an unrelated process that holds the killed daemon's reissued pid (#883).
+PID_HOLDER_PID=""
 # The conversation the first fixture agent reports. Every restore resumes this same conversation, because
 # a restored agent reports nothing of its own.
 ORIGINAL_CONVERSATION=""
@@ -60,6 +63,7 @@ cleanup() {
   local exit_code=$?
   # The agent's shell is a child of a daemon this script killed outright, so it can outlive both.
   if [[ -n "$ORPHANED_CHILD_PID" ]]; then kill -9 "$ORPHANED_CHILD_PID" >/dev/null 2>&1 || true; fi
+  if [[ -n "$PID_HOLDER_PID" ]]; then kill "$PID_HOLDER_PID" >/dev/null 2>&1 || true; fi
   # Stop the daemon this script owns and make sure it is gone: it serves a profile whose directory is
   # about to be deleted, so a daemon that takes its time with a graceful stop is escalated rather than
   # left behind.
@@ -357,12 +361,24 @@ main() {
 
   # The unclean exit: the daemon is killed outright and derives what it stranded at its next start.
   stop_daemon -9 "$CAPTURED_SESSION_ID"
+  # Reproduces a reboot: the old daemon's pid is reissued to an unrelated live process (#883), and the
+  # restarted daemon must still derive the session as stranded rather than owned by that process. Only the
+  # runtime row changes; the killed daemon's lock record names a dead pid, so the new daemon takes the lock.
+  sleep 600 &
+  PID_HOLDER_PID=$!
+  db_query "UPDATE terminal_runtime_states SET service_pid = ? WHERE session_id = ?" \
+    "$PID_HOLDER_PID" "$CAPTURED_SESSION_ID" >/dev/null
+  [[ "$(db_query "SELECT service_pid FROM terminal_runtime_states WHERE session_id = ?" "$CAPTURED_SESSION_ID")" == "$PID_HOLDER_PID" ]] \
+    || fail "the stranded session's service_pid was not rewritten to the stand-in process"
   start_daemon
   pass "the daemon was killed outright and restarted on the same profile"
 
   local generation restored_session_id
   generation="$(assert_session_is_offered "$CAPTURED_SESSION_ID")"
-  pass "the restarted daemon offers the stranded agent for restore"
+  pass "the restarted daemon offers the stranded agent for restore even though its old daemon pid is held by a live process"
+  kill "$PID_HOLDER_PID" >/dev/null 2>&1 || true
+  wait "$PID_HOLDER_PID" >/dev/null 2>&1 || true
+  PID_HOLDER_PID=""
 
   local stale_response
   stale_response="$(device_request restoreSessions "{\"generation\":\"not-this-record\"}")"

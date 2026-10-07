@@ -156,13 +156,11 @@ extension WorkspaceOrchestrator {
     ///   - resumedFromHandoff: whether this daemon image consumed a handoff table at startup. Forwarded
     ///     untouched to the repair matrix, which reads it to tell an `execv` successor's leftover rows
     ///     (`.exited`) from rows stranded under a reissued pid by an unclean exit (`.failed`).
-    ///   - isProcessAlive: liveness probe for a row's foreign `service_pid`, injected so the daemon shares
-    ///     its own probe and a test can drive the dead-pid branch deterministically.
-    @discardableResult public func recoverStaleTerminalSessions(
-        adoptedSessionIDs: Set<String>, resumedFromHandoff: Bool, isProcessAlive: (Int32) -> Bool
-    ) throws -> TerminalSessionStaleRecovery.ReconcileResult {
+    @discardableResult public func recoverStaleTerminalSessions(adoptedSessionIDs: Set<String>, resumedFromHandoff: Bool) throws
+        -> TerminalSessionStaleRecovery.ReconcileResult
+    {
         let result = try TerminalSessionStaleRecovery.reconcile(
-            ownPID: getpid(), adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: resumedFromHandoff, isProcessAlive: isProcessAlive)
+            ownPID: getpid(), adoptedSessionIDs: adoptedSessionIDs, resumedFromHandoff: resumedFromHandoff)
         let runningWorkspaceIDs = try store.projects().flatMap { try store.workspaces(projectID: $0.id) }.filter(\.isRunning).map(\.id)
         try reconcileWorkspaceRunning(workspaceIDs: Set(runningWorkspaceIDs))
         return result

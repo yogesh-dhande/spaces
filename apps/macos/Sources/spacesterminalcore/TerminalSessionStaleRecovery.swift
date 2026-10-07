@@ -7,7 +7,8 @@ import Foundation
 ///
 /// The repair matrix is keyed on the row's `service_pid`, and for the own-pid case, on whether this
 /// image itself resumed from an `execv` handoff (`resumedFromHandoff`):
-///  - dead pid (process not alive) .................. repair `.failed`, the owning daemon process is gone.
+///  - foreign pid (any, alive or not) ............... repair `.failed`, the owning daemon no longer
+///                                                       serves this profile.
 ///  - our pid, session adopted from handoff ......... leave, live, this image owns it.
 ///  - our pid, session NOT adopted:
 ///      - resumed from handoff ....................... repair `.exited`, a predecessor image under this
@@ -19,11 +20,18 @@ import Foundation
 ///                                                       reissuing a dead daemon's old pid to this fresh
 ///                                                       process (observed after a reboot). That owning
 ///                                                       daemon vanished without finalizing the row, the
-///                                                       same foreign-dead-pid case, just wearing this pid.
-///  - other live pid ................................. leave, a live process owns it.
+///                                                       same foreign-pid case, just wearing this pid.
 ///
-/// Why the own-pid branches exist: the `execv` handoff keeps the same pid, so the plain dead-pid check
-/// can never fire for a row the predecessor stranded, the pid is still alive as this successor image.
+/// Why a live foreign pid is not evidence of ownership: the only writer of a row's `service_pid` is the
+/// daemon serving the profile (its own `getpid()`), and the daemon runs this sweep only after acquiring
+/// the profile's instance lock, so a profile is served by one daemon at a time. A live row carrying any
+/// pid other than this image's therefore belongs to a daemon that no longer serves the profile, and
+/// whether some process currently holds that pid number says nothing about ownership. After a reboot
+/// the old daemon's pid is routinely reissued to an unrelated process; treating that as an owner left
+/// every pre-reboot session `.running` with no core behind it.
+///
+/// Why the own-pid branches exist: the `execv` handoff keeps the same pid, so the foreign-pid rule can
+/// never fire for a row the predecessor stranded, the pid is this successor image's own.
 /// When a predecessor's exited-state write is dropped (e.g. the per-core persistence queue exhausts its
 /// bounded retries under sustained writer-lock contention or a storage fault during handoff), that
 /// `.running` row would otherwise remain forever, its `service_pid` matching this live image.
@@ -31,11 +39,11 @@ import Foundation
 /// row `.exited`, closing that lost-write class. A fresh boot can carry the identical pid match for an
 /// unrelated reason, `launchd` reissuing a dead daemon's old pid to the next process it starts (this is
 /// what a reboot does), and that row belongs to a vanished daemon rather than an `execv` predecessor of
-/// this image, so it must be finalized `.failed` like any other foreign dead pid and its coding agent
+/// this image, so it must be finalized `.failed` like any other foreign pid and its coding agent
 /// offered back as stranded.
 ///
-/// A plain (non-`execv`) daemon shutdown needs nothing beyond the dead-pid case: the successor runs
-/// under a different pid, so the predecessor's rows fall to "dead pid → repair".
+/// A plain (non-`execv`) daemon shutdown needs nothing beyond the foreign-pid case: the successor runs
+/// under a different pid, so the predecessor's rows fall to "foreign pid → repair".
 ///
 /// Sessions are read through the root their row stores, so a row is repaired on the pid matrix alone —
 /// a session whose directory has vanished, or whose root this profile no longer derives, still gets its
@@ -51,9 +59,10 @@ import Foundation
 /// write that cannot commit within a bounded in-place retry — the same pathological writer-lock or
 /// storage fault that can drop a predecessor's exited-state write — leaves the row in its prior live
 /// state rather than falsely reporting it finalized. Those sessions are returned in `unrepaired` so the
-/// caller can log them, and they heal at the next daemon restart via the dead-pid branch (the successor
-/// runs under a new pid, so the still-`.running` row falls to "dead pid → repair"). The strand is
-/// therefore bounded to the current daemon's lifetime, never permanent.
+/// caller can log them, and they heal at the next daemon restart: a plain restart runs under a new pid,
+/// so the still-`.running` row falls to the foreign-pid branch, and an `execv` handoff keeps the pid, so
+/// it falls to the own-pid not-adopted branch. The strand is therefore bounded to the current daemon's
+/// lifetime, never permanent.
 public enum TerminalSessionStaleRecovery {
     /// Bounded in-place retry for a repair write that cannot commit, mirroring the per-core persistence
     /// queue's exited-write policy. This runs once on a cold startup path, so blocking a few extra
@@ -84,7 +93,7 @@ public enum TerminalSessionStaleRecovery {
         public let finalized: [FinalizedSession]
         /// Sessions whose repair write could not commit within the bounded in-place retry (a sustained
         /// writer lock or storage fault). Left untouched in their prior live state; the caller logs them
-        /// and the next daemon restart heals them via the dead-pid branch.
+        /// and the next daemon restart heals them.
         public let unrepaired: [String]
 
         public init(finalized: [FinalizedSession], unrepaired: [String]) {
@@ -94,8 +103,8 @@ public enum TerminalSessionStaleRecovery {
 
         /// The sessions this pass found stranded by an unclean exit, in the order they were repaired.
         ///
-        /// `.failed` is written by two branches of the repair matrix: a foreign `service_pid` that is no
-        /// longer alive, and an own-pid row that is not adopted and did not resume from a handoff. Both
+        /// `.failed` is written by two branches of the repair matrix: a foreign `service_pid`, and an
+        /// own-pid row that is not adopted and did not resume from a handoff. Both
         /// name an owning daemon that vanished without finalizing the row (the second is that vanished
         /// daemon's pid reused by `launchd` for this fresh image, typically after a reboot), so `.failed`
         /// is the pass's own record of "this run was cut short". `.exited` is the other repair, and it
@@ -118,8 +127,6 @@ public enum TerminalSessionStaleRecovery {
     ///     from `adoptedSessionIDs.isEmpty`, because a handoff whose sessions all failed to adopt still
     ///     leaves the predecessor's rows behind under this pid and those still belong in the `.exited`
     ///     branch.
-    ///   - isProcessAlive: liveness probe for a foreign pid, injected so the daemon shares its own
-    ///     `kill(pid, 0)` implementation and tests can drive the foreign-pid branch deterministically.
     ///   - now: repair timestamp, injected for testability.
     ///   - repairWriteRetryDelay: back-off between repair-write retry attempts, defaulting to production's
     ///     `repairWriteRetryDelay`. Injectable so a test exercising the retry-exhaustion path does not pay
@@ -127,7 +134,7 @@ public enum TerminalSessionStaleRecovery {
     ///   - sleep: the back-off primitive itself, defaulting to a real `Thread.sleep`. Tests can inject a
     ///     non-blocking closure alongside a near-zero delay to virtualize the wait entirely.
     @discardableResult public static func reconcile(
-        ownPID: Int32, adoptedSessionIDs: Set<String>, resumedFromHandoff: Bool, isProcessAlive: (Int32) -> Bool, now: Date = Date(),
+        ownPID: Int32, adoptedSessionIDs: Set<String>, resumedFromHandoff: Bool, now: Date = Date(),
         repairWriteRetryDelay: TimeInterval = TerminalSessionStaleRecovery.repairWriteRetryDelay,
         sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) throws -> ReconcileResult {
@@ -161,14 +168,15 @@ public enum TerminalSessionStaleRecovery {
                     // Our own pid, not adopted, and this image never ran an `execv` handoff: the pid match
                     // is not a predecessor image of this one, it is `launchd` reissuing a dead daemon's
                     // old pid to this fresh process (observed after a reboot). That owning daemon vanished
-                    // without finalizing the row, the same case as a foreign dead pid, so `.failed` records
+                    // without finalizing the row, the same case as a foreign pid, so `.failed` records
                     // that the run did not end cleanly and its coding agent is offered back as stranded.
                     terminalState = .failed
                 }
             } else {
-                // A foreign pid: stale only if that process is gone. The owning daemon vanished without
-                // finalizing this row, so `.failed` records that the run did not end cleanly.
-                guard !isProcessAlive(runtimeState.servicePID) else { continue }
+                // A foreign pid, alive or not: this image holds the instance lock, so the owning daemon
+                // no longer serves the profile and vanished without finalizing this row. A live process
+                // under that pid number is a reissued pid, not an owner. `.failed` records that the run
+                // did not end cleanly.
                 terminalState = .failed
             }
 
@@ -184,7 +192,7 @@ public enum TerminalSessionStaleRecovery {
             // sustained writer lock or storage fault — the same failure that can drop a predecessor's
             // exited-state write), do NOT report the session as finalized: leave the row in its prior
             // live state so nothing observes a false terminal state, record it as unrepaired for the
-            // caller to log, and let the next daemon restart heal it via the dead-pid branch.
+            // caller to log, and let the next daemon restart heal it.
             guard commitRepair(finalizedState, detachedAt: nowString, paths: paths, retryDelay: repairWriteRetryDelay, sleep: sleep) else {
                 unrepaired.append(launchConfiguration.sessionID)
                 continue
@@ -209,7 +217,7 @@ public enum TerminalSessionStaleRecovery {
     /// `false` if every attempt fails. The runtime-state write and the client detach are performed inside
     /// a single `finalizeSessionRepair` transaction, so the repair is all-or-nothing: on failure neither
     /// half has altered durable state and the row stays in its prior live state. This atomicity is what
-    /// lets a failed repair heal at the next daemon restart via the dead-pid branch — a partial commit
+    /// lets a failed repair heal at the next daemon restart — a partial commit
     /// (row finalized but clients left attached) would strand ghost attachments the terminal-row-skipping
     /// sweep could never revisit.
     private static func commitRepair(
