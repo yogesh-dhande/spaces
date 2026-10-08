@@ -29,7 +29,7 @@ TERMINAL_BACKGROUND_RGB = {
 }
 
 # GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec.
-RENDER_UPDATE_VERSION = 7
+RENDER_UPDATE_VERSION = 8
 
 
 def parse_args() -> argparse.Namespace:

@@ -1693,6 +1693,26 @@ bool spaces_ghostty_vt_session_scrollbar(SpacesGhosttyVtSession *session, Spaces
     return true;
 }
 
+bool spaces_ghostty_vt_session_history_position(SpacesGhosttyVtSession *session, SpacesGhosttyVtHistoryPosition *out) {
+    if (out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyTerminalScrollbar scrollbar = {0};
+    uint64_t rows_pruned = 0;
+    uint64_t history_epoch = 0;
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_ROWS_PRUNED, &rows_pruned) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_HISTORY_EPOCH, &history_epoch) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    out->total = scrollbar.total;
+    out->offset = scrollbar.offset;
+    out->rows_pruned = rows_pruned;
+    out->history_epoch = history_epoch;
+    return true;
+}
+
 bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, intptr_t delta_rows) {
     SpacesGhosttyVtScrollbar before = {0};
     SpacesGhosttyVtScrollbar after = {0};

@@ -85,6 +85,12 @@
         private var controlServer: TerminalControlServer?
         private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
         private var outputHandle: FileHandle?
+        /// The length of `output.log`, which is also every frame's `transcriptByteOffset`. This core
+        /// appends each PTY chunk to the file and writes the same chunk to the vt terminal in one
+        /// synchronous engine-actor turn (`handleOutput`), as it does a clear (`clearScreen`), and a
+        /// handoff resume replays the whole file into the terminal it builds, so at every frame build the
+        /// terminal has consumed exactly the first `outputByteCount` bytes of the file. A head trim swaps
+        /// the file and resets the count to the trimmed file's length.
         private var outputByteCount = 0
         /// Bounds `output.log` for this session, running the expensive preamble replay off the engine so a
         /// trim cannot stall other sessions' terminal I/O. See `TerminalTranscriptTrimCoordinator`.
@@ -94,15 +100,29 @@
                 guard let self, outputHandle != nil else { return nil }
                 return UInt64(outputByteCount)
             },
-            adoptTrimmedTranscript: { [weak self] handle, endOffset in
+            adoptTrimmedTranscript: { [weak self] handle, endOffset, _ in
                 guard let self else { return }
                 // The trim replaced output.log with a fresh inode; adopt its handle before closing the old
-                // one so the stored property always holds a valid handle even if the close fails.
+                // one so the stored property always holds a valid handle even if the close fails. The
+                // end offset is already in the trimmed file's coordinates, and it is the frame offset
+                // (see `outputByteCount`), so no separate renumbering is needed here.
                 let previousHandle = outputHandle
                 outputHandle = handle
+                transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(handle)) ?? 0
                 outputByteCount = Int(endOffset)
                 try? previousHandle?.close()
             })
+        /// The identity of the `output.log` file `outputHandle` refers to, stamped on every frame; 0 until a
+        /// handle exists (see `TerminalTranscriptFileIdentity`).
+        private var transcriptFileIdentity: UInt64 = 0
+        /// Random value minted whenever this core creates or rebuilds its vt terminal (`startIfNeeded`,
+        /// `recreateVTRenderer`), folded into every frame's `historyEpoch`. The terminal's own history
+        /// epoch only says when absolute rows were renumbered within one terminal; a rebuilt terminal
+        /// (a handoff resume re-parses `output.log` into a fresh one) numbers rows differently and must
+        /// read as a renumbering even if both terminals happen to report the same epoch value. A core
+        /// that keeps its terminal (`resumeInPlaceAfterFailedExec`) keeps its incarnation. Deliberately
+        /// not persisted in the handoff record, for the same reason.
+        private var terminalIncarnation: UInt64 = 0
         private nonisolated(unsafe) var vtSession: OpaquePointer?
         private var started = false
         private var terminating = false
@@ -263,6 +283,7 @@
                 throw GhosttyLinuxHeadlessSessionError.eventRegistrationFailed
             }
             self.vtSession = vtSession
+            terminalIncarnation = UInt64.random(in: .min ... .max)
             started = true
             terminating = false
             writeRuntimeState(state: .starting)
@@ -758,6 +779,7 @@
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             outputByteCount = Int(try handle.seekToEnd())
             outputHandle = handle
+            transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(handle)) ?? 0
         }
 
         /// Opens the durable output handle for append WITHOUT truncating any existing
@@ -776,6 +798,7 @@
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             outputByteCount = Int(try handle.seekToEnd())
             outputHandle = handle
+            transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(handle)) ?? 0
         }
 
         private func transcriptByteCount() throws -> UInt64 {
@@ -1717,6 +1740,7 @@
                 if !eventsEnabled { try enableEvents() }
                 if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
                 vtSession = replacementSession
+                terminalIncarnation = UInt64.random(in: .min ... .max)
                 // The replayed transcript may carry a newer title/pwd than the cache; adopt those, but
                 // keep the cached values when the replay never re-emits the escape sequences.
                 seedMetadataFromVTSession()
@@ -2187,18 +2211,22 @@
             var rawSnapshot = SpacesGhosttyVtSnapshot()
             guard spaces_ghostty_vt_session_copy_snapshot(vtSession, &rawSnapshot) else { throw GhosttyLinuxHeadlessSessionError.snapshotUnavailable }
             defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
-            var scrollbar = SpacesGhosttyVtScrollbar()
-            let hasScrollbar = spaces_ghostty_vt_session_scrollbar(vtSession, &scrollbar)
-            let scrollbarTotal = hasScrollbar ? UInt32(clamping: scrollbar.total) : 0
-            let scrollbarOffset = hasScrollbar ? UInt32(clamping: scrollbar.offset) : 0
+            var position = SpacesGhosttyVtHistoryPosition()
+            let hasPosition = spaces_ghostty_vt_session_history_position(vtSession, &position)
+            let scrollbarTotal = hasPosition ? UInt32(clamping: position.total) : 0
+            let scrollbarOffset = hasPosition ? UInt32(clamping: position.offset) : 0
             let selection = resolvedSelection(
                 session: vtSession, viewportRowOffset: scrollbarOffset, columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows))
             let snapshot = GhosttyVtSessionBridge.snapshot(
                 from: rawSnapshot, mouseReportingActive: GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession),
                 alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: vtSession), selection: selection,
-                scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
+                scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset,
+                historyRowBase: hasPosition ? position.rows_pruned &+ position.offset : 0,
+                historyEpoch: terminalIncarnation &+ (hasPosition ? position.history_epoch : 0))
             let (scrollRects, scrollRectsOverflowed) = takeScrollRects(session: vtSession)
-            let frame = GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
+            let frame = GhosttyRenderFrame(
+                sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot, transcriptByteOffset: UInt64(outputByteCount),
+                transcriptFileIdentity: transcriptFileIdentity)
             return (frame, scrollRects, scrollRectsOverflowed)
         }
 

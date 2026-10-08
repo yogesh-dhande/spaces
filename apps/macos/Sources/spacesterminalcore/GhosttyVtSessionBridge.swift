@@ -37,13 +37,14 @@ public enum GhosttyVtSessionBridge {
     /// `spaces_ghostty_vt_snapshot_free`); this only reads it. Mouse tracking is not part of the raw
     /// snapshot (it is a terminal mode, queried separately), so the caller supplies it. The active
     /// screen is queried separately for the same reason: a caller with a live session passes
-    /// `alternateScreenActive(session:)`. Selection and scrollbar are likewise queried separately (the
-    /// shim has no per-snapshot equivalent of the embedded surface's combined export) and default to
-    /// absent/zero, which is what the scrollback replay caller wants: a replay has no live selection or
-    /// scrollbar to report.
+    /// `alternateScreenActive(session:)`. Selection, scrollbar, and history position are likewise queried
+    /// separately (the shim has no per-snapshot equivalent of the embedded surface's combined export) and
+    /// default to absent/zero, which is what the scrollback replay caller wants: a replay has no live
+    /// selection, scrollbar, or history position to report.
     public static func snapshot(
         from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool, alternateScreenActive: Bool,
-        selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
+        selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0,
+        historyEpoch: UInt64 = 0
     ) -> GhosttyTerminalSnapshot {
         var cells: [GhosttyTerminalSnapshot.Cell] = []
         var clusters: [Int: String] = [:]
@@ -62,7 +63,7 @@ public enum GhosttyVtSessionBridge {
             cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
             defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells,
             clusters: clusters, mouseReportingActive: mouseReportingActive, alternateScreenActive: alternateScreenActive, selection: selection,
-            scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset)
+            scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset, historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }
 
     /// Rebuilds a cell's grapheme cluster from the shim's base codepoint plus the extra codepoints it

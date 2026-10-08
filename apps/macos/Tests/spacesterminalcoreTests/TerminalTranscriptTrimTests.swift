@@ -18,7 +18,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         guard
             let plan = try TerminalTranscriptTrim.plan(
                 outputPath: outputPath, currentEndOffset: currentEndOffset, triggerBytes: triggerBytes, retainedBytes: retainedBytes)
-        else { return TerminalTranscriptTrim.TrimResult(endOffset: currentEndOffset, writeHandle: writeHandle) }
+        else { return TerminalTranscriptTrim.TrimResult(endOffset: currentEndOffset, writeHandle: writeHandle, offsetShift: 0) }
         let staged = try TerminalTranscriptTrim.stage(outputPath: outputPath, plan: plan, columns: columns, rows: rows)
         return try TerminalTranscriptTrim.commit(staged, outputPath: outputPath, currentEndOffset: currentEndOffset)
     }

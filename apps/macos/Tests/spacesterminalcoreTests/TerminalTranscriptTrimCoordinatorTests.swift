@@ -71,7 +71,8 @@ final class TerminalTranscriptTrimCoordinatorTests: XCTestCase {
         let coordinator = await TerminalEngineActor.run {
             TerminalTranscriptTrimCoordinator(
                 outputPath: url.path, triggerBytes: Self.triggerBytes, retainedBytes: Self.retainedBytes,
-                liveTranscriptEndOffset: { owner.handle == nil ? nil : owner.endOffset }, adoptTrimmedTranscript: { owner.adopt($0, endOffset: $1) })
+                liveTranscriptEndOffset: { owner.handle == nil ? nil : owner.endOffset },
+                adoptTrimmedTranscript: { handle, endOffset, _ in owner.adopt(handle, endOffset: endOffset) })
         }
         addTeardownBlock {
             await TerminalEngineActor.run { owner.releaseTranscript() }

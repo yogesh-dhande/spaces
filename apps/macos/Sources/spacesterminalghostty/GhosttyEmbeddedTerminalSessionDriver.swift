@@ -84,6 +84,13 @@
         /// `isolated deinit` requires macOS 15.4 while this targets macOS 14). Set true once a session is
         /// configured, cleared by `terminate()`/rollback.
         private var hasLiveResources = false
+        /// Random value minted whenever a Ghostty session is created, folded into every frame's
+        /// `historyEpoch`. Ghostty's own history epoch only says when absolute rows were renumbered
+        /// within one terminal; a session built later (a handoff resume re-parses `output.log` into a
+        /// fresh terminal whose row numbering differs) must read as a renumbering too, and it would
+        /// not if both terminals happened to report the same epoch value. A driver that keeps its
+        /// session (a failed-exec resume in place) keeps its incarnation.
+        private(set) var terminalIncarnation: UInt64 = 0
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
         private var lastDeliveredSessionStateRevision: UInt64 = 0
         /// Coalesces the engine-actor catch-up that PTY deliveries and Ghostty's session-state
@@ -265,6 +272,7 @@
             guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration(Self.headlessSessionCreationFailure) }
 
             session = createdSession
+            terminalIncarnation = UInt64.random(in: .min ... .max)
             self.hostPTY = hostPTY
             hasLiveResources = true
             outputPipe.setSession(createdSession)

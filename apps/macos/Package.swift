@@ -254,8 +254,9 @@ let executableTargets: [Target] = [
         // suite must be added here AND to run_linux_tests.sh's per-suite filter loop.
         .testTarget(
             name: "spacesterminalghosttyTests",
-            dependencies: ["spacesterminalghostty"],
+            dependencies: ["spacesterminalghostty", "ghosttyvtshim"],
             sources: [
+                "TranscriptReplayVT.swift",
                 "GhosttyLinuxHeadlessHangDiagnostics.swift",
                 "GhosttyLinuxHeadlessKeyEncodingTests.swift",
                 "GhosttyLinuxHeadlessMouseEncodingTests.swift",
@@ -268,6 +269,7 @@ let executableTargets: [Target] = [
                 "GhosttyLinuxHeadlessSessionQueryResponseTests.swift",
                 "GhosttyLinuxHeadlessSessionResizeTests.swift",
                 "GhosttyRemoteSessionStateStreamServerSigpipeTests.swift",
+                "GhosttyLinuxHeadlessSessionTranscriptStampTests.swift",
                 "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",
                 "GhosttyLinuxHeadlessSpawnStressTests.swift",
                 "GhosttyLinuxHeadlessSubmitOrderingTests.swift",

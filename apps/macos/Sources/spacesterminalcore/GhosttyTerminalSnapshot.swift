@@ -62,6 +62,16 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     public let scrollbarTotal: UInt32
     /// Index of this viewport's top row within `scrollbarTotal`, where 0 is the oldest row.
     public let scrollbarOffset: UInt32
+    /// The absolute row of this snapshot's viewport row 0: rows ever pruned off the top of the
+    /// exporting terminal's history plus `scrollbarOffset`. A row keeps its absolute number as output
+    /// scrolls and prunes, so a client that holds a selection in absolute rows projects it onto any
+    /// frame by subtracting this base. Only comparable between frames with the same `historyEpoch`.
+    public let historyRowBase: UInt64
+    /// Opaque; changes whenever the exporting host's absolute row numbering was reset (a clear, a
+    /// reset, a column-changing resize, a primary/alternate screen switch, or the host rebuilding its
+    /// terminal). Only a change of value is meaningful, and equal values mean `historyRowBase` numbers
+    /// the same text.
+    public let historyEpoch: UInt64
 
     public static let mouseShiftCaptureUnset: UInt8 = 0
     public static let mouseShiftCaptureEnabled: UInt8 = 2
@@ -69,7 +79,8 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     public init(
         columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32,
         cells: [Cell], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = 0,
-        alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
+        alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0,
+        historyRowBase: UInt64 = 0, historyEpoch: UInt64 = 0
     ) {
         self.columns = columns
         self.rows = rows
@@ -87,6 +98,19 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
         self.selection = selection
         self.scrollbarTotal = scrollbarTotal
         self.scrollbarOffset = scrollbarOffset
+        self.historyRowBase = historyRowBase
+        self.historyEpoch = historyEpoch
+    }
+
+    /// This snapshot with the host's epoch. The terminal export knows only Ghostty's own epoch; the host
+    /// owns the incarnation that makes it unique across terminal rebuilds.
+    public func withHistoryEpoch(_ historyEpoch: UInt64) -> GhosttyTerminalSnapshot {
+        GhosttyTerminalSnapshot(
+            columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible,
+            defaultForegroundRGB: defaultForegroundRGB, defaultBackgroundRGB: defaultBackgroundRGB, cells: cells, clusters: clusters,
+            linkURLs: linkURLs, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
+            alternateScreenActive: alternateScreenActive, selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset,
+            historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }
 
     /// Records `cluster` as cell `index`'s text, or clears the cell's entry when the cluster is one the
@@ -154,7 +178,23 @@ public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
     public let ownerEpoch: UInt64
     public let columns: Int
     public let rows: Int
+    /// The picture. `GhosttyTerminalSnapshot` equality is picture equality, so equal snapshots can be
+    /// applied or skipped as identical without looking at where in the transcript they came from.
     public let snapshot: GhosttyTerminalSnapshot
+    /// The `output.log` byte offset, in the coordinates of the file named by `transcriptFileIdentity`,
+    /// such that replaying the file's bytes `[0, transcriptByteOffset)` reproduces this frame's grid.
+    /// Zero when the frame did not come from a host that tracks it (client replay frames).
+    ///
+    /// Stamped on the frame, not the snapshot, because it says where a picture came from rather than
+    /// what it is: a chunk of output that changes no cell advances it without changing the picture, and
+    /// must not count as a different snapshot. A client aligning a replay reads the stamp from any
+    /// received frame, including one whose mirror apply was skipped as identical. An identical picture
+    /// at a later offset leaves the earlier frame's (offset, `snapshot.historyRowBase`) pair valid.
+    public let transcriptByteOffset: UInt64
+    /// The identity (inode) of the `output.log` file `transcriptByteOffset` is measured in, computed
+    /// by `TerminalTranscriptFileIdentity`; equals the transcript response's `fileIdentity`. A head
+    /// trim swaps in a new file, so the identity changes with it.
+    public let transcriptFileIdentity: UInt64
     /// How the terminal's content moved to produce this frame from the previously materialized one, so a
     /// mirror view can carry a local drag-selection anchor across the repaint. Empty for a frame that is
     /// not a delta continuation (an initial baseline, a full re-baseline, or a resync) — see
@@ -172,7 +212,8 @@ public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
 
     public init(
         version: Int = Self.currentVersion, sessionRevision: UInt64?, ownerEpoch: UInt64, snapshot: GhosttyTerminalSnapshot,
-        scrollRects: [GhosttyRenderScrollRectOperation] = [], scrollRectsOverflowed: Bool = true
+        transcriptByteOffset: UInt64 = 0, transcriptFileIdentity: UInt64 = 0, scrollRects: [GhosttyRenderScrollRectOperation] = [],
+        scrollRectsOverflowed: Bool = true
     ) {
         self.version = version
         self.sessionRevision = sessionRevision
@@ -180,6 +221,8 @@ public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
         self.columns = snapshot.columns
         self.rows = snapshot.rows
         self.snapshot = snapshot
+        self.transcriptByteOffset = transcriptByteOffset
+        self.transcriptFileIdentity = transcriptFileIdentity
         self.scrollRects = scrollRects
         self.scrollRectsOverflowed = scrollRectsOverflowed
     }

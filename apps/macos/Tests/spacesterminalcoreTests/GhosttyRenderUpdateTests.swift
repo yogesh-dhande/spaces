@@ -90,12 +90,12 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertEqual(scrollRectDelta.changedCellCount, columns)
         XCTAssertEqual(try GhosttyRenderUpdateApplier.apply(scrollRectUpdate, to: baseline).snapshot, target)
         // Body bytes, not blob bytes: the body is the layout this fixture pins, while the compressed blob's
-        // size depends on which platform's DEFLATE encoder wrote it. The delta header grew by 19 bytes (the
-        // 17-byte selection/scrollbar section, the 1-byte scroll-rects-overflowed flag, and the 1-byte
-        // alternate-screen flag) versus the pre-selection layout, on top of what each fixture already
-        // accounted for.
-        XCTAssertEqual(scrollRectBytes, 1_228)
-        XCTAssertEqual(cellRunOnlyBytes, 27_110)
+        // size depends on which platform's DEFLATE encoder wrote it. The delta header grew by 51 bytes (the
+        // 49-byte selection/scrollbar/history section, the 1-byte scroll-rects-overflowed flag, and the
+        // 1-byte alternate-screen flag) versus the pre-selection layout, on top of what each fixture
+        // already accounted for.
+        XCTAssertEqual(scrollRectBytes, 1_260)
+        XCTAssertEqual(cellRunOnlyBytes, 27_142)
         XCTAssertLessThan(scrollRectBytes, cellRunOnlyBytes)
         // Compression does not reverse the ordering the fixture exists to show.
         XCTAssertLessThan(scrollRectEncoded.count, cellRunOnlyEncoded.count)
@@ -268,16 +268,16 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let update = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot))
 
         // 40-byte update body header (reserved 2, three revisions 24, owner epoch 8, columns 2, rows 2,
-        // empty fallback reason 2), 37-byte snapshot header (20 fixed fields plus the 17-byte
-        // selection/scrollbar section), 14 bytes a cell.
-        XCTAssertEqual(try body(of: GhosttyRenderUpdateBinaryCodec.encode(update)).count, 40 + 37 + snapshot.cells.count * 14)
+        // empty fallback reason 2), 69-byte snapshot header (20 fixed fields plus the 49-byte
+        // selection/scrollbar/history section), 14 bytes a cell.
+        XCTAssertEqual(try body(of: GhosttyRenderUpdateBinaryCodec.encode(update)).count, 40 + 69 + snapshot.cells.count * 14)
 
         // One cluster cell adds exactly its sparse entry: 4-byte offset, 2-byte length, utf8 bytes.
         let clustered = makeSnapshot(lines: ["👋🏽ello", "world"])
         let clusteredUpdate = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: clustered))
         XCTAssertEqual(
             try body(of: GhosttyRenderUpdateBinaryCodec.encode(clusteredUpdate)).count,
-            40 + 37 + snapshot.cells.count * 14 + 6 + Array("👋🏽".utf8).count)
+            40 + 69 + snapshot.cells.count * 14 + 6 + Array("👋🏽".utf8).count)
     }
 
     /// A Linux daemon streaming to an iPhone means one platform's zlib writes what the other's Compression
@@ -726,6 +726,56 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertEqual(decoded.fullFrame?.snapshot.scrollbarOffset, 120)
     }
 
+    /// The row base and epoch ride the snapshot, the transcript stamp rides the frame, in both a full
+    /// frame and a delta, at values past 32 bits so a truncated field would show. Applying a delta
+    /// replaces the baseline's stamps wholesale, and the transcript stamp is not part of the picture:
+    /// the same snapshot at a different offset is still the same snapshot.
+    func testHistoryStampsSurviveAFullFrameAndADelta() throws {
+        func stamped(_ lines: [String], rowBase: UInt64) -> GhosttyTerminalSnapshot {
+            let base = makeSnapshot(lines: lines)
+            return GhosttyTerminalSnapshot(
+                columns: base.columns, rows: base.rows, cursorColumn: base.cursorColumn, cursorRow: base.cursorRow, cursorVisible: base.cursorVisible,
+                defaultForegroundRGB: base.defaultForegroundRGB, defaultBackgroundRGB: base.defaultBackgroundRGB, cells: base.cells,
+                historyRowBase: rowBase, historyEpoch: 0xFEED_0000_0000_0001)
+        }
+        let previous = stamped(["hello"], rowBase: 5_000_000_000)
+        let target = stamped(["hullo"], rowBase: 5_000_000_001)
+        let targetFrame = GhosttyRenderFrame(
+            sessionRevision: 2, ownerEpoch: 1, snapshot: target, transcriptByteOffset: 0x1_2345_6789, transcriptFileIdentity: 0x8000_0000_0000_00AB)
+
+        let full = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(.full(targetFrame)))
+        XCTAssertEqual(full.fullFrame?.snapshot.historyRowBase, 5_000_000_001)
+        XCTAssertEqual(full.fullFrame?.snapshot.historyEpoch, 0xFEED_0000_0000_0001)
+        XCTAssertEqual(full.fullFrame?.transcriptByteOffset, 0x1_2345_6789)
+        XCTAssertEqual(full.fullFrame?.transcriptFileIdentity, 0x8000_0000_0000_00AB)
+
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
+        let delta = try GhosttyRenderUpdateBinaryCodec.decode(
+            try GhosttyRenderUpdateBinaryCodec.encode(GhosttyRenderUpdateFactory.makeUpdate(target: targetFrame, baseline: baseline)))
+        XCTAssertEqual(delta.delta?.historyRowBase, 5_000_000_001)
+        XCTAssertEqual(delta.delta?.historyEpoch, 0xFEED_0000_0000_0001)
+        XCTAssertEqual(delta.delta?.transcriptByteOffset, 0x1_2345_6789)
+        XCTAssertEqual(delta.delta?.transcriptFileIdentity, 0x8000_0000_0000_00AB)
+        let applied = try GhosttyRenderUpdateApplier.apply(delta, to: baseline)
+        XCTAssertEqual(applied.snapshot, target)
+        XCTAssertEqual(applied.transcriptByteOffset, 0x1_2345_6789)
+        XCTAssertEqual(applied.transcriptFileIdentity, 0x8000_0000_0000_00AB)
+        XCTAssertEqual(
+            GhosttyRenderFrame(
+                sessionRevision: 2, ownerEpoch: 1, snapshot: applied.snapshot, transcriptByteOffset: applied.transcriptByteOffset,
+                transcriptFileIdentity: applied.transcriptFileIdentity), targetFrame)
+    }
+
+    /// Output that changes no cell advances the transcript offset without changing the picture, so two
+    /// frames of the same snapshot at different offsets carry equal snapshots.
+    func testTranscriptOffsetIsNotPartOfThePicture() {
+        let snapshot = makeSnapshot(lines: ["same"])
+        let early = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot, transcriptByteOffset: 10, transcriptFileIdentity: 7)
+        let late = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot, transcriptByteOffset: 99, transcriptFileIdentity: 7)
+        XCTAssertEqual(early.snapshot, late.snapshot)
+        XCTAssertNotEqual(early, late)
+    }
+
     /// A non-rectangle (stream) selection round-trips the same way, and a nil selection still carries a
     /// non-zero scrollbar position: the two fields are independent on the wire.
     func testStreamSelectionAndNilSelectionBothSurviveAFullFrame() throws {
@@ -822,15 +872,15 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     }
 
     /// The version byte is the only guard for a persisted or peer payload built at a different layout:
-    /// the current version is 7, and a payload claiming version 6 (the layout without the alternate-screen
-    /// flag) is rejected exactly like any other unsupported version, never silently misread a field short.
-    func testVersionIsSevenAndVersionSixPayloadIsRejected() throws {
-        XCTAssertEqual(GhosttyRenderUpdate.currentVersion, 7)
+    /// the current version is 8, and a payload claiming version 7 (the layout without the history
+    /// stamps) is rejected exactly like any other unsupported version, never silently misread 32 bytes short.
+    func testVersionIsEightAndVersionSevenPayloadIsRejected() throws {
+        XCTAssertEqual(GhosttyRenderUpdate.currentVersion, 8)
 
         let snapshot = makeSnapshot(lines: ["hello"])
         var encoded = try GhosttyRenderUpdateBinaryCodec.encode(
             GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot)))
-        encoded[4] = 6
+        encoded[4] = 7
 
         XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(encoded)) { error in
             XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .unsupportedVersion)

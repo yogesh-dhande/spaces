@@ -4175,7 +4175,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Taken from the open descriptor, so it names the file these bytes come from even if a trim
         // renames a replacement over the path a moment later. Serving it back is what lets the client's
         // next continuation be verified (see `continuationTranscriptData`).
-        let fileIdentity = try Self.transcriptFileIdentity(handle: handle)
+        let fileIdentity = try TerminalTranscriptFileIdentity.of(handle)
         let totalBytes = try handle.seekToEnd()
         // The preamble grid (columns/rows) only shapes how a suffix rebuild renders; a session that has
         // never reported one (no runtime row yet) gets the conventional 80x24, the same shape every other
@@ -4298,25 +4298,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             remaining -= chunk.count
         }
         return result
-    }
-
-    /// The transcript file an open handle refers to, as its inode number. A rename of another file over
-    /// `output.log` (which is how a head-trim commits) leaves this handle on the file it opened and
-    /// gives the path a different one, so the number is what distinguishes the two.
-    ///
-    /// Accepted risk: an inode number can in principle be reused once the trimmed file is unlinked, which
-    /// would let a stale continuation pass this check against a same-numbered but unrelated file. APFS
-    /// allocates inode numbers monotonically and does not reuse them, and on ext4 a false match needs two
-    /// trims (each moving tens of megabytes of transcript) landing between two gestures of the same
-    /// undiscarded replay, plus the allocator happening to hand the freed number back in that window; the
-    /// existing offset and gap guards in `continuationTranscriptData` still bound what such a continuation
-    /// could return even then. A durable generation token would have to be persisted through the same
-    /// write-behind runtime state whose lag the run-identity check already tolerates, so the inode is kept
-    /// rather than adding that persistence for a risk this narrow.
-    private static func transcriptFileIdentity(handle: FileHandle) throws -> UInt64 {
-        var info = stat()
-        guard fstat(handle.fileDescriptor, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        return UInt64(info.st_ino)
     }
 
     /// The newest `cap` bytes of the transcript, cut where the VT parser can pick up and prefixed with the

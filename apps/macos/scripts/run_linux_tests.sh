@@ -91,6 +91,7 @@ for suite in \
   GhosttyLinuxHeadlessSessionMetadataTests \
   GhosttyLinuxHeadlessSessionQueryResponseTests \
   GhosttyLinuxHeadlessSessionResizeTests \
+  GhosttyLinuxHeadlessSessionTranscriptStampTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \
   GhosttyLinuxHeadlessSessionHandoffTests \
   GhosttyLinuxHeadlessSubmitOrderingTests \

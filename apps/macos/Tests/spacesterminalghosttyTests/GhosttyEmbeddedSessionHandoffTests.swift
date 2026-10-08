@@ -382,6 +382,88 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
             "handoff replay must preserve the cleared screen and scrollback")
     }
 
+    // MARK: - History stamps across a resume
+
+    /// The resumed core re-parses `output.log` into a fresh terminal, so its absolute rows are numbered
+    /// anew: the epoch must differ from the pre-handoff core's even though the screen is the same. Its
+    /// offsets start from a replay of the whole file, so a frame's transcript prefix still reproduces the
+    /// grid, both right after the resume and after live output follows.
+    func testResumeChangesTheEpochAndKeepsTranscriptOffsetsExact() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let configuration = Self.makeConfiguration(sessionID: "handoff-stamp-\(UUID().uuidString)", command: "stty -echo; cat")
+        let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            try sourceCore.startIfNeeded()
+            Self.attachRemoteOwner(to: sourceCore)
+            return Box(sourceCore)
+        }
+        let sourceCore = sourceCoreBox.value
+        XCTAssertTrue(
+            TerminalEngineActor.runSynchronously {
+                (sourceCore.rendererHost as! GhosttyHeadlessRendererHost).sendRawBytes(Data("before handoff\n".utf8))
+            })
+        try await waitAsync { Self.frameRows(of: sourceCore)?.contains("before handoff") == true }
+        let sourceFrame = try XCTUnwrap(TerminalEngineActor.runSynchronously { Self.frame(of: sourceCore) })
+
+        guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+        TerminalEngineActor.runSynchronously { sourceCore.terminate() }
+
+        let pty = try Self.makeAdoptablePTY()
+        let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+        }
+        let resumedCore = resumedCoreBox.value
+        defer {
+            Self.tearDown(pty)
+            TerminalEngineActor.runSynchronously { resumedCore.terminate() }
+        }
+        try await resumedCore.resumeFromHandoff(Self.handoffRecord(from: record, adopting: pty))
+        TerminalEngineActor.runSynchronously { Self.attachRemoteOwner(to: resumedCore) }
+
+        try await waitAsync { Self.frameRows(of: resumedCore)?.contains("before handoff") == true }
+        let resumedFrame = try XCTUnwrap(TerminalEngineActor.runSynchronously { Self.frame(of: resumedCore) })
+        XCTAssertNotEqual(resumedFrame.historyEpoch, sourceFrame.historyEpoch, "a rebuilt terminal numbers rows anew")
+        XCTAssertEqual(resumedFrame.transcriptFileIdentity, TranscriptReplayVT.fileIdentity(ofFileAt: paths.outputPath))
+        XCTAssertEqual(
+            resumedFrame.transcriptByteOffset, try XCTUnwrap(FileManager.default.attributesOfItem(atPath: paths.outputPath)[.size] as? UInt64),
+            "the replay consumed the whole file")
+        try Self.expectTranscriptPrefixReproduces(resumedFrame, at: paths.outputPath)
+
+        XCTAssertGreaterThan(write(pty.slave, "after handoff\n", "after handoff\n".utf8.count), 0)
+        try await waitAsync { Self.frameRows(of: resumedCore)?.contains("after handoff") == true }
+        let liveFrame = try XCTUnwrap(TerminalEngineActor.runSynchronously { Self.frame(of: resumedCore) })
+        XCTAssertEqual(liveFrame.historyEpoch, resumedFrame.historyEpoch, "live output does not renumber rows")
+        try await waitAsync { TranscriptReplayVT.prefix(ofFileAt: paths.outputPath, length: liveFrame.transcriptByteOffset) != nil }
+        try Self.expectTranscriptPrefixReproduces(liveFrame, at: paths.outputPath)
+    }
+
+    /// Screens are only exported for a session some client owns.
+    @TerminalEngineActor private static func attachRemoteOwner(to core: GhosttyEmbeddedSessionCore) {
+        let client = TerminalClient(
+            id: "stamp-owner", kind: .remote, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+            connectedAt: "2026-10-08T00:00:00Z")
+        let response = core.handleControlRequest(TerminalControlRequest(command: "attach", client: client, attachmentMode: .owner))
+        XCTAssertTrue(response.ok, response.message)
+    }
+
+    @TerminalEngineActor private static func frame(of core: GhosttyEmbeddedSessionCore) -> TranscriptFrame? {
+        core.currentRemoteStatePayload(reason: .stateChange)?.transcriptFrame
+    }
+
+    @TerminalEngineActor private static func frameRows(of core: GhosttyEmbeddedSessionCore) -> [String]? {
+        frame(of: core).map { TranscriptReplayVT.rowTexts($0) }
+    }
+
+    private static func expectTranscriptPrefixReproduces(_ frame: TranscriptFrame, at path: String) throws {
+        let prefix = try XCTUnwrap(TranscriptReplayVT.prefix(ofFileAt: path, length: frame.transcriptByteOffset))
+        XCTAssertEqual(
+            TranscriptReplayVT.screenRows(columns: frame.columns, rows: frame.rows, bytes: prefix), TranscriptReplayVT.rowTexts(frame),
+            "the transcript prefix at the frame's offset must reproduce its grid")
+    }
+
     // MARK: - 2. Reflow invariant (persisted grid before new output)
 
     func testResumeRestoresPersistedGridBeforeNewOutput() async throws {

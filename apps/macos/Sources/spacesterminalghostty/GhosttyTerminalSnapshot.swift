@@ -19,12 +19,19 @@
             /// `ghostty_terminal_snapshot_s.scroll_carry_valid`, inverted (that field is true when the
             /// rects ARE trustworthy).
             public let scrollRectsOverflowed: Bool
+            /// PTY bytes the exporting terminal's parser had consumed when the grid was captured
+            /// (`ghostty_terminal_snapshot_s.bytes_processed`, read under the same lock as the cells).
+            /// The host maps it to an `output.log` offset; see `GhosttyEmbeddedSessionCore`.
+            public let bytesProcessed: UInt64
 
-            public init(snapshot: GhosttyTerminalSnapshot, scrollRects: [GhosttyRenderScrollRectOperation] = [], scrollRectsOverflowed: Bool = false)
-            {
+            public init(
+                snapshot: GhosttyTerminalSnapshot, scrollRects: [GhosttyRenderScrollRectOperation] = [], scrollRectsOverflowed: Bool = false,
+                bytesProcessed: UInt64 = 0
+            ) {
                 self.snapshot = snapshot
                 self.scrollRects = scrollRects
                 self.scrollRectsOverflowed = scrollRectsOverflowed
+                self.bytesProcessed = bytesProcessed
             }
         }
 
@@ -54,7 +61,7 @@
             defer { ghostty_terminal_snapshot_free(&snapshot) }
             return CapturedSnapshot(
                 snapshot: makeSnapshot(from: snapshot), scrollRects: makeScrollRects(from: snapshot),
-                scrollRectsOverflowed: !snapshot.scroll_carry_valid)
+                scrollRectsOverflowed: !snapshot.scroll_carry_valid, bytesProcessed: snapshot.bytes_processed)
         }
 
         public static func captureText(from surface: ghostty_surface_t?) -> String? {
@@ -104,7 +111,8 @@
                 defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells, clusters: clusters, linkURLs: linkURLs,
                 mouseReportingActive: snapshot.mouse_reporting_active, mouseShiftCapture: snapshot.mouse_shift_capture,
                 alternateScreenActive: snapshot.alternate_screen_active, selection: selection(of: snapshot), scrollbarTotal: snapshot.scrollbar_total,
-                scrollbarOffset: snapshot.scrollbar_offset)
+                scrollbarOffset: snapshot.scrollbar_offset, historyRowBase: snapshot.history_rows_pruned + UInt64(snapshot.scrollbar_offset),
+                historyEpoch: snapshot.history_epoch)
         }
 
         /// Ghostty already did the clipping and the viewport rebase (this is an embedded surface, so its

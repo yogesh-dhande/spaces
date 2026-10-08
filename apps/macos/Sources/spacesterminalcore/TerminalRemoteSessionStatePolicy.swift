@@ -339,8 +339,9 @@ public struct TerminalRemoteStateReducer: Sendable {
                 scrollRectsOverflowed = true
             }
             let frame = GhosttyRenderFrame(
-                sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot, scrollRects: scrollRects,
-                scrollRectsOverflowed: scrollRectsOverflowed)
+                sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot,
+                transcriptByteOffset: baseline.transcriptByteOffset, transcriptFileIdentity: baseline.transcriptFileIdentity,
+                scrollRects: scrollRects, scrollRectsOverflowed: scrollRectsOverflowed)
             // The stored payload carries the materialized full frame as a value, not as a re-encoded
             // blob: the reads the client makes of it next (renderSnapshot, renderOwnerEpoch, the render
             // state key) all want the frame, and nothing on this path wants bytes. The payload still
@@ -358,7 +359,8 @@ public struct TerminalRemoteStateReducer: Sendable {
             // rect fields, so the blob this payload yields round-trips to exactly this poisoned value.
             // Only `frameToApply`, consumed once by the live apply that produced it, keeps the rects.
             let storedFrame = GhosttyRenderFrame(
-                sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
+                sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot,
+                transcriptByteOffset: baseline.transcriptByteOffset, transcriptFileIdentity: baseline.transcriptFileIdentity)
             return (payload.replacingRenderUpdate(materialized: .full(storedFrame)), decodedUpdate, frame, nil)
         } catch {
             renderUpdateBaseline = nil

@@ -377,14 +377,42 @@
             // The committed end offset is discarded: this core re-derives the transcript's end from the
             // handle on every append (`seekToEnd`) rather than tracking a byte count, so the adopted
             // handle's position is the only state that has to change.
-            adoptTrimmedTranscript: { [weak self] handle, _ in
+            adoptTrimmedTranscript: { [weak self] handle, _, offsetShift in
                 guard let self else { return }
                 // The trim replaced output.log with a fresh inode; adopt its handle before closing the old
                 // one so the stored property always holds a valid handle even if the close fails.
                 let previousHandle = outputHandle
                 outputHandle = handle
+                transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(handle)) ?? 0
+                transcriptOffsetDelta += offsetShift
                 try? previousHandle?.close()
             })
+        /// The identity of the `output.log` file `outputHandle` refers to, stamped on every frame; 0 until
+        /// a handle exists (see `TerminalTranscriptFileIdentity`). Captured when a handle is adopted so a
+        /// frame costs no syscall.
+        private var transcriptFileIdentity: UInt64 = 0
+        /// Maps Ghostty's `bytes_processed` to an `output.log` offset: `offset = bytes_processed + delta`.
+        ///
+        /// Invariant: every PTY byte reaches Ghostty's parser (`ghostty_session_process_output` on the PTY
+        /// reader thread) and, through the data callback that fires on the same bytes before parsing,
+        /// `output.log` in the same order, so replaying the first `n` bytes of the file leaves a terminal
+        /// that has consumed `n` PTY bytes. Three things break the one-to-one count, and `delta` absorbs
+        /// each:
+        ///  - A clear (`clearScreenAndScrollback`) mutates Ghostty directly and appends a marker sequence
+        ///    to the file that Ghostty never parses, so the file runs ahead by the marker's length.
+        ///  - A head trim replaces the file with a preamble plus the retained tail, so every later offset
+        ///    shifts by `TrimResult.offsetShift`.
+        ///  - A core resumed from an exec handoff replays the whole file through the parser before it
+        ///    adopts the PTY, so its `bytes_processed` already counts every file byte and the delta
+        ///    starts at 0 (a failed-exec resume in place replays only the bytes the file gained, which
+        ///    keeps the count aligned the same way).
+        /// The file is appended on a later engine-actor turn than the parse (the data callback only
+        /// buffers), and a capture flushes that buffer first, so a chunk parsed after the flush can sit
+        /// past the file's current end: the offset then names bytes that are about to land, in order, in
+        /// the same file. A clear that lands while PTY bytes are still in flight can likewise leave one
+        /// frame's offset off by the marker's length until the parser catches up (the next frame is
+        /// exact).
+        private var transcriptOffsetDelta: Int64 = 0
         private var started = false
         private var didTerminateCurrentRun = false
         private var currentTitle: String?
@@ -2425,7 +2453,11 @@
             guard sessionDriver.clearScreenAndScrollback() else { return false }
             _ = incomingOutputBuffer.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback, interactive: false)
             let outputThroughClear = incomingOutputBuffer.drain()
-            return appendOutput(outputThroughClear.data, interactiveResync: outputThroughClear.isInteractive, shouldBroadcastState: false)
+            let appended = appendOutput(outputThroughClear.data, interactiveResync: outputThroughClear.isInteractive, shouldBroadcastState: false)
+            // Ghostty cleared directly and never parsed the marker, so the file is now longer than the
+            // parser's count by the marker's length (see `transcriptOffsetDelta`).
+            if appended { transcriptOffsetDelta += Int64(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback.count) }
+            return appended
         }
 
         @discardableResult private func ensureOutputHandle() throws -> FileHandle {
@@ -2435,6 +2467,7 @@
             let createdHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             try createdHandle.seekToEnd()
             outputHandle = createdHandle
+            transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(createdHandle)) ?? 0
             return createdHandle
         }
 
@@ -2454,6 +2487,7 @@
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             try handle.seekToEnd()
             outputHandle = handle
+            transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(handle)) ?? 0
         }
 
         private func transcriptByteCount() throws -> UInt64 {
@@ -3253,7 +3287,10 @@
                     runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind, preCapturedScreenState: preCapturedScreenState)
                 let snapshot = resolvedScreenState.snapshot
                 let frame = snapshot.map {
-                    GhosttyRenderFrame(sessionRevision: exportedFrameRevision(for: $0, exportMode: exportMode), ownerEpoch: ownerEpoch, snapshot: $0)
+                    GhosttyRenderFrame(
+                        sessionRevision: exportedFrameRevision(for: $0, exportMode: exportMode), ownerEpoch: ownerEpoch, snapshot: $0,
+                        transcriptByteOffset: resolvedScreenState.transcriptByteOffset,
+                        transcriptFileIdentity: resolvedScreenState.transcriptFileIdentity)
                 }
                 // The reader already displays this exact frame, so exporting it would spend a full-grid
                 // encode on bytes the reader drops. Skipping `makeRenderUpdate` leaves the stream's delta
@@ -3432,7 +3469,8 @@
         /// had pending when it was taken. Passing one of these back into the export path is what lets a
         /// caller emit the exact frame it already inspected instead of racing a second capture against it.
         private typealias LiveSessionScreenState = (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], scrollRectsOverflowed: Bool
+            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], scrollRectsOverflowed: Bool,
+            transcriptByteOffset: UInt64, transcriptFileIdentity: UInt64
         )
 
         private func resolveRemoteScreenState(
@@ -3440,7 +3478,7 @@
             preCapturedScreenState: LiveSessionScreenState? = nil
         ) -> (
             snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], scrollRectsOverflowed: Bool,
-            source: String
+            transcriptByteOffset: UInt64, transcriptFileIdentity: UInt64, source: String
         ) {
             let liveSessionScreenState = preCapturedScreenState ?? captureLiveSessionScreenState()
             let sessionSnapshot = liveSessionScreenState.snapshot
@@ -3454,7 +3492,9 @@
             {
                 return (
                     snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, scrollRects: liveSessionScreenState.scrollRects,
-                    scrollRectsOverflowed: liveSessionScreenState.scrollRectsOverflowed, source: "session"
+                    scrollRectsOverflowed: liveSessionScreenState.scrollRectsOverflowed,
+                    transcriptByteOffset: liveSessionScreenState.transcriptByteOffset,
+                    transcriptFileIdentity: liveSessionScreenState.transcriptFileIdentity, source: "session"
                 )
             }
 
@@ -3465,7 +3505,7 @@
             // against. Movement on an empty screen cannot mislead a drag over visible content later, so
             // carrying it forward would only cost carry capacity for no product benefit.
             return (
-                snapshot: nil, snapshotText: nil, scrollRects: [], scrollRectsOverflowed: false,
+                snapshot: nil, snapshotText: nil, scrollRects: [], scrollRectsOverflowed: false, transcriptByteOffset: 0, transcriptFileIdentity: 0,
                 source: isLiveRuntime ? "session_empty" : "session_unavailable"
             )
         }
@@ -3483,11 +3523,17 @@
             // while the phone is still missing it.
             lastCapturedSessionStateRevision = rendererHostStorage.sessionStateRevision()
             let capturedRenderState = rendererHostStorage.sessionRenderStateSnapshot()
-            let sessionSnapshot = capturedRenderState?.snapshot
+            let sessionSnapshot = capturedRenderState.map { captured in
+                captured.snapshot.withHistoryEpoch(sessionDriver.terminalIncarnation &+ captured.snapshot.historyEpoch)
+            }
+            let transcriptByteOffset = capturedRenderState.map {
+                UInt64(truncatingIfNeeded: Int64(truncatingIfNeeded: $0.bytesProcessed) &+ transcriptOffsetDelta)
+            }
             let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
             return (
                 snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, scrollRects: capturedRenderState?.scrollRects ?? [],
-                scrollRectsOverflowed: capturedRenderState?.scrollRectsOverflowed ?? false
+                scrollRectsOverflowed: capturedRenderState?.scrollRectsOverflowed ?? false, transcriptByteOffset: transcriptByteOffset ?? 0,
+                transcriptFileIdentity: transcriptFileIdentity
             )
         }
 

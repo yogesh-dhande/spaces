@@ -384,6 +384,68 @@
             #expect(occurrences(of: secondMarker, in: transcript) == 1, "post-handoff output must land in output.log exactly once")
         }
 
+        /// The resumed core rebuilds its vt terminal from `output.log`, so its absolute rows are numbered
+        /// anew: the epoch must differ from the pre-handoff core's even though the screen is the same. Its
+        /// frame offsets count the replayed file, so a frame's transcript prefix still reproduces the grid,
+        /// both right after the resume and after live output follows.
+        @Test func resumeChangesTheEpochAndKeepsTranscriptOffsetsExact() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let marker = "BEFORE_HANDOFF_STAMP"
+            let configuration = makeConfiguration(
+                sessionID: "handoff-stamp-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
+            let owner = Self.remoteOwnerClient(id: "remote-owner")
+            let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try sourceCore.startIfNeeded()
+                Self.attachRemoteOwner(to: sourceCore, client: owner)
+                return Box(sourceCore)
+            }
+            let sourceCore = sourceCoreBox.value
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: sourceCore)?.contains(marker) == true }
+            let sourceFrame = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: sourceCore)?.transcriptFrame })
+
+            guard let record = try await sourceCore.quiesceForHandoff() else {
+                Issue.record("quiesce produced no handoff record for a live session")
+                return
+            }
+            TerminalEngineActor.runSynchronously { sourceCore.terminate() }
+
+            let pty = try makeAdoptablePTY()
+            let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let resumedCore = resumedCoreBox.value
+            defer {
+                tearDown(pty)
+                TerminalEngineActor.runSynchronously { resumedCore.terminate() }
+            }
+            try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
+            try await TerminalEngineActor.run { Self.attachRemoteOwner(to: resumedCore, client: owner) }
+
+            let resumedFrame = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore)?.transcriptFrame })
+            #expect(resumedFrame.historyEpoch != sourceFrame.historyEpoch, "a rebuilt terminal numbers rows anew")
+            #expect(resumedFrame.transcriptFileIdentity == TranscriptReplayVT.fileIdentity(ofFileAt: paths.outputPath))
+            let fileSize = try #require(FileManager.default.attributesOfItem(atPath: paths.outputPath)[.size] as? UInt64)
+            #expect(resumedFrame.transcriptByteOffset == fileSize, "the replay consumed the whole file")
+            try expectTranscriptPrefixReproduces(resumedFrame, at: paths.outputPath)
+
+            let liveMarker = "AFTER_HANDOFF_STAMP"
+            #expect(write(pty.slave, "\(liveMarker)\n", liveMarker.utf8.count + 1) > 0)
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: resumedCore)?.contains(liveMarker) == true }
+            let liveFrame = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore)?.transcriptFrame })
+            #expect(liveFrame.historyEpoch == resumedFrame.historyEpoch, "live output does not renumber rows")
+            try expectTranscriptPrefixReproduces(liveFrame, at: paths.outputPath)
+        }
+
+        private func expectTranscriptPrefixReproduces(_ frame: TranscriptFrame, at path: String) throws {
+            let prefix = try #require(TranscriptReplayVT.prefix(ofFileAt: path, length: frame.transcriptByteOffset))
+            #expect(
+                TranscriptReplayVT.screenRows(columns: frame.columns, rows: frame.rows, bytes: prefix) == TranscriptReplayVT.rowTexts(frame),
+                "the transcript prefix at the frame's offset must reproduce its grid")
+        }
+
         @Test func resumeDoesNotRestoreClearedScreenOrScrollback() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }

@@ -112,6 +112,19 @@ typedef struct {
     uint64_t len;
 } SpacesGhosttyVtScrollbar;
 
+// Where the viewport sits in the terminal's history, read together so a frame's scrollbar and its
+// absolute row identity come from one consistent state. `rows_pruned` is the count of rows ever
+// dropped off the top of the active screen's history, so the absolute row of viewport row y is
+// `rows_pruned + offset + y`. `history_epoch` is opaque: it changes whenever absolute rows stop naming
+// the same text (reset, erase of scrollback, column-changing resize, primary/alternate switch), and
+// only a change of value is meaningful.
+typedef struct {
+    uint64_t total;
+    uint64_t offset;
+    uint64_t rows_pruned;
+    uint64_t history_epoch;
+} SpacesGhosttyVtHistoryPosition;
+
 // A snapshot of the session's active selection. Coordinates are screen-space (row 0 = oldest
 // scrollback row), matching what `spaces_ghostty_vt_session_set_selection` accepts.
 typedef struct {
@@ -346,6 +359,14 @@ bool spaces_ghostty_vt_session_scroll_viewport_to_bottom_with_info(
 bool spaces_ghostty_vt_session_scrollbar(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtScrollbar *out
+);
+
+// Reads the scrollbar total and offset together with the rows-pruned count and history epoch, so a
+// frame exporter gets its absolute row identity from the same state as its scrollbar. Returns false
+// only when the session/terminal is missing or any underlying query fails.
+bool spaces_ghostty_vt_session_history_position(
+    SpacesGhosttyVtSession *session,
+    SpacesGhosttyVtHistoryPosition *out
 );
 
 bool spaces_ghostty_vt_session_format_plain(

@@ -75,7 +75,8 @@ public enum GhosttyTerminalSnapshotViewport {
             alternateScreenActive: snapshot.alternateScreenActive,
             selection: croppedSelection(
                 snapshot.selection, sourceColumns: snapshot.columns, columnOffset: columnOffset, rowOffset: rowOffset, columns: columns, rows: rows),
-            scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset + UInt32(rowOffset))
+            scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset + UInt32(rowOffset),
+            historyRowBase: snapshot.historyRowBase + UInt64(rowOffset), historyEpoch: snapshot.historyEpoch)
     }
 
     /// Rebases a cell-text table into the cropped grid's coordinates, dropping entries for cells the crop
@@ -242,8 +243,7 @@ public enum GhosttyTerminalSnapshotViewport {
     ///   move). When both cannot fit, a visible cursor wins, since it is where the user is typing. A hidden
     ///   cursor (a coding agent that turns the terminal cursor off while it draws its own UI) leaves only
     ///   the bottom content row to anchor to.
-    private static func rowOffset(for snapshot: GhosttyTerminalSnapshot, viewportRows: Int, visibleColumns: Range<Int>, retainedRowOffset: Int)
-        -> Int
+    private static func rowOffset(for snapshot: GhosttyTerminalSnapshot, viewportRows: Int, visibleColumns: Range<Int>, retainedRowOffset: Int) -> Int
     {
         guard snapshot.rows > viewportRows else { return 0 }
         let maximumOffset = snapshot.rows - viewportRows
@@ -268,7 +268,8 @@ public enum GhosttyTerminalSnapshotViewport {
     /// full-size viewport never pays this scan.
     private static func lastVisibleContentRow(in snapshot: GhosttyTerminalSnapshot, columns: Range<Int>) -> Int {
         guard snapshot.columns > 0, snapshot.rows > 0, snapshot.cells.count >= snapshot.columns * snapshot.rows else { return 0 }
-        let contentFlags = GhosttyTerminalSnapshotGrid.inverseFlag | GhosttyTerminalSnapshotGrid.underlineFlag | GhosttyTerminalSnapshotGrid.strikeFlag
+        let contentFlags =
+            GhosttyTerminalSnapshotGrid.inverseFlag | GhosttyTerminalSnapshotGrid.underlineFlag | GhosttyTerminalSnapshotGrid.strikeFlag
         for row in stride(from: snapshot.rows - 1, through: 0, by: -1) {
             for column in columns {
                 let index = row * snapshot.columns + column

@@ -196,7 +196,8 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
             }
             let mergedFrame = GhosttyRenderFrame(
                 version: survivingFrame.version, sessionRevision: survivingFrame.sessionRevision, ownerEpoch: survivingFrame.ownerEpoch,
-                snapshot: survivingFrame.snapshot, scrollRects: mergedRects, scrollRectsOverflowed: mergedOverflowed)
+                snapshot: survivingFrame.snapshot, transcriptByteOffset: survivingFrame.transcriptByteOffset,
+                transcriptFileIdentity: survivingFrame.transcriptFileIdentity, scrollRects: mergedRects, scrollRectsOverflowed: mergedOverflowed)
             mergedReduction = TerminalRemoteStateReductionResult(
                 payload: base.payload, storedPayload: base.storedPayload, decodedUpdate: base.decodedUpdate, frameToApply: mergedFrame,
                 dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedPayload: base.isRefusedPayload)

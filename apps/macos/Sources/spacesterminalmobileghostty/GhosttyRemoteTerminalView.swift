@@ -1501,7 +1501,8 @@ import Foundation
             guard let frame = latestRenderFrame, let snapshot = currentRenderedSnapshot else { return latestRenderFrame }
             guard frame.snapshot != snapshot else { return frame }
             return GhosttyRenderFrame(
-                version: frame.version, sessionRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch, snapshot: snapshot)
+                version: frame.version, sessionRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch, snapshot: snapshot,
+                transcriptByteOffset: frame.transcriptByteOffset, transcriptFileIdentity: frame.transcriptFileIdentity)
         }
 
         private func withCFrame(_ frame: GhosttyRenderFrame, _ body: (UnsafePointer<ghostty_render_frame_s>) -> Bool) -> Bool {
