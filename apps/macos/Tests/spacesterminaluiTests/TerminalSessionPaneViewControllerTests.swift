@@ -166,19 +166,13 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         func sessionSnapshot() -> GhosttyTerminalSnapshot? { snapshotValue }
         func sessionSnapshotText() -> String? { sessionSnapshotTextValue ?? snapshotTextValue }
         func applyTerminalTextSize(_ size: TerminalTextSize) { appliedTerminalTextSizes.append(size) }
-        /// Controls what `copySharedSelectionToPasteboard` reports; defaults to the real protocol's
-        /// "nothing shared to find" default so tests that don't care about the shared-selection path
-        /// still exercise the ordinary local-read fallback.
-        var sharedSelectionCopyResult = false
-        var copySharedSelectionCallCount = 0
-        func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) {
-            copySharedSelectionCallCount += 1
-            completion(sharedSelectionCopyResult)
-        }
-        func copySelectionToPasteboard() -> Bool {
+        var copySelectionCallCount = 0
+        var selectAllCallCount = 0
+        func copySelectionToPasteboard() {
             copiedSelection = true
-            return true
+            copySelectionCallCount += 1
         }
+        func selectAll() { selectAllCallCount += 1 }
         func pasteClipboardContents() -> Bool {
             pastedClipboard = true
             return true
@@ -380,7 +374,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         performInitialRefresh: Bool = true, reusableOwnerClientID: String? = nil,
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil, detachClientAction: (@Sendable (String) throws -> Void)? = nil,
-        copySelectionAction: (@MainActor () -> Bool)? = nil, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil,
         pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
         pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
@@ -402,9 +396,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
             reusableOwnerClientID: reusableOwnerClientID, pasteImageAction: pasteImageAction, pasteboardImageReadAction: pasteboardImageReadAction,
             takeoverAction: takeoverAction, attachClientAction: attachClientAction ?? persistenceBackedAttachAction(paths),
-            detachClientAction: detachClientAction ?? persistenceBackedDetachAction(paths), copySelectionAction: copySelectionAction,
-            defersInitialOwnerClientAttach: attachClientAction == nil, pasteClipboardAction: pasteClipboardAction,
-            ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowClose: onWindowClose,
+            detachClientAction: detachClientAction ?? persistenceBackedDetachAction(paths), defersInitialOwnerClientAttach: attachClientAction == nil,
+            pasteClipboardAction: pasteClipboardAction, ownerWindowFocusAction: ownerWindowFocusAction,
+            ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowClose: onWindowClose,
             sessionHostProvider: sessionHostProvider ?? { @MainActor @Sendable _, _ in resolvedHost })
     }
 
@@ -1738,8 +1732,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         await controller.debugAwaitPendingClientControl()
 
         XCTAssertEqual(capture.attachedModes, [.owner, .owner], "the pane must reattach itself exactly once, at the mode it held")
-        XCTAssertEqual(
-            try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
         XCTAssertEqual(controller.attachmentMode, .owner)
 
         controller.debugForceRefresh()
@@ -1785,8 +1778,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         await controller.debugAwaitPendingClientControl()
 
         XCTAssertEqual(capture.attachedModes, [.owner, .viewer], "a pane whose attachment expired must not displace the session's new owner")
-        XCTAssertEqual(
-            try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.mode == .owner }?.clientID, remoteOwner.id)
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.mode == .owner }?.clientID, remoteOwner.id)
         XCTAssertEqual(controller.attachmentMode, .viewer)
     }
 
@@ -2954,14 +2946,11 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 sessionID: "session-copy-paste", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
                 updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
 
-        var copyCalls = 0
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot()
         var pasteCalls = 0
         let controller = makeGhosttyController(
-            sessionID: "session-copy-paste", paths: paths,
-            copySelectionAction: {
-                copyCalls += 1
-                return true
-            },
+            sessionID: "session-copy-paste", paths: paths, host: host,
             pasteClipboardAction: {
                 pasteCalls += 1
                 return true
@@ -2969,81 +2958,14 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         controller.copy(nil)
         controller.paste(nil)
+        controller.selectAll(nil)
 
-        XCTAssertEqual(copyCalls, 1)
+        XCTAssertEqual(host.copySelectionCallCount, 1)
+        XCTAssertEqual(host.selectAllCallCount, 1)
         XCTAssertEqual(pasteCalls, 1)
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.copy(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.paste(_:)))))
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
-    }
-
-    /// The daemon's shared selection can hold text set by a different device that this pane's own local
-    /// mirror never saw (it may have scrolled elsewhere), so Copy must reach the daemon first and only
-    /// fall back to the local session-host actions when there is nothing shared to read.
-    @MainActor func testGhosttyOwnerCopySucceedsFromSharedSelectionWithoutFallingBackToLocalRead() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-copy-shared", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "session-copy-shared", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
-                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
-
-        let host = FakeGhosttySessionHost()
-        host.snapshotValue = ghosttySnapshot()
-        host.sharedSelectionCopyResult = true
-        var localCopyCalls = 0
-        let controller = makeGhosttyController(
-            sessionID: "session-copy-shared", paths: paths, host: host,
-            copySelectionAction: {
-                localCopyCalls += 1
-                return true
-            })
-
-        controller.copy(nil)
-
-        XCTAssertEqual(host.copySharedSelectionCallCount, 1)
-        XCTAssertEqual(localCopyCalls, 0)
-    }
-
-    /// Mirrors the case above: when the daemon reports nothing shared to read, Copy falls back to the
-    /// existing local session-host actions rather than leaving the pasteboard untouched.
-    @MainActor func testGhosttyOwnerCopyFallsBackToLocalReadWhenNoSharedSelection() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-copy-nofallback", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "session-copy-nofallback", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
-                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
-
-        let host = FakeGhosttySessionHost()
-        host.snapshotValue = ghosttySnapshot()
-        host.sharedSelectionCopyResult = false
-        var localCopyCalls = 0
-        let controller = makeGhosttyController(
-            sessionID: "session-copy-nofallback", paths: paths, host: host,
-            copySelectionAction: {
-                localCopyCalls += 1
-                return true
-            })
-
-        controller.copy(nil)
-
-        XCTAssertEqual(host.copySharedSelectionCallCount, 1)
-        XCTAssertEqual(localCopyCalls, 1)
     }
 
     @MainActor func testGhosttyOwnerCommandVPastesImageBeforeTextPaste() async throws {
@@ -3116,9 +3038,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(controller.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_G, characters: "g")))
         XCTAssertTrue(controller.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_G, characters: "G", modifiers: [.command, .shift])))
 
-        XCTAssertEqual(
-            host.recordedBindingActions,
-            ["copy_to_clipboard", "select_all", "start_search", "search_selection", "navigate_search:next", "navigate_search:previous"])
+        XCTAssertEqual(host.copySelectionCallCount, 1)
+        XCTAssertEqual(host.selectAllCallCount, 1)
+        XCTAssertEqual(host.recordedBindingActions, ["start_search", "search_selection", "navigate_search:next", "navigate_search:previous"])
         XCTAssertTrue(host.pastedClipboard)
     }
 
@@ -3434,7 +3356,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(exited.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a")))
         XCTAssertFalse(exited.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_V, characters: "v")))
         XCTAssertFalse(exited.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_F, characters: "f")))
-        XCTAssertEqual(exitedHost.recordedBindingActions, ["copy_to_clipboard", "select_all"])
+        XCTAssertEqual(exitedHost.copySelectionCallCount, 1)
+        XCTAssertEqual(exitedHost.selectAllCallCount, 1)
+        XCTAssertEqual(exitedHost.recordedBindingActions, [])
     }
 
     @MainActor func testGhosttyOwnerPasteIsDisabledWhenSessionIsNotRunning() throws {
@@ -5111,7 +5035,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         func sessionSnapshot() -> GhosttyTerminalSnapshot? { nil }
         func sessionSnapshotText() -> String? { nil }
         func applyTerminalTextSize(_ size: TerminalTextSize) {}
-        func copySelectionToPasteboard() -> Bool { false }
+        func copySelectionToPasteboard() {}
+        func selectAll() {}
         func pasteClipboardContents() -> Bool { false }
         @discardableResult func sendTextAsPaste(_ text: String) -> Bool { false }
         @discardableResult func performBindingAction(_ action: String) -> Bool { false }

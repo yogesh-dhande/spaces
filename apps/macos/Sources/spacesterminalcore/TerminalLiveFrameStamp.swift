@@ -61,6 +61,18 @@ public struct TerminalLiveFrameStampRing: Equatable, Sendable {
 
     public init() {}
 
+    /// The stamps a read that started with `stampsAtReadStart` should be installed with: those and the
+    /// ring now, deduplicated, in offset order. A read held in flight while more than `capacity` frames
+    /// arrive has lost the stamps inside the bytes it served from the ring, but still holds them here.
+    public func stamps(including stampsAtReadStart: [TerminalLiveFrameStamp]) -> [TerminalLiveFrameStamp] {
+        var union = stampsAtReadStart
+        for stamp in stamps where !union.contains(stamp) { union.append(stamp) }
+        return union.enumerated().sorted { lhs, rhs in
+            lhs.element.transcriptByteOffset != rhs.element.transcriptByteOffset
+                ? lhs.element.transcriptByteOffset < rhs.element.transcriptByteOffset : lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
     /// Records the stamp of a live frame. A frame that repeats the newest stamp (output that changed no
     /// cell and moved nothing) adds nothing.
     public mutating func record(_ stamp: TerminalLiveFrameStamp) {

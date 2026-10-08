@@ -35,11 +35,11 @@
         func snapshotText() -> String?
         func sessionSnapshot() -> GhosttyTerminalSnapshot?
         func sessionSnapshotText() -> String?
-        func copySelectionToPasteboard() -> Bool
-        /// Reads the terminal's current shared selection via the daemon's `readSelectionText` and
-        /// writes it to the pasteboard on success. See `RemoteGhosttySessionHost`'s implementation for
-        /// why this is distinct from `copySelectionToPasteboard`.
-        func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void)
+        /// Copies this pane's own selection to the pasteboard, reading its text from the pane's
+        /// transcript replay. Does nothing when the pane has no selection. May complete after reads.
+        func copySelectionToPasteboard()
+        /// Selects everything this pane can replay. Copies nothing.
+        func selectAll()
         func pasteClipboardContents() -> Bool
         /// Renders this session at the app-wide terminal text size. A client-side display setting, so
         /// it applies whatever this host's attachment mode is and whether or not the session is live.
@@ -76,11 +76,6 @@
         @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
             sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: nil)
         }
-
-        /// Default: no shared selection to read, so callers fall back to `copySelectionToPasteboard()`
-        /// immediately. Only `RemoteGhosttySessionHost` overrides this with the real `readSelectionText`
-        /// round trip; every other conformer (test fakes included) reports nothing shared to find.
-        public func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) { completion(false) }
     }
 
     /// The daemon-side embedded renderer host, run on the terminal engine actor. It deliberately does
@@ -214,7 +209,9 @@
 
         public func sessionSnapshotText() -> String? { sessionDriver.snapshotText() }
 
-        public func copySelectionToPasteboard() -> Bool { false }
+        public func copySelectionToPasteboard() {}
+
+        public func selectAll() {}
 
         public func pasteClipboardContents() -> Bool {
             guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
@@ -3700,7 +3697,9 @@
 
         public func sessionSnapshotText() -> String? { return core.rendererHost.sessionSnapshotText() }
 
-        public func copySelectionToPasteboard() -> Bool { core.rendererHost.copySelectionToPasteboard() }
+        public func copySelectionToPasteboard() { core.rendererHost.copySelectionToPasteboard() }
+
+        public func selectAll() { core.rendererHost.selectAll() }
 
         public func pasteClipboardContents() -> Bool { core.rendererHost.pasteClipboardContents() }
 

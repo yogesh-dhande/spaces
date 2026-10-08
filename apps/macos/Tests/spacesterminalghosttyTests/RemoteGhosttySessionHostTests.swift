@@ -363,29 +363,6 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(sentText.first?.1, true)
     }
 
-    /// The drag-commit copy-on-select write arrives a round trip after the drag. A copy the user
-    /// made inside that window must win: the guarded write yields when the pasteboard's change count
-    /// moved past the one captured at commit, and still writes when it did not.
-    @MainActor func testSelectionResponseWriteYieldsToACopyMadeDuringTheRoundTrip() {
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "remote-selection-copy", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
-        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
-        let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-mirror-selection-\(UUID().uuidString)"))
-        defer { pasteboard.releaseGlobally() }
-        mirrorView.pasteboardOverrideForTesting = pasteboard
-
-        let countAtCommit = mirrorView.selectionPasteboardChangeCount
-        mirrorView.writeSelectionTextToPasteboard("dragged text", ifPasteboardUnchangedSince: countAtCommit)
-        XCTAssertEqual(pasteboard.string(forType: .string), "dragged text")
-
-        let staleCount = mirrorView.selectionPasteboardChangeCount
-        pasteboard.clearContents()
-        pasteboard.setString("user copy during round trip", forType: .string)
-        mirrorView.writeSelectionTextToPasteboard("older dragged text", ifPasteboardUnchangedSince: staleCount)
-        XCTAssertEqual(pasteboard.string(forType: .string), "user copy during round trip")
-    }
-
     // MARK: - Owner-targeted clipboard writes
 
     /// The product behavior: a program's copy inside the session lands on the clipboard of the machine
@@ -833,44 +810,54 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(mirrorView.debugRenderFrameApplyCount, 2)
     }
 
-    /// `clearSharedSelectionIfNeeded` runs before any window/surface setup, so it is reachable on a bare
-    /// view with no window at all: `suppressesFocusOnlyMousePress` only suppresses when there is a window
-    /// that is not yet key, and `focusWindow()` safely no-ops on a nil `window`.
-    @MainActor func testMirrorClearsSharedSelectionOnPlainLeftClickAfterAppliedSelection() {
+    /// Typing ends the pane's selection, whatever the key sends.
+    @MainActor func testTypingEndsTheClientSelection() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "mirror-clear-shared-selection-plain-click", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            sessionID: "mirror-typing-clears-selection", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
             createdAt: "2026-08-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
-        mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
-        var clearCount = 0
-        mirrorView.onClearSelection = { clearCount += 1 }
-        let selection = GhosttyTerminalSelectionRange(
-            startColumn: 0, startRow: 0, endColumn: 3, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
-        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha", selection: selection))
-        mirrorView.update(frame: frame, renderStateKey: "snapshot=5x1")
+        let window = makeVisiblePaneWindow()
+        defer { window.orderOut(nil) }
+        window.contentView?.addSubview(mirrorView)
+        mirrorView.acceptsTerminalInput = true
+        mirrorView.onSendKey = { _ in }
+        mirrorView.onSendText = { _, _ in }
+        mirrorView.setClientSelection(
+            TerminalAbsoluteSelection(
+                from: TerminalAbsoluteCell(column: 0, row: 0), to: TerminalAbsoluteCell(column: 3, row: 0), isRectangle: false, historyEpoch: 0))
+        XCTAssertNotNil(mirrorView.clientSelection)
+        let key = try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "a",
+                charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0))
 
-        mirrorView.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: 0))
+        mirrorView.handleTerminalKeyEvent(key, requireFirstResponder: false)
 
-        XCTAssertEqual(clearCount, 1)
+        XCTAssertNil(mirrorView.clientSelection)
     }
 
-    /// Shift is the local escape hatch for extending a selection, so a shift-click must never clear it.
-    @MainActor func testMirrorDoesNotClearSharedSelectionOnShiftClick() {
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "mirror-shift-click-preserves-shared-selection", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-            command: nil, createdAt: "2026-08-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
-        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
-        mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
-        var clearCount = 0
-        mirrorView.onClearSelection = { clearCount += 1 }
-        let selection = GhosttyTerminalSelectionRange(
-            startColumn: 0, startRow: 0, endColumn: 3, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
-        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha", selection: selection))
-        mirrorView.update(frame: frame, renderStateKey: "snapshot=5x1")
+    /// Copy with nothing selected leaves the pasteboard alone.
+    @MainActor func testCopyWithoutASelectionLeavesThePasteboardAlone() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: "copy-no-selection", root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: Self.liveScreen, revision: 1))
+        let provider = RecordingTranscriptProvider { _ in
+            RemoteGhosttyTranscript(data: Data(), startByteOffset: 0, endByteOffset: 0, fileIdentity: fakeTranscriptFileIdentity, runIdentity: nil)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: provider.fetch)
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("copy-no-selection-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        host.clipboardPasteboardOverrideForTesting = pasteboard
+        pasteboard.clearContents()
+        pasteboard.setString("untouched", forType: .string)
 
-        mirrorView.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: 0, modifierFlags: [.shift]))
+        host.copySelectionToPasteboard()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
 
-        XCTAssertEqual(clearCount, 0)
+        XCTAssertEqual(pasteboard.string(forType: .string), "untouched")
     }
 
     @MainActor func testRemoteMirrorSearchActionEventsUpdateOverlayState() {
@@ -1364,13 +1351,13 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
 
         XCTAssertEqual(host.snapshotText(), "done")
-        XCTAssertTrue(host.performBindingAction("select_all"))
-        XCTAssertTrue(host.performBindingAction("copy_to_clipboard"))
         XCTAssertTrue(host.performBindingAction("end_search"))
+        XCTAssertFalse(host.performBindingAction("select_all"), "selection goes through selectAll(), which reads the pane's replay")
+        XCTAssertFalse(host.performBindingAction("copy_to_clipboard"))
         XCTAssertFalse(host.performBindingAction("start_search"))
         XCTAssertFalse(host.performBindingAction("search:done"))
         XCTAssertFalse(host.performBindingAction("clear_screen"))
-        XCTAssertEqual(host.debugRecordedBindingActions, ["select_all", "copy_to_clipboard", "end_search"])
+        XCTAssertEqual(host.debugRecordedBindingActions, ["end_search"])
     }
 
     @MainActor func testEndedRemoteHostScrollsIntoScrollback() throws {
@@ -2872,13 +2859,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(provider.requests.last).fromByteOffset, UInt64(page.count))
     }
 
-    /// The shared selection is anchored in the session's own screen, which a pane showing its replay is
-    /// not looking at: a drag over replayed rows names rows of this client's own copy of the transcript.
-    /// Committing those would move the selection every other viewer sees onto text nobody selected, so
-    /// while a replay frame is on screen no selection request leaves the host at all - neither the commit
-    /// a drag's release makes nor the clear a plain click makes. Both resume the moment the pane is back
-    /// on the session's own screen.
-    @MainActor func testADragOnTheReplayCommitsNoSharedSelection() throws {
+    /// Select-all reaches every row the pane can replay, and it is the pane's own selection: no
+    /// selection request leaves the host, so no other viewer's screen changes. The span runs from the
+    /// first to the last row of the transcript, which the live screen alone does not hold.
+    @MainActor func testSelectAllSelectsTheWholeReplayWithoutTouchingTheSession() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-selection", root: root)
@@ -2901,35 +2885,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
             mode: .owner, into: container)
         waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
-        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
-        waitForCondition("the pane shows its own transcript rows") { host.debugIsShowingLocalScrollbackFrame }
-        // The two callbacks the mirror view fires from its own mouse handling: the clear a plain
-        // mouse-down makes, and the commit a drag's release makes (`commitLocalSelectionIfPresent`),
-        // reporting rows of whatever viewport the pane last painted.
-        let mirrorView = try XCTUnwrap(
-            container.subviews.compactMap { $0 as? GhosttyMirrorTerminalView }.first, "the pane never installed its mirror view")
 
-        mirrorView.onClearSelection?()
-        mirrorView.onSetSelection?(1, 12, 6, 12, false)
-        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        host.selectAll()
 
-        let commandsDuringReplay = controlCommands(recorder)
-        XCTAssertFalse(
-            commandsDuringReplay.contains("setSelection"), "a drag over replayed rows committed replay coordinates as the session's shared selection")
-        XCTAssertFalse(
-            commandsDuringReplay.contains("clearSelection"), "a click on a replay frame cleared the selection every other viewer is looking at")
-
-        // Back on the session's own screen, where the pane's rows are the session's rows again, both
-        // requests reach the daemon. The repaint the jump makes is also what drops any highlight the
-        // local drag left on the surface: applying a frame paints the selection that frame carries and
-        // clears one it does not.
-        host.debugActivateJumpToBottom()
-        XCTAssertFalse(host.debugIsShowingLocalScrollbackFrame)
-        XCTAssertEqual(host.snapshotText()?.contains("live-01"), true, "the jump must put the session's own screen back")
-
-        mirrorView.onSetSelection?(1, 2, 6, 2, false)
-
-        waitForCondition("the commit made on the live screen reaches the session") { self.controlCommands(recorder).contains("setSelection") }
+        waitForCondition("select-all selects the replay") { host.debugClientSelection != nil }
+        let selection = try XCTUnwrap(host.debugClientSelection)
+        XCTAssertLessThan(selection.start.row, selection.end.row)
+        let commands = controlCommands(recorder)
+        XCTAssertFalse(commands.contains("setSelection"), "select-all changed the selection every other viewer sees")
+        XCTAssertFalse(commands.contains("clearSelection"))
     }
 
     /// Discarding a replay (a keystroke, a resize, a relaunch) leaves any continuation read it started
@@ -5961,5 +5925,583 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             NSEvent.mouseEvent(
                 with: type, location: NSPoint(x: 20, y: 30), modifierFlags: modifierFlags, timestamp: 0, windowNumber: windowNumber, context: nil,
                 eventNumber: 1, clickCount: 1, pressure: 1))
+    }
+
+    // MARK: - Client selection, end to end
+    //
+    // The live frames come from a libghostty-vt session fed numbered lines (`StampedHostTerminal`), each
+    // stamped with its history position and transcript offset, and the transcript provider serves the
+    // same bytes under the same file identity. The pane's replay therefore aligns with the host's rows
+    // the way it does against a real host, and what a copy puts on the pasteboard can be checked line
+    // by line.
+
+    /// Serves a `StampedHostTerminal`'s bytes as the transcript file, optionally cutting a read short.
+    private final class StampedTranscriptSource: @unchecked Sendable {
+        private let lock = NSLock()
+        private var terminal: StampedHostTerminal?
+        private var continuationLimit: Int?
+        private var recorded: [RecordingTranscriptProvider.Request] = []
+        let runIdentity: String?
+
+        init(runIdentity: String?) { self.runIdentity = runIdentity }
+
+        func bind(_ terminal: StampedHostTerminal) {
+            lock.lock()
+            self.terminal = terminal
+            lock.unlock()
+        }
+
+        /// Makes every continuation end at `bytes` however much the file holds: the host stamped a frame
+        /// the file has not caught up to.
+        func limitContinuations(toEndAt bytes: Int) {
+            lock.lock()
+            continuationLimit = bytes
+            lock.unlock()
+        }
+
+        var requests: [RecordingTranscriptProvider.Request] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recorded
+        }
+
+        func fetch(maxBytes: Int, fromByteOffset: UInt64?, fileIdentity: UInt64?) async throws -> RemoteGhosttyTranscript {
+            // The file as it is when the read reaches the provider: a held read does not see bytes
+            // written while it waits, as a real read in flight does not.
+            let fileEnd = noteArrival()
+            while isHeld { try await Task.sleep(nanoseconds: 10_000_000) }
+            return serve(maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity, fileEnd: fileEnd)
+        }
+
+        private var held = false
+        private var arrivals = 0
+
+        /// Holds every read until `releaseReads()`, so a test can act while a read is in flight.
+        func holdReads() {
+            lock.lock()
+            held = true
+            lock.unlock()
+        }
+
+        func releaseReads() {
+            lock.lock()
+            held = false
+            lock.unlock()
+        }
+
+        /// Reads that have reached the provider, served or still held.
+        var arrivedReads: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return arrivals
+        }
+
+        private var isHeld: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return held
+        }
+
+        private func noteArrival() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            arrivals += 1
+            return terminal?.bytes.count ?? 0
+        }
+
+        private func serve(maxBytes: Int, fromByteOffset: UInt64?, fileIdentity: UInt64?, fileEnd: Int) -> RemoteGhosttyTranscript {
+            lock.lock()
+            defer { lock.unlock() }
+            recorded.append(.init(maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity))
+            let identity = StampedHostTerminal.fileIdentity
+            guard let terminal else {
+                return RemoteGhosttyTranscript(data: Data(), startByteOffset: 0, endByteOffset: 0, fileIdentity: identity, runIdentity: runIdentity)
+            }
+            let bytes = terminal.bytes.prefix(fileEnd)
+            guard let fromByteOffset else {
+                return RemoteGhosttyTranscript(
+                    data: bytes, startByteOffset: 0, endByteOffset: UInt64(bytes.count), fileIdentity: identity, runIdentity: runIdentity)
+            }
+            let end = min(bytes.count, continuationLimit ?? bytes.count)
+            let start = min(Int(fromByteOffset), end)
+            return RemoteGhosttyTranscript(
+                data: bytes.subdata(in: start..<end), startByteOffset: UInt64(start), endByteOffset: UInt64(end), fileIdentity: identity,
+                runIdentity: runIdentity)
+        }
+    }
+
+    private final class SelectionFixture {
+        let host: RemoteGhosttySessionHost
+        let view: GhosttyMirrorTerminalView
+        let terminal: StampedHostTerminal
+        let source: StampedTranscriptSource
+        let recorder: DirectTerminalServiceRecorder
+        let session: LiveScrollbackSession
+        let window: NSWindow
+        let pasteboard: NSPasteboard
+        var revision: UInt64 = 1
+
+        init(
+            host: RemoteGhosttySessionHost, view: GhosttyMirrorTerminalView, terminal: StampedHostTerminal, source: StampedTranscriptSource,
+            recorder: DirectTerminalServiceRecorder, session: LiveScrollbackSession, window: NSWindow, pasteboard: NSPasteboard
+        ) {
+            self.host = host
+            self.view = view
+            self.terminal = terminal
+            self.source = source
+            self.recorder = recorder
+            self.session = session
+            self.window = window
+            self.pasteboard = pasteboard
+        }
+    }
+
+    private func stampedPayload(_ fixtureSession: LiveScrollbackSession, frame: GhosttyRenderFrame, revision: UInt64, outputEnd: Int) throws
+        -> GhosttyRemoteSessionStatePayload
+    {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: fixtureSession.launchConfiguration.sessionID, reason: TerminalRemoteSessionStateReason.output.rawValue,
+            emittedAt: "2026-09-16T00:00:01Z", sessionStateRevision: revision, sessionStateFlags: 1, screenStateRevision: revision,
+            runtimeState: fixtureSession.runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live",
+            workingDirectory: "/tmp/work", outputByteCount: nil, outputEndByteOffset: outputEnd,
+            renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+    }
+
+    /// A pane attached to a host whose terminal holds lines 1...`lines`, painting the host's newest frame.
+    @MainActor private func makeSelectionFixture(sessionID: String, lines: Int, holdsReads: Bool = false) throws -> SelectionFixture {
+        let root = try makeTemporaryRoot()
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let session = try makeLiveScrollbackSession(sessionID: sessionID, root: root)
+        let source = StampedTranscriptSource(runIdentity: session.runtimeState.runIdentity)
+        if holdsReads { source.holdReads() }
+        let recorder = DirectTerminalServiceRecorder(payload: try liveScrollbackPayload(session, text: "placeholder", revision: 1))
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: source.fetch)
+        let window = KeyTestWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
+        window.makeKeyAndOrderFront(nil)
+        addTeardownBlock { window.orderOut(nil) }
+        let container = try XCTUnwrap(window.contentView)
+        try host.attach(
+            client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
+            mode: .owner, into: container)
+        let view = try XCTUnwrap(container.subviews.compactMap { $0 as? GhosttyMirrorTerminalView }.first, "the pane never installed its mirror view")
+        var grid: (columns: Int, rows: Int)?
+        waitForCondition("the pane builds its surface") {
+            grid = view.surfaceCellSize()
+            return grid != nil
+        }
+        let paneGrid = try XCTUnwrap(grid)
+        XCTAssertGreaterThan(paneGrid.columns, 26, "the tests aim at columns past the ten-character lines")
+        let terminal = StampedHostTerminal(columns: paneGrid.columns, rows: paneGrid.rows)
+        terminal.writeLines(1...lines)
+        source.bind(terminal)
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("client-selection-\(UUID().uuidString)"))
+        addTeardownBlock { pasteboard.releaseGlobally() }
+        host.clipboardPasteboardOverrideForTesting = pasteboard
+        let fixture = SelectionFixture(
+            host: host, view: view, terminal: terminal, source: source, recorder: recorder, session: session, window: window, pasteboard: pasteboard)
+        publishNewestFrame(fixture)
+        return fixture
+    }
+
+    /// Delivers the host terminal's current frame and waits for the pane to paint it.
+    /// `paints: false` is for a frame the pane keeps underneath its replay: it waits for the host to
+    /// observe the frame's output end instead.
+    @MainActor private func publishNewestFrame(_ fixture: SelectionFixture, reportedOutputEnd: Int? = nil, paints: Bool = true) {
+        fixture.revision += 1
+        let frame = fixture.terminal.frame(revision: fixture.revision)
+        fixture.recorder.setPayload(
+            try! stampedPayload(
+                fixture.session, frame: frame, revision: fixture.revision, outputEnd: reportedOutputEnd ?? fixture.terminal.bytes.count))
+        guard paints else {
+            let end = UInt64(reportedOutputEnd ?? fixture.terminal.bytes.count)
+            waitForCondition("the host observes the frame") { fixture.host.debugLatestTranscriptEndByteOffset == end }
+            return
+        }
+        let newest = fixture.terminal.rowTexts().last { StampedHostTerminal.lineNumber($0) != nil } ?? ""
+        waitForCondition("the pane paints the host's newest frame") {
+            fixture.host.requestSurfaceRefresh()
+            return fixture.view.debugMirrorSurfaceText?.contains(newest) == true
+        }
+    }
+
+    /// The viewport rows currently showing a numbered line.
+    private func numberedRows(_ fixture: SelectionFixture) -> [Int] {
+        fixture.terminal.rowTexts().enumerated().compactMap { StampedHostTerminal.lineNumber($0.element) == nil ? nil : $0.offset }
+    }
+
+    private func lineNumber(atRow row: Int, _ fixture: SelectionFixture) -> Int { StampedHostTerminal.lineNumber(fixture.terminal.rowTexts()[row])! }
+
+    private func lines(_ range: ClosedRange<Int>) -> String { range.map(StampedHostTerminal.line).joined(separator: "\n") }
+
+    private func absoluteSelection(lines range: ClosedRange<Int>, _ fixture: SelectionFixture) -> TerminalAbsoluteSelection {
+        TerminalAbsoluteSelection(
+            from: TerminalAbsoluteCell(column: 0, row: Int64(range.lowerBound - 1)),
+            to: TerminalAbsoluteCell(column: 9, row: Int64(range.upperBound - 1)), isRectangle: false,
+            historyEpoch: fixture.terminal.frame(revision: 0).snapshot.historyEpoch)
+    }
+
+    @MainActor private func send(_ type: NSEvent.EventType, column: Int, row: Int, _ fixture: SelectionFixture, modifiers: NSEvent.ModifierFlags = [])
+    {
+        let point = try! XCTUnwrap(fixture.view.windowPointForTesting(column: column, row: row))
+        let event = try! XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: modifiers, timestamp: 0, windowNumber: fixture.window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1))
+        switch type {
+        case .leftMouseDown: fixture.view.mouseDown(with: event)
+        case .leftMouseDragged: fixture.view.mouseDragged(with: event)
+        case .leftMouseUp: fixture.view.mouseUp(with: event)
+        case .rightMouseDown: fixture.view.rightMouseDown(with: event)
+        case .rightMouseUp: fixture.view.rightMouseUp(with: event)
+        default: XCTFail("unsupported mouse event type")
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    }
+
+    /// Presses copy and returns what landed on the pasteboard, which starts out holding a sentinel.
+    @MainActor private func copy(_ fixture: SelectionFixture) -> String? {
+        fixture.pasteboard.clearContents()
+        fixture.pasteboard.setString("sentinel", forType: .string)
+        fixture.host.copySelectionToPasteboard()
+        waitForCondition("the copy lands on the pasteboard") { fixture.pasteboard.string(forType: .string) != "sentinel" }
+        return fixture.pasteboard.string(forType: .string)
+    }
+
+    /// Rows above the viewport are in the copy, and the highlight stays.
+    @MainActor func testCopyIncludesRowsAboveTheViewport() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-copy-history", lines: 200)
+        XCTAssertFalse(fixture.terminal.rowTexts().contains(StampedHostTerminal.line(33)), "the selected rows must be out of the viewport")
+        fixture.view.setClientSelection(absoluteSelection(lines: 31...35, fixture))
+
+        XCTAssertEqual(copy(fixture), lines(31...35))
+        XCTAssertNotNil(fixture.host.debugClientSelection, "copying must leave the highlight")
+    }
+
+    /// The host stamps a frame the file has not caught up to, and output keeps arriving while the
+    /// continuation read runs: the copy still lands, from what the file could serve.
+    @MainActor func testCopyLandsWhenAContinuationStopsShortOfTheNewestFrame() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-copy-short-continuation", lines: 80)
+        waitForCondition("the pane prefetches its first page") { !fixture.source.requests.isEmpty }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        fixture.terminal.writeLines(81...100)
+        fixture.source.limitContinuations(toEndAt: 95 * StampedHostTerminal.lineByteCount)
+        publishNewestFrame(fixture)
+        fixture.view.setClientSelection(absoluteSelection(lines: 11...15, fixture))
+
+        XCTAssertEqual(copy(fixture), lines(11...15))
+        let requests = fixture.source.requests
+        XCTAssertEqual(requests.count, 2, "one first page and one continuation, no repeats")
+        XCTAssertEqual(requests.last?.fromByteOffset, UInt64(80 * StampedHostTerminal.lineByteCount))
+    }
+
+    /// A drag whose anchor scrolls off the top as output arrives keeps its true anchor: the copied text
+    /// starts at the line the press landed on, not at the first line still on screen.
+    @MainActor func testADragKeepsItsAnchorLineWhenOutputScrollsItOffTheTop() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-anchor-off-top", lines: 100)
+        let rows = numberedRows(fixture)
+        let pressRow = rows[1]
+        let bottomRow = try XCTUnwrap(rows.last)
+        let anchorLine = lineNumber(atRow: pressRow, fixture)
+
+        send(.leftMouseDown, column: 0, row: pressRow, fixture)
+        send(.leftMouseDragged, column: 25, row: bottomRow, fixture)
+        fixture.terminal.writeLines(101...(100 + pressRow + 3))
+        publishNewestFrame(fixture)
+        XCTAssertGreaterThan(lineNumber(atRow: rows[0], fixture), anchorLine, "the anchor line must have scrolled off the top")
+        // The pointer moves a column, as a hand does; Ghostty resolves the drag on pointer movement.
+        send(.leftMouseDragged, column: 24, row: bottomRow, fixture)
+        send(.leftMouseUp, column: 24, row: bottomRow, fixture)
+
+        XCTAssertEqual(copy(fixture), lines(anchorLine...lineNumber(atRow: bottomRow, fixture)))
+    }
+
+    /// Shift-click extends the selection from the press that made it.
+    @MainActor func testShiftClickExtendsFromTheAnchor() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-shift-click", lines: 100)
+        let rows = numberedRows(fixture)
+        let anchorRow = rows[1]
+        let firstEndRow = rows[2]
+        let extendRow = try XCTUnwrap(rows.last)
+
+        send(.leftMouseDown, column: 0, row: anchorRow, fixture)
+        send(.leftMouseDragged, column: 25, row: firstEndRow, fixture)
+        send(.leftMouseUp, column: 25, row: firstEndRow, fixture)
+        XCTAssertEqual(copy(fixture), lines(lineNumber(atRow: anchorRow, fixture)...lineNumber(atRow: firstEndRow, fixture)))
+
+        // A shift-click inside Ghostty's multi-click interval (500 ms) counts toward a double click instead.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.7))
+        send(.leftMouseDown, column: 25, row: extendRow, fixture, modifiers: [.shift])
+        send(.leftMouseUp, column: 25, row: extendRow, fixture, modifiers: [.shift])
+
+        XCTAssertEqual(copy(fixture), lines(lineNumber(atRow: anchorRow, fixture)...lineNumber(atRow: extendRow, fixture)))
+    }
+
+    /// A selection made on live rows is still there, over the same text, when the pane scrolls up into
+    /// its replay.
+    @MainActor func testASelectionMadeOnLiveRowsShowsOnTheReplay() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-live-to-replay", lines: 200)
+        let rows = numberedRows(fixture)
+        send(.leftMouseDown, column: 0, row: rows[1], fixture)
+        send(.leftMouseDragged, column: 25, row: rows[2], fixture)
+        send(.leftMouseUp, column: 25, row: rows[2], fixture)
+        let selected = try XCTUnwrap(fixture.view.debugSurfaceSelectionText)
+        XCTAssertFalse(selected.isEmpty)
+
+        let twoRows = CGFloat(TerminalScrollDeltaNormalizer.defaultCellHeight) * 2
+        XCTAssertTrue(
+            fixture.host.sendScroll(horizontal: 0, vertical: twoRows, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its replay") { fixture.host.debugIsShowingLocalScrollbackFrame }
+
+        waitForCondition("the replay shows the same selection") { fixture.view.debugSurfaceSelectionText == selected }
+    }
+
+    /// A selection made on the replay carries back to the live rows it covers.
+    @MainActor func testASelectionMadeOnTheReplayShowsOnLiveRows() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-replay-to-live", lines: 200)
+        let threeRows = CGFloat(TerminalScrollDeltaNormalizer.defaultCellHeight) * 3
+        XCTAssertTrue(
+            fixture.host.sendScroll(horizontal: 0, vertical: threeRows, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its replay") { fixture.host.debugIsShowingLocalScrollbackFrame }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+        send(.leftMouseDown, column: 0, row: 1, fixture)
+        send(.leftMouseDragged, column: 25, row: 5, fixture)
+        send(.leftMouseUp, column: 25, row: 5, fixture)
+        let selectedLines = Set(
+            try XCTUnwrap(fixture.view.debugSurfaceSelectionText).components(separatedBy: .newlines).compactMap(StampedHostTerminal.lineNumber))
+        XCTAssertGreaterThanOrEqual(selectedLines.count, 4)
+
+        fixture.host.debugActivateJumpToBottom()
+        waitForCondition("the pane is back on live rows") { !fixture.host.debugIsShowingLocalScrollbackFrame }
+
+        let liveLines = Set(fixture.terminal.rowTexts().compactMap(StampedHostTerminal.lineNumber))
+        let expected = selectedLines.intersection(liveLines)
+        XCTAssertFalse(expected.isEmpty)
+        XCTAssertLessThan(expected.count, selectedLines.count, "part of the selection lies above the live rows")
+        waitForCondition("the live rows show the part of the selection they hold") {
+            let shown = Set(
+                (fixture.view.debugSurfaceSelectionText ?? "").components(separatedBy: .newlines).compactMap(StampedHostTerminal.lineNumber))
+            return shown == expected
+        }
+    }
+
+    /// A right-click outside the selection selects the word under the pointer, and the menu offers
+    /// Copy, Paste and Select All with Copy enabled only once something is selected.
+    @MainActor func testRightClickSelectsTheWordAndTheMenuOffersCopyPasteSelectAll() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-right-click", lines: 100)
+        fixture.view.presentsContextMenu = false
+        let row = numberedRows(fixture)[2]
+        let point = try XCTUnwrap(fixture.view.windowPointForTesting(column: 3, row: row))
+        let event = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .rightMouseDown, location: point, modifierFlags: [], timestamp: 0, windowNumber: fixture.window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1))
+        let emptyMenu = try XCTUnwrap(fixture.view.menu(for: event))
+        XCTAssertEqual(emptyMenu.items.map(\.title), ["Copy", "Paste", "Select All"])
+        XCTAssertFalse(try XCTUnwrap(emptyMenu.item(withTitle: "Copy")).isEnabled)
+
+        send(.rightMouseDown, column: 3, row: row, fixture)
+        send(.rightMouseUp, column: 3, row: row, fixture)
+
+        XCTAssertEqual(fixture.view.debugSurfaceSelectionText, StampedHostTerminal.line(lineNumber(atRow: row, fixture)))
+        XCTAssertNotNil(fixture.view.clientSelection)
+        let menu = try XCTUnwrap(fixture.view.menu(for: event))
+        XCTAssertEqual(menu.items.map(\.title), ["Copy", "Paste", "Select All"])
+        XCTAssertTrue(try XCTUnwrap(menu.item(withTitle: "Copy")).isEnabled)
+        XCTAssertEqual(try XCTUnwrap(menu.item(withTitle: "Paste")).isEnabled, fixture.view.acceptsTerminalInput)
+        XCTAssertTrue(try XCTUnwrap(menu.item(withTitle: "Select All")).isEnabled)
+    }
+
+    /// Presses on a cell, then drags to the top edge of the pane, where the selection scrolls.
+    @MainActor private func dragToTopEdge(
+        _ fixture: SelectionFixture, pressRow: Int, pressColumn: Int = 3, edgeColumn: Int? = nil, modifiers: NSEvent.ModifierFlags = []
+    ) throws {
+        send(.leftMouseDown, column: pressColumn, row: pressRow, fixture, modifiers: modifiers)
+        let view = fixture.view
+        let edgeX =
+            try edgeColumn.map { try XCTUnwrap(view.windowPointForTesting(column: $0, row: 0)).x }
+            ?? view.convert(NSPoint(x: view.bounds.midX, y: 0), to: nil).x
+        let edge = NSPoint(x: edgeX, y: view.convert(NSPoint(x: 0, y: view.bounds.maxY), to: nil).y)
+        let drag = try XCTUnwrap(
+            NSEvent.mouseEvent(
+                with: .leftMouseDragged, location: edge, modifierFlags: modifiers, timestamp: 0, windowNumber: fixture.window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+        view.mouseDragged(with: drag)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    }
+
+    /// Ghostty's selection scroll moves a viewport and never the program, so on the alternate screen
+    /// (where a wheel event becomes arrow keys) a drag past the edge sends the session nothing.
+    @MainActor func testSelectionAutoscrollOnTheAlternateScreenSendsNothingToTheSession() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-autoscroll-alt", lines: 100)
+        fixture.terminal.write("\u{1B}[?1049h")
+        fixture.terminal.writeLines(1...30)
+        publishNewestFrame(fixture)
+        XCTAssertTrue(fixture.terminal.frame(revision: 0).snapshot.alternateScreenActive)
+
+        try dragToTopEdge(fixture, pressRow: numberedRows(fixture)[3])
+        for _ in 0..<5 { fixture.view.performSelectionAutoscrollTick() }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+
+        XCTAssertFalse(controlCommands(fixture.recorder).contains("scroll"), "the program received the selection's scroll")
+        XCTAssertFalse(fixture.host.debugIsShowingLocalScrollbackFrame)
+    }
+
+    /// With the program tracking the mouse on the primary screen, the selection (made with Shift, the
+    /// local escape) scrolls the pane's own replay and still sends the session nothing.
+    @MainActor func testSelectionAutoscrollUnderMouseTrackingScrollsTheReplayOnly() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-autoscroll-tracking", lines: 200)
+        fixture.terminal.mouseReportingActive = true
+        publishNewestFrame(fixture)
+        XCTAssertFalse(fixture.terminal.frame(revision: 0).snapshot.alternateScreenActive)
+        waitForCondition("the replay is ready") { fixture.source.arrivedReads >= 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        try dragToTopEdge(fixture, pressRow: numberedRows(fixture)[3], modifiers: [.shift])
+        fixture.view.performSelectionAutoscrollTick()
+        fixture.view.performSelectionAutoscrollTick()
+
+        XCTAssertTrue(fixture.host.debugIsShowingLocalScrollbackFrame, "the replay did not scroll")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertFalse(controlCommands(fixture.recorder).contains("scroll"), "the program received the selection's scroll")
+    }
+
+    /// Output arrived after the replay was prefetched. The first autoscroll tick that enters the replay
+    /// catches it up first, so the rows scrolled onto run on directly from the live rows with no gap.
+    @MainActor func testAutoscrollIntoTheReplayCatchesTheReplayUpFirst() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-autoscroll-catch-up", lines: 100)
+        waitForCondition("the pane prefetches its first page") { fixture.source.arrivedReads >= 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        fixture.terminal.writeLines(101...130)
+        publishNewestFrame(fixture)
+        let liveRows = fixture.terminal.rowTexts().compactMap(StampedHostTerminal.lineNumber)
+        let liveTop = try XCTUnwrap(liveRows.first)
+        let pressRow = numberedRows(fixture)[3]
+        let anchorLine = lineNumber(atRow: pressRow, fixture)
+
+        try dragToTopEdge(fixture, pressRow: pressRow, pressColumn: 25, edgeColumn: 0)
+        for _ in 0..<3 { fixture.view.performSelectionAutoscrollTick() }
+        waitForCondition("the pane shows its replay") { fixture.host.debugIsShowingLocalScrollbackFrame }
+        waitForCondition("the replay was caught up with a continuation") { fixture.source.requests.contains { $0.fromByteOffset != nil } }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+
+        let painted = try XCTUnwrap(fixture.view.debugMirrorSurfaceSnapshot)
+        let shown = TranscriptReplayVT.rowTexts(painted).compactMap(StampedHostTerminal.lineNumber)
+        // The pane's own timer keeps ticking while the drag rests on the edge, so how far the replay
+        // scrolled is not fixed. What must hold: the rows shown are consecutive, they lie above the
+        // live rows, and the anchor (written after the prefetch) is in the replay.
+        let top = try XCTUnwrap(shown.first)
+        XCTAssertGreaterThan(anchorLine, 100, "the anchor must be a row written after the prefetch")
+        XCTAssertLessThan(top, liveTop, "the pane did not scroll into the replay")
+        XCTAssertEqual(shown, Array(top..<(top + shown.count)), "the rows shown must run on without a gap")
+        send(.leftMouseUp, column: 0, row: 0, fixture)
+        XCTAssertEqual(copy(fixture), lines(top...anchorLine))
+    }
+
+    /// A frame whose stamp is past the replay's end while the reported end offset is stale: the copy
+    /// still reads the new rows.
+    @MainActor func testCopyReadsRowsAFrameStampedBeyondTheReportedOffset() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-stale-reported-offset", lines: 80)
+        waitForCondition("the pane prefetches its first page") { fixture.source.arrivedReads >= 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        fixture.terminal.writeLines(81...100)
+        publishNewestFrame(fixture, reportedOutputEnd: 80 * StampedHostTerminal.lineByteCount)
+        fixture.view.setClientSelection(absoluteSelection(lines: 91...95, fixture))
+
+        XCTAssertEqual(copy(fixture), lines(91...95))
+    }
+
+    /// A read held in flight while more frames arrive than the stamp ring holds still yields an aligned
+    /// replay: the stamp inside the bytes it served is the one it started with.
+    @MainActor func testAReadHeldWhileMoreFramesThanTheRingHoldsArriveStillAlignsTheReplay() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-stamps-outlast-ring", lines: 40, holdsReads: true)
+        waitForCondition("the pane starts its first read") { fixture.source.arrivedReads >= 1 }
+        fixture.view.setClientSelection(absoluteSelection(lines: 11...15, fixture))
+        let liveEpoch = fixture.terminal.frame(revision: 0).snapshot.historyEpoch
+        for line in 41...(41 + TerminalLiveFrameStampRing.capacity + 12) {
+            fixture.terminal.writeLines(line...line)
+            publishNewestFrame(fixture)
+        }
+        fixture.source.releaseReads()
+
+        waitForCondition("the replay is installed") { fixture.host.debugLocalScrollbackReplayHistoryEpoch != nil }
+        XCTAssertEqual(fixture.host.debugLocalScrollbackReplayHistoryEpoch, liveEpoch, "the replay did not line up with the host's rows")
+        XCTAssertEqual(copy(fixture), lines(11...15))
+    }
+
+    /// A clear, reset or screen switch arriving while the pane shows its replay is never painted, but it
+    /// still ends a selection made on the live rows before it.
+    @MainActor func testALiveEpochChangeWhileTheReplayIsShownEndsTheSelection() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-live-epoch-change", lines: 100)
+        waitForCondition("the pane prefetches its first page") { fixture.source.arrivedReads >= 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        fixture.view.setClientSelection(absoluteSelection(lines: 90...92, fixture))
+        let liveEpoch = fixture.terminal.frame(revision: 0).snapshot.historyEpoch
+        XCTAssertTrue(fixture.host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("the pane shows its replay") { fixture.host.debugIsShowingLocalScrollbackFrame }
+        XCTAssertNotNil(fixture.host.debugClientSelection)
+
+        fixture.terminal.write("\u{1B}[3J")
+        fixture.terminal.writeLines(101...101)
+        XCTAssertNotEqual(fixture.terminal.frame(revision: 0).snapshot.historyEpoch, liveEpoch, "the test's reset must renumber the rows")
+        publishNewestFrame(fixture, paints: false)
+
+        XCTAssertTrue(fixture.host.debugIsShowingLocalScrollbackFrame, "the live frame must not have been painted")
+        XCTAssertNil(fixture.host.debugClientSelection)
+    }
+
+    /// Select All then Copy before the read behind Select All lands: the copy waits for the selection
+    /// and copies the whole replay, and the highlight stays.
+    @MainActor func testCopyPressedWhileSelectAllIsReadingCopiesTheSelectAll() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-select-all-copy", lines: 60, holdsReads: true)
+        fixture.pasteboard.clearContents()
+        fixture.pasteboard.setString("sentinel", forType: .string)
+
+        fixture.host.selectAll()
+        fixture.host.copySelectionToPasteboard()
+        XCTAssertNil(fixture.host.debugClientSelection, "the read has not landed")
+        fixture.source.releaseReads()
+
+        waitForCondition("the copy lands on the pasteboard") { fixture.pasteboard.string(forType: .string) != "sentinel" }
+        XCTAssertEqual(fixture.pasteboard.string(forType: .string), lines(1...60))
+        XCTAssertNotNil(fixture.host.debugClientSelection, "the select-all highlight must stay")
+    }
+
+    /// A click while Select All is reading is the user's newer choice: the read lands on nothing.
+    @MainActor func testAClickWhileSelectAllIsReadingCancelsTheSelectAll() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-select-all-click", lines: 60, holdsReads: true)
+        fixture.host.selectAll()
+
+        send(.leftMouseDown, column: 0, row: 1, fixture)
+        send(.leftMouseUp, column: 0, row: 1, fixture)
+        fixture.source.releaseReads()
+        waitForCondition("the reads land") { fixture.source.arrivedReads >= 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+
+        XCTAssertNil(fixture.host.debugClientSelection)
+    }
+
+    /// Typing while Select All is reading cancels it too.
+    @MainActor func testTypingWhileSelectAllIsReadingCancelsTheSelectAll() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-select-all-typing", lines: 60, holdsReads: true)
+        fixture.view.acceptsTerminalInput = true
+        fixture.view.onSendText = { _, _ in }
+        fixture.view.onSendKey = { _ in }
+        fixture.host.selectAll()
+        let key = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: fixture.window.windowNumber, context: nil,
+                characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0))
+
+        XCTAssertTrue(fixture.view.handleTerminalKeyEvent(key, requireFirstResponder: false))
+        fixture.source.releaseReads()
+        waitForCondition("the reads land") { fixture.source.arrivedReads >= 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+
+        XCTAssertNil(fixture.host.debugClientSelection)
     }
 }

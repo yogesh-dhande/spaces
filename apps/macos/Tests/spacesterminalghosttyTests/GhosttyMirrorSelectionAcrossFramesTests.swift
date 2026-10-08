@@ -10,10 +10,9 @@ import spacesterminalcore
 /// already made, and the highlight has to stay on the words they picked: what they copy afterwards
 /// is what they saw highlighted, not a range the new output moved or erased.
 ///
-/// The guarantee is split between the daemon and the mirror: a completed drag commits the selection
-/// to the daemon, which keeps it anchored and echoes it inside every later frame, while a drag still
-/// in progress is local to the mirror and rides the stream's scroll-rect carry. The harness below
-/// stands in for the daemon on both sides of that split.
+/// The selection is the pane's own, kept in absolute rows and painted onto every frame, while a drag
+/// still in progress rides the stream's scroll-rect carry. The harness below stands in for the daemon's
+/// frames.
 @MainActor final class GhosttyMirrorSelectionAcrossFramesTests: XCTestCase {
     /// One row of distinct characters, so any two ranges of it differ in text. The frame that arrives
     /// mid-selection changes only the far-right end of the row, well right of every cell the drags
@@ -42,21 +41,12 @@ import spacesterminalcore
         super.tearDown()
     }
 
-    /// The user finishes a selection and the program prints again. Releasing the drag commits the
-    /// selection to the daemon, whose next frame carries both the new output and the selection it
-    /// keeps anchored, so the highlight stays where they put it, over the same text, ready to be
-    /// copied.
+    /// The user finishes a selection and the program prints again. The selection belongs to this pane
+    /// and the later frame carries none, yet the highlight stays where they put it, over the same text,
+    /// ready to be copied.
     func testCompletedSelectionSurvivesLaterOutput() throws {
         let view = makeAttachedView(sessionID: "sel-frames-1")
         defer { view.removeFromSuperview() }
-        var committed: GhosttyTerminalSelectionRange?
-        view.onSetSelection = { startColumn, startRow, endColumn, endRow, isRectangle in
-            // The grid is one screen row with no scrollback, so the absolute rows the commit reports
-            // are already this viewport's rows and the daemon's projection is the identity.
-            committed = GhosttyTerminalSelectionRange(
-                startColumn: startColumn, startRow: UInt16(startRow), endColumn: endColumn, endRow: UInt16(endRow), isRectangle: isRectangle,
-                extendsAbove: false, extendsBelow: false)
-        }
         try applyOriginalFrame(to: view, renderStateKey: "sel-frames-1")
 
         send(.leftMouseDown, x: 60, to: view)
@@ -67,12 +57,64 @@ import spacesterminalcore
         XCTAssertTrue(view.debugHasSurfaceSelection, "the drag did not select anything to begin with")
         let selected = try XCTUnwrap(view.debugSurfaceSelectionText, "the drag did not select anything to begin with")
         XCTAssertFalse(selected.isEmpty, "the drag did not select anything to begin with")
-        let echoed = try XCTUnwrap(committed, "releasing the drag did not commit the selection to the daemon")
+        XCTAssertNotNil(view.clientSelection, "the pane did not keep the drag as its selection")
 
-        try applyChangedFrame(to: view, renderStateKey: "sel-frames-1", selection: echoed)
+        try applyChangedFrame(to: view, renderStateKey: "sel-frames-1")
 
         XCTAssertTrue(view.debugHasSurfaceSelection, "output printed after the selection cleared it")
         XCTAssertEqual(view.debugSurfaceSelectionText, selected, "output printed after the selection moved it off the selected text")
+    }
+
+    /// The host's shared selection rides every frame; a pane paints its own selection instead, so a
+    /// frame carrying a selection somebody else made highlights nothing here.
+    func testAFrameCarryingAnotherClientsSelectionPaintsNothing() throws {
+        let view = makeAttachedView(sessionID: "sel-frames-foreign")
+        defer { view.removeFromSuperview() }
+        let grid = try paneGrid(of: view)
+        let foreign = GhosttyTerminalSelectionRange(
+            startColumn: 2, startRow: 0, endColumn: 8, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
+        view.update(
+            snapshot: Self.snapshot(text: Self.row, columns: grid.columns, rows: grid.rows, selection: foreign), renderStateKey: "sel-frames-foreign")
+        try waitFor("the pane to paint the row") { view.debugMirrorSurfaceText?.contains("abcdefghij") ?? false }
+
+        XCTAssertFalse(view.debugHasSurfaceSelection)
+    }
+
+    /// A plain click ends the selection, and with it the highlight.
+    func testAPlainClickClearsTheSelection() throws {
+        let view = makeAttachedView(sessionID: "sel-frames-click")
+        defer { view.removeFromSuperview() }
+        try applyOriginalFrame(to: view, renderStateKey: "sel-frames-click")
+        send(.leftMouseDown, x: 60, to: view)
+        send(.leftMouseDragged, x: 160, to: view)
+        send(.leftMouseUp, x: 160, to: view)
+        XCTAssertNotNil(view.clientSelection)
+
+        send(.leftMouseDown, x: 300, to: view)
+        send(.leftMouseUp, x: 300, to: view)
+
+        XCTAssertNil(view.clientSelection)
+        XCTAssertFalse(view.debugHasSurfaceSelection)
+    }
+
+    /// Rows renumbered by a new history epoch (a clear, an alternate-screen switch) are not the rows the
+    /// selection named, so it ends rather than landing on whatever text now holds those numbers.
+    func testANewHistoryEpochEndsTheSelection() throws {
+        let view = makeAttachedView(sessionID: "sel-frames-epoch")
+        defer { view.removeFromSuperview() }
+        try applyOriginalFrame(to: view, renderStateKey: "sel-frames-epoch")
+        send(.leftMouseDown, x: 60, to: view)
+        send(.leftMouseDragged, x: 160, to: view)
+        send(.leftMouseUp, x: 160, to: view)
+        XCTAssertNotNil(view.clientSelection)
+
+        let grid = try paneGrid(of: view)
+        view.update(
+            snapshot: Self.snapshot(text: Self.row, columns: grid.columns, rows: grid.rows).withHistoryEpoch(1), renderStateKey: "sel-frames-epoch")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+        XCTAssertNil(view.clientSelection)
+        XCTAssertFalse(view.debugHasSurfaceSelection)
     }
 
     /// The user is still dragging when the program prints. The selection keeps growing from where the
@@ -141,15 +183,13 @@ import spacesterminalcore
     /// whose scroll rects say nothing moved (empty and not overflowed), carrying whatever selection
     /// the daemon holds. A default-initialized frame would instead claim an untrustworthy carry,
     /// which cancels an in-progress drag by design.
-    private func applyChangedFrame(
-        to view: GhosttyMirrorTerminalView, renderStateKey: String, selection: GhosttyTerminalSelectionRange? = nil
-    ) throws {
+    private func applyChangedFrame(to view: GhosttyMirrorTerminalView, renderStateKey: String, selection: GhosttyTerminalSelectionRange? = nil) throws
+    {
         let grid = try paneGrid(of: view)
         let changed = String(Self.row.dropLast(Self.changedSuffix.count)) + Self.changedSuffix
         let frame = GhosttyRenderFrame(
-            sessionRevision: nil, ownerEpoch: 0,
-            snapshot: Self.snapshot(text: changed, columns: grid.columns, rows: grid.rows, selection: selection), scrollRects: [],
-            scrollRectsOverflowed: false)
+            sessionRevision: nil, ownerEpoch: 0, snapshot: Self.snapshot(text: changed, columns: grid.columns, rows: grid.rows, selection: selection),
+            scrollRects: [], scrollRectsOverflowed: false)
         view.update(frame: frame, renderStateKey: renderStateKey)
         try waitFor("the pane to paint the later output") { view.debugMirrorSurfaceText?.contains(Self.changedSuffix) ?? false }
     }
@@ -204,9 +244,7 @@ import spacesterminalcore
     /// A frame whose top row holds `text` (space-padded to `columns`) over otherwise blank rows, the
     /// shape that keeps the whole test on one line of text. Nothing is tracking the mouse: the
     /// program the user is selecting from is printing, not reading clicks.
-    private static func snapshot(
-        text: String, columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange? = nil
-    ) -> GhosttyTerminalSnapshot {
+    private static func snapshot(text: String, columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange? = nil) -> GhosttyTerminalSnapshot {
         let padded = text.padding(toLength: columns, withPad: " ", startingAt: 0)
         let topRow = padded.unicodeScalars.map { scalar in
             GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xFF_FFFF, backgroundRGB: 0, flags: 0)

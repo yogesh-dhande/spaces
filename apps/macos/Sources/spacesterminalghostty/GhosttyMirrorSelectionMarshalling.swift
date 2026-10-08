@@ -29,9 +29,9 @@ enum GhosttyMirrorSelectionMarshalling {
 
     /// Maps a snapshot's shared selection and scrollbar position onto the C struct fields. A nil
     /// selection clears every selection field (flags 0), which the surface reads as "nothing to paint."
-    static func cSnapshotSelectionFields(
-        selection: GhosttyTerminalSelectionRange?, scrollbarTotal: UInt32, scrollbarOffset: UInt32
-    ) -> CSnapshotSelectionFields {
+    static func cSnapshotSelectionFields(selection: GhosttyTerminalSelectionRange?, scrollbarTotal: UInt32, scrollbarOffset: UInt32)
+        -> CSnapshotSelectionFields
+    {
         var flags: UInt8 = 0
         var startX: UInt16 = 0
         var startY: UInt16 = 0
@@ -93,16 +93,5 @@ enum GhosttyMirrorSelectionMarshalling {
         /// it reports `scroll_carry_valid = true` with zero rects, which is the correct, complete answer
         /// for a gap with no scrolling in it.
         var isCarryValid: Bool { !poisoned }
-    }
-
-    /// Converts the mirror's own live local-drag selection (`ghostty_mirror_selection_info_s`, which
-    /// reports viewport-relative, signed rows so an anchor scrolled above the mirror's visible grid still
-    /// reads at its true row) into the daemon's absolute screen-space row (0 = oldest scrollback row),
-    /// per `setSelection`'s contract. Clamped to 0: a virtual row so far above the offset that the
-    /// absolute row would go negative has no absolute-space meaning, and 0, the oldest retained row, is
-    /// the closest one that does.
-    static func absoluteSelectionRow(virtualRow: Int32, scrollbarOffset: UInt32) -> UInt32 {
-        let absolute = Int64(scrollbarOffset) + Int64(virtualRow)
-        return UInt32(clamping: max(absolute, 0))
     }
 }
