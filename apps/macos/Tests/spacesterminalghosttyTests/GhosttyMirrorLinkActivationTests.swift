@@ -102,7 +102,7 @@ import spacesterminalcore
         }
         return GhosttyTerminalSnapshot(
             columns: cells.count, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFF_FFFF,
-            defaultBackgroundRGB: 0, cells: cells, mouseReportingActive: mouseReportingActive)
+            defaultBackgroundRGB: 0, cells: cells, mouseTrackingLevel: mouseReportingActive ? .clicks : .none)
     }
 
     /// Build the frame from the real vt exporter, then pass it through the same delta codec and
@@ -120,7 +120,7 @@ import spacesterminalcore
         var rawSnapshot = SpacesGhosttyVtSnapshot()
         XCTAssertTrue(spaces_ghostty_vt_session_copy_snapshot(session, &rawSnapshot))
         defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
-        let exported = GhosttyVtSessionBridge.snapshot(from: rawSnapshot, mouseReportingActive: false, alternateScreenActive: false)
+        let exported = GhosttyVtSessionBridge.snapshot(from: rawSnapshot, mouseTrackingLevel: .none, alternateScreenActive: false)
 
         let blank = GhosttyTerminalSnapshot(
             columns: Int(columns), rows: Int(rows), cursorColumn: 0, cursorRow: 0, cursorVisible: false,

@@ -8,6 +8,10 @@ import spacesterminalcore
 
 @testable import spacesterminalghostty
 
+/// Everything a mouse-report probe child has received so far. File scope so a `waitUntil` condition can
+/// call it without capturing the test case.
+private func mouseProbeOutput(_ outputURL: URL) -> String { (try? String(contentsOf: outputURL, encoding: .utf8)) ?? "" }
+
 final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     private var originalDatabasePath: String?
     private var originalRuntimeDirectory: String?
@@ -4505,6 +4509,108 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let row = Int((input as NSString).substring(with: match.range(at: 3)))
         XCTAssertTrue((1...size.columns).contains(try XCTUnwrap(column)))
         XCTAssertTrue((1...size.rows).contains(try XCTUnwrap(row)))
+    }
+
+    /// Starts a child that enables `modes` (for example `\\033[?1003h\\033[?1006h`), prints READY, then
+    /// copies everything the terminal sends it into `outputURL`, so a test can read back the exact mouse
+    /// reports the daemon surface wrote.
+    private func startMouseReportProbe(modes: String, root: URL, outputURL: URL) async throws -> GhosttyEmbeddedTerminalSessionDriver {
+        func shellQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }
+        let driverBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedTerminalSessionDriver> in
+            let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+                launchConfiguration: TerminalSessionLaunchConfiguration(
+                    sessionID: "host-managed-mouse-motion-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "mouse-motion",
+                    workingDirectory: root.path, shell: "/bin/sh",
+                    command: "stty raw -echo; printf '\(modes)READY'; cat > \(shellQuoted(outputURL.path))", createdAt: "2026-07-16T00:00:00Z",
+                    workspaceID: "workspace-1", kind: .shell))
+            try sessionDriver.startIfNeeded()
+            return Box(sessionDriver)
+        }
+        let sessionDriver = driverBox.value
+        try await waitUntil { sessionDriver.snapshotText()?.contains("READY") == true }
+        return sessionDriver
+    }
+
+    /// The pointer for the center of cell (`column`, `row`) in the session's grid, as a client sends it.
+    private func cellPointer(column: Int, row: Int, in sessionDriver: GhosttyEmbeddedTerminalSessionDriver) throws -> TerminalScrollPointerPosition {
+        let size = try XCTUnwrap(TerminalEngineActor.runSynchronously { sessionDriver.surfaceCellSize() })
+        let center = TerminalPointerGrid.center(column: column, row: row, columns: size.columns, rows: size.rows)
+        return TerminalScrollPointerPosition(x: center.x, y: center.y)
+    }
+
+    /// Any-event tracking (1003) wants hover: motion with no button held reaches the program as an SGR
+    /// motion report (code 35 is motion with no button), and the frame says the program wants it.
+    func testHeadlessDriverReportsHoverMotionUnderAnyEventTracking() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outputURL = root.appendingPathComponent("mouse_input.bin")
+        let sessionDriver = try await startMouseReportProbe(modes: "\\033[?1003h\\033[?1006h", root: root, outputURL: outputURL)
+        defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
+
+        XCTAssertEqual(TerminalEngineActor.runSynchronously { sessionDriver.snapshot()?.mouseTrackingLevel }, .anyMotion)
+        let target = try cellPointer(column: 3, row: 2, in: sessionDriver)
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { sessionDriver.sendMouseMotion(pointerPosition: target) })
+        try await waitUntil { mouseProbeOutput(outputURL).contains("\u{1B}[<35;4;3M") }
+    }
+
+    /// Button-event tracking (1002) wants a drag: motion is reported only between a press the daemon was
+    /// sent and its release (code 32 is motion with the left button down), never as a hover.
+    func testHeadlessDriverReportsDragMotionOnlyWhileAForwardedButtonIsHeld() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outputURL = root.appendingPathComponent("mouse_input.bin")
+        let sessionDriver = try await startMouseReportProbe(modes: "\\033[?1002h\\033[?1006h", root: root, outputURL: outputURL)
+        defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
+
+        XCTAssertEqual(TerminalEngineActor.runSynchronously { sessionDriver.snapshot()?.mouseTrackingLevel }, .buttonMotion)
+        let start = try cellPointer(column: 1, row: 1, in: sessionDriver)
+        let middle = try cellPointer(column: 4, row: 1, in: sessionDriver)
+        let after = try cellPointer(column: 6, row: 1, in: sessionDriver)
+
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { sessionDriver.sendMouseMotion(pointerPosition: start) })
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { sessionDriver.sendMouseButton(button: 1, pressed: true, pointerPosition: start) })
+        try await waitUntil { mouseProbeOutput(outputURL).contains("\u{1B}[<0;2;2M") }
+        XCTAssertFalse(mouseProbeOutput(outputURL).contains("\u{1B}[<3"), "motion before the press must not be reported")
+
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { sessionDriver.sendMouseMotion(pointerPosition: middle) })
+        try await waitUntil { mouseProbeOutput(outputURL).contains("\u{1B}[<32;5;2M") }
+
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { sessionDriver.sendMouseButton(button: 1, pressed: false, pointerPosition: middle) })
+        try await waitUntil { mouseProbeOutput(outputURL).contains("\u{1B}[<0;5;2m") }
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { sessionDriver.sendMouseMotion(pointerPosition: after) })
+        // The release is the last thing the program should hear: give a stray motion time to arrive.
+        try? await Task.sleep(for: .milliseconds(300))
+        let output = mouseProbeOutput(outputURL)
+        XCTAssertFalse(output.contains("\u{1B}[<32;7;2M"), "motion after the release must not be reported: \(output)")
+        XCTAssertFalse(output.contains("\u{1B}[<35;"), "button-event tracking never reports hover: \(output)")
+    }
+
+    /// Clicks-only tracking (1000) receives no motion, with a button held or not.
+    func testHeadlessDriverReportsNoMotionUnderClicksOnlyTracking() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outputURL = root.appendingPathComponent("mouse_input.bin")
+        let sessionDriver = try await startMouseReportProbe(modes: "\\033[?1000h\\033[?1006h", root: root, outputURL: outputURL)
+        defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
+
+        XCTAssertEqual(TerminalEngineActor.runSynchronously { sessionDriver.snapshot()?.mouseTrackingLevel }, .clicks)
+        let start = try cellPointer(column: 1, row: 1, in: sessionDriver)
+        let moved = try cellPointer(column: 4, row: 1, in: sessionDriver)
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { sessionDriver.sendMouseButton(button: 1, pressed: true, pointerPosition: start) })
+        try await waitUntil { mouseProbeOutput(outputURL).contains("\u{1B}[<0;2;2M") }
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { sessionDriver.sendMouseMotion(pointerPosition: moved) })
+        try? await Task.sleep(for: .milliseconds(300))
+        let output = mouseProbeOutput(outputURL)
+        XCTAssertFalse(output.contains("\u{1B}[<32;") || output.contains("\u{1B}[<35;"), "clicks-only tracking must not receive motion: \(output)")
     }
 
     func testHeadlessDriverRefreshesMouseModifiersAtStationaryPointerBeforeScroll() async throws {

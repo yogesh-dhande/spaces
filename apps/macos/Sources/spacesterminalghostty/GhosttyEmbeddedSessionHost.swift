@@ -231,6 +231,10 @@
             sessionDriver.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
         }
 
+        @discardableResult public func sendMouseMotion(pointerPosition: TerminalScrollPointerPosition) -> Bool {
+            sessionDriver.sendMouseMotion(pointerPosition: pointerPosition)
+        }
+
         @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
         /// `scroll_to_bottom` is Ghostty's own binding action (`Surface.zig`), the same mechanism `clear_screen` already rides.
@@ -1393,6 +1397,7 @@
                 case .scroll: controlResponseForScrollRequest(request)
                 case .scrollToBottom: controlResponseForScrollToBottomRequest(request)
                 case .mouseButton: controlResponseForMouseButtonRequest(request)
+                case .mouseMotion: controlResponseForMouseMotionRequest(request)
                 case .setAppearance: controlResponseForSetAppearanceRequest(request)
                 case .setSelection: controlResponseForSetSelectionRequest(request)
                 case .clearSelection: controlResponseForClearSelectionRequest(request)
@@ -2012,6 +2017,28 @@
                 "terminal_control_mouse_button", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: delivered)
             return TerminalControlResponse(ok: delivered, message: delivered ? "Delivered mouse button." : "Unable to deliver mouse button.")
+        }
+
+        private func controlResponseForMouseMotionRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            touchClientLease(request.clientID)
+            if let rejection = ownerRequestRejection(for: request, commandName: "mouseMotion", startedAt: Date()) { return rejection }
+            let pointerPosition: TerminalScrollPointerPosition?
+            switch resolvedPointerPosition(
+                x: request.mousePointerX, y: request.mousePointerY, mods: request.mousePointerMods, command: "mouse motion")
+            {
+            case .resolved(let position): pointerPosition = position
+            case .rejected(let response): return response
+            }
+            guard let pointerPosition else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument)
+            }
+            // No state broadcast and no metric: motion arrives per cell change, and what the application
+            // draws in response is broadcast with its output.
+            let delivered = rendererHostStorage.sendMouseMotion(pointerPosition: pointerPosition)
+            return TerminalControlResponse(ok: delivered, message: delivered ? "Delivered mouse motion." : "Unable to deliver mouse motion.")
         }
 
         private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {

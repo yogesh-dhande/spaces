@@ -253,7 +253,7 @@ import spacesterminalcore
         let cells = topRow + Array(repeating: blank, count: columns * (rows - 1))
         return GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFF_FFFF,
-            defaultBackgroundRGB: 0, cells: cells, mouseReportingActive: false, selection: selection)
+            defaultBackgroundRGB: 0, cells: cells, selection: selection)
     }
 
     // 30 seconds matches the embedded-surface waits across this target. Note this suite runs in its

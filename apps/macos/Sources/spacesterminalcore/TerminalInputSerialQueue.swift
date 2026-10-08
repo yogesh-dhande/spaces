@@ -7,6 +7,10 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
     private var queuedTasks: [UInt64: Task<Void, Never>] = [:]
     private var nextTaskID: UInt64 = 0
     private var generation: UInt64 = 0
+    /// The newest `supersedable` task that has not started its operation yet, and the earlier ones a
+    /// newer one replaced while they still waited.
+    private var supersedableTaskID: UInt64?
+    private var supersededTaskIDs: Set<UInt64> = []
 
     public init() {}
 
@@ -23,8 +27,15 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
     /// finishes (e.g. `TerminalScrollCoalescer`'s one-batch-in-flight gate, released from inside the
     /// queued operation's own `onFinished`) needs a way to release that slot even on the discard path,
     /// or a batch dropped alongside a failed send behind it wedges the coalescer forever.
+    ///
+    /// A `supersedable` operation is replaced by the very next operation if that one is also
+    /// `supersedable` and the older has not started: the older one is discarded (`onDiscarded`). Any
+    /// operation that is not `supersedable` (a key, press or release) in between ends the run, so a
+    /// motion queued before it still runs before it and a later motion never discards it. This is for a
+    /// stream where only the latest value of consecutive entries matters, such as pointer motion under a
+    /// program that tracks the mouse; non-supersedable operations are never dropped or reordered.
     public func enqueue(
-        priority: TaskPriority? = nil, operation: @escaping @Sendable () async throws -> Void,
+        priority: TaskPriority? = nil, supersedable: Bool = false, operation: @escaping @Sendable () async throws -> Void,
         onError: (@Sendable (Error) async -> Void)? = nil, onDiscarded: (@Sendable () async -> Void)? = nil
     ) {
         lock.lock()
@@ -32,6 +43,13 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
         let taskID = nextTaskID
         nextTaskID &+= 1
         let taskGeneration = generation
+        if supersedable {
+            if let replaced = supersedableTaskID { supersededTaskIDs.insert(replaced) }
+            supersedableTaskID = taskID
+        } else {
+            // Other input between two motions fences them: the earlier motion belongs before it.
+            supersedableTaskID = nil
+        }
         let nextTask = Task.detached(priority: priority) { [weak self] in
             defer { self?.completeTask(id: taskID) }
             _ = await previousTask?.result
@@ -40,6 +58,10 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
                 return
             }
             guard self?.isCurrentGeneration(taskGeneration) == true else {
+                await onDiscarded?()
+                return
+            }
+            guard self?.claimTurn(taskID: taskID) == true else {
                 await onDiscarded?()
                 return
             }
@@ -82,9 +104,21 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
         return generation == taskGeneration
     }
 
+    /// Whether the task may run its operation now. A superseded task may not; a `supersedable` task that
+    /// starts can no longer be replaced.
+    private func claimTurn(taskID: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if supersededTaskIDs.remove(taskID) != nil { return false }
+        if supersedableTaskID == taskID { supersedableTaskID = nil }
+        return true
+    }
+
     private func completeTask(id taskID: UInt64) {
         lock.lock()
         queuedTasks.removeValue(forKey: taskID)
+        supersededTaskIDs.remove(taskID)
+        if supersedableTaskID == taskID { supersedableTaskID = nil }
         if pendingTaskID == taskID {
             pendingTask = nil
             pendingTaskID = nil

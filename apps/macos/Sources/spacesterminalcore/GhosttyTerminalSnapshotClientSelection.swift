@@ -13,7 +13,7 @@ extension GhosttyTerminalSnapshot {
         GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible,
             defaultForegroundRGB: defaultForegroundRGB, defaultBackgroundRGB: defaultBackgroundRGB, cells: cells, clusters: clusters,
-            linkURLs: linkURLs, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
+            linkURLs: linkURLs, mouseTrackingLevel: mouseTrackingLevel, mouseShiftCapture: mouseShiftCapture,
             alternateScreenActive: alternateScreenActive, selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset,
             historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }

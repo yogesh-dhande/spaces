@@ -55,8 +55,8 @@ final class StampedHostTerminal: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Whether frames report the program as tracking the mouse, which the vt session does not expose.
-    var mouseReportingActive = false
+    /// The tracking level frames report, which the vt session does not expose.
+    var mouseTrackingLevel: TerminalMouseTrackingLevel = .none
 
     /// Everything the session has been fed, which is what the transcript file holds.
     var bytes: Data {
@@ -73,9 +73,9 @@ final class StampedHostTerminal: @unchecked Sendable {
         var position = SpacesGhosttyVtHistoryPosition()
         precondition(spaces_ghostty_vt_session_history_position(session, &position))
         let snapshot = GhosttyVtSessionBridge.snapshot(
-            from: raw, mouseReportingActive: mouseReportingActive,
-            alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session), scrollbarTotal: UInt32(position.total),
-            scrollbarOffset: UInt32(position.offset), historyRowBase: position.rows_pruned + position.offset, historyEpoch: position.history_epoch)
+            from: raw, mouseTrackingLevel: mouseTrackingLevel, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session),
+            scrollbarTotal: UInt32(position.total), scrollbarOffset: UInt32(position.offset), historyRowBase: position.rows_pruned + position.offset,
+            historyEpoch: position.history_epoch)
         return GhosttyRenderFrame(
             sessionRevision: revision, ownerEpoch: 0, snapshot: snapshot, transcriptByteOffset: UInt64(bytes.count),
             transcriptFileIdentity: Self.fileIdentity)

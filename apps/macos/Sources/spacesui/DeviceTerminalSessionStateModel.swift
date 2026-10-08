@@ -1991,7 +1991,7 @@
         /// not a hot per-keystroke path either.
         private nonisolated static func isInteractiveControlCommand(_ request: TerminalControlRequest) -> Bool {
             switch TerminalControlCommand(request: request) {
-            case .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton: true
+            case .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton, .mouseMotion: true
             case .attach, .detach, .heartbeat, .takeover, .setAppearance, .setSelection, .clearSelection, .readSelectionText, .unsupported: false
             }
         }

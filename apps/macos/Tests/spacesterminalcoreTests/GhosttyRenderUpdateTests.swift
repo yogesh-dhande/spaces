@@ -619,7 +619,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     /// change that never forces a full frame.
     func testMouseReportingStateSurvivesFullAndDeltaFrames() throws {
         let previous = makeSnapshot(lines: ["hello"])
-        let target = makeSnapshot(lines: ["hullo"], mouseReportingActive: true, mouseShiftCapture: GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)
+        let target = makeSnapshot(lines: ["hullo"], mouseTrackingLevel: .clicks, mouseShiftCapture: GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
 
         let full = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
@@ -638,10 +638,32 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertTrue(applied.snapshot.mouseReportingActive)
     }
 
+    /// Which motion a program wants decides whether a client forwards pointer moves at all, so each of the
+    /// four levels has to reach the client exactly, in a full frame and in a delta between levels.
+    func testMouseTrackingLevelSurvivesFullAndDeltaFrames() throws {
+        let levels: [TerminalMouseTrackingLevel] = [.none, .clicks, .buttonMotion, .anyMotion]
+        for level in levels {
+            let target = makeSnapshot(lines: ["hullo"], mouseTrackingLevel: level)
+            let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
+            let full = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+            XCTAssertEqual(full.fullFrame?.snapshot.mouseTrackingLevel, level)
+            XCTAssertEqual(full.fullFrame?.snapshot.mouseReportingActive, level != .none)
+
+            for previousLevel in levels where previousLevel != level {
+                let baseline = GhosttyRenderUpdateBaseline(
+                    snapshot: makeSnapshot(lines: ["hello"], mouseTrackingLevel: previousLevel), sessionRevision: 1, ownerEpoch: 1)
+                let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
+                let decoded = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
+                XCTAssertEqual(decoded.delta?.mouseTrackingLevel, level)
+                XCTAssertEqual(try GhosttyRenderUpdateApplier.apply(decoded, to: baseline).snapshot.mouseTrackingLevel, level)
+            }
+        }
+    }
+
     /// The application turning mouse tracking back off has to reach the client the same way, or a pane
     /// would keep forwarding clicks to a program that stopped listening instead of selecting text.
     func testMouseReportingStateClearsThroughADelta() throws {
-        let previous = makeSnapshot(lines: ["hello"], mouseReportingActive: true)
+        let previous = makeSnapshot(lines: ["hello"], mouseTrackingLevel: .clicks)
         let target = makeSnapshot(lines: ["hullo"])
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
@@ -693,8 +715,8 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     /// for different decisions (a click versus a scroll gesture). A delta that only flips one must not
     /// disturb the other, which a codec that misordered the two flag bytes would break.
     func testAlternateScreenAndMouseReportingTravelIndependently() throws {
-        let previous = makeSnapshot(lines: ["hello"], mouseReportingActive: true)
-        let target = makeSnapshot(lines: ["hullo"], mouseReportingActive: true, alternateScreenActive: true)
+        let previous = makeSnapshot(lines: ["hello"], mouseTrackingLevel: .clicks)
+        let target = makeSnapshot(lines: ["hullo"], mouseTrackingLevel: .clicks, alternateScreenActive: true)
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
 
@@ -915,7 +937,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     /// entry — the fast path the wire format is built around. `clusters` and `linkURLs` add entries on
     /// top, keyed by cell index, for fixtures that need text no character can express.
     private func makeSnapshot(
-        lines: [String], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false,
+        lines: [String], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseTrackingLevel: TerminalMouseTrackingLevel = .none,
         mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset, alternateScreenActive: Bool = false
     ) -> GhosttyTerminalSnapshot {
         let columns = lines.map(\.count).max() ?? 1
@@ -932,7 +954,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         }
         return GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: 0, cursorRow: rows - 1, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE,
-            defaultBackgroundRGB: 0x101010, cells: cells, clusters: cellClusters, linkURLs: linkURLs, mouseReportingActive: mouseReportingActive,
+            defaultBackgroundRGB: 0x101010, cells: cells, clusters: cellClusters, linkURLs: linkURLs, mouseTrackingLevel: mouseTrackingLevel,
             mouseShiftCapture: mouseShiftCapture, alternateScreenActive: alternateScreenActive)
     }
 

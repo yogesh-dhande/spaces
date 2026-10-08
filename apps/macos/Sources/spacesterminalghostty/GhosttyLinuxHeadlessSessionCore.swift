@@ -248,6 +248,10 @@
         /// Pending precise horizontal delta for wheel reports. Only consulted while an application
         /// tracks the mouse — the viewport itself never scrolls horizontally.
         private var pendingPreciseHorizontalDelta: Double = 0
+        /// The buttons the owner has pressed through `mouseButton` and not yet released. A motion report
+        /// names one of them (libghostty-vt's encoder holds no button state of its own), which is also
+        /// what decides whether button-event tracking (1002) reports the motion.
+        private var heldMouseButtons = Set<UInt8>()
         private var inputOutputResyncTask: Task<Void, Never>?
         private let onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)?
 
@@ -707,6 +711,12 @@
 
         var debugOwnerEpoch: UInt64 { ownerEpoch }
 
+        /// The tracking level the next exported frame reports.
+        var debugMouseTrackingLevel: TerminalMouseTrackingLevel {
+            guard let vtSession else { return .none }
+            return GhosttyLinuxMouseEncoder.trackingLevel(session: vtSession)
+        }
+
         /// The directory the running program last reported with OSC 7, read before
         /// `effectiveWorkingDirectory` puts the live process's own directory ahead of it. The metadata tests
         /// pin the decode and the rejection policy through this, since a live process's real directory masks
@@ -857,6 +867,7 @@
             case "scroll": handling = TerminalControlHandling(response: scroll(request))
             case "scrollToBottom": handling = TerminalControlHandling(response: scrollToBottom(request))
             case "mouseButton": handling = TerminalControlHandling(response: mouseButton(request))
+            case "mouseMotion": handling = TerminalControlHandling(response: mouseMotion(request))
             case "setAppearance": handling = TerminalControlHandling(response: setAppearance(request))
             case "setSelection": handling = TerminalControlHandling(response: setSelection(request))
             case "clearSelection": handling = TerminalControlHandling(response: clearSelection(request))
@@ -1169,7 +1180,7 @@
             // A wheel event belongs to the application once it tracks the mouse: ghostty's surface reports
             // one button-four/five press per row of delta (six/seven per column of horizontal delta) and
             // leaves the viewport alone, and this is the same behavior on the vt-only host.
-            if GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession) {
+            if GhosttyLinuxMouseEncoder.trackingLevel(session: vtSession).isActive {
                 let deltaColumns = horizontalWheelReportDelta(horizontal: request.scrollHorizontal ?? 0, scrollMods: scrollMods)
                 guard deltaRows != 0 || deltaColumns != 0 else { return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.") }
                 return reportWheel(request, deltaRows: deltaRows, deltaColumns: deltaColumns, session: vtSession)
@@ -1267,7 +1278,7 @@
                 for _ in 0..<magnitude {
                     guard
                         let bytes = GhosttyLinuxMouseEncoder.encode(
-                            button: button, pressed: true, cellColumn: cell.column, cellRow: cell.row, mods: request.scrollPointerMods ?? 0,
+                            action: .press, button: button, cellColumn: cell.column, cellRow: cell.row, mods: request.scrollPointerMods ?? 0,
                             session: session)
                     else {
                         return TerminalControlResponse(ok: false, message: "Unable to encode terminal mouse report.", errorCode: .sessionNotAvailable)
@@ -1297,14 +1308,44 @@
                 return TerminalControlResponse(ok: false, message: "Invalid terminal mouse button pointer position.", errorCode: .invalidArgument)
             }
             let cell = pointerCell(x: pointerX, y: pointerY)
+            // Held-button state follows what the owner sent, whether or not the program's tracking mode
+            // reports the press: a program that enables tracking mid-drag sees motion with the button
+            // held, as it would from a real terminal.
+            if pressed { heldMouseButtons.insert(button) } else { heldMouseButtons.remove(button) }
             guard
                 let bytes = GhosttyLinuxMouseEncoder.encode(
-                    button: button, pressed: pressed, cellColumn: cell.column, cellRow: cell.row, mods: position.mods, session: vtSession)
+                    action: pressed ? .press : .release, button: button, cellColumn: cell.column, cellRow: cell.row, mods: position.mods,
+                    session: vtSession)
             else { return TerminalControlResponse(ok: false, message: "Unable to encode terminal mouse report.", errorCode: .sessionNotAvailable) }
             // A button the terminal's current tracking mode does not report encodes to nothing; that is a
             // successful no-op, not a failure.
             if !bytes.isEmpty { enqueueControlInputWrite(bytes) }
             return TerminalControlResponse(ok: true, message: "Delivered mouse button.")
+        }
+
+        private func mouseMotion(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
+            }
+            guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            guard let pointerX = request.mousePointerX, let pointerY = request.mousePointerY else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument)
+            }
+            let position = TerminalScrollPointerPosition(x: pointerX, y: pointerY, mods: request.mousePointerMods ?? 0)
+            guard position.isValid else {
+                return TerminalControlResponse(ok: false, message: "Invalid terminal mouse motion pointer position.", errorCode: .invalidArgument)
+            }
+            let cell = pointerCell(x: pointerX, y: pointerY)
+            // Several buttons can be held; the lowest-numbered names the motion, deterministically.
+            guard
+                let bytes = GhosttyLinuxMouseEncoder.encode(
+                    action: .motion, button: heldMouseButtons.min() ?? 0, cellColumn: cell.column, cellRow: cell.row, mods: position.mods,
+                    session: vtSession)
+            else { return TerminalControlResponse(ok: false, message: "Unable to encode terminal mouse report.", errorCode: .sessionNotAvailable) }
+            // Motion the tracking mode does not want (no tracking, clicks only, or 1002 with no button
+            // held) encodes to nothing, which is a successful no-op.
+            if !bytes.isEmpty { enqueueControlInputWrite(bytes) }
+            return TerminalControlResponse(ok: true, message: "Delivered mouse motion.")
         }
 
         /// Resolves a client's normalized pointer against this session's own grid. Raw client pixels are
@@ -2218,7 +2259,7 @@
             let selection = resolvedSelection(
                 session: vtSession, viewportRowOffset: scrollbarOffset, columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows))
             let snapshot = GhosttyVtSessionBridge.snapshot(
-                from: rawSnapshot, mouseReportingActive: GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession),
+                from: rawSnapshot, mouseTrackingLevel: GhosttyLinuxMouseEncoder.trackingLevel(session: vtSession),
                 alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: vtSession), selection: selection,
                 scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset,
                 historyRowBase: hasPosition ? position.rows_pruned &+ position.offset : 0,

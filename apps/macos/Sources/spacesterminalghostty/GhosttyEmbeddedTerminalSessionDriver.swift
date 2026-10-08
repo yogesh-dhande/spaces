@@ -639,6 +639,17 @@
             return true
         }
 
+        /// Moves the pointer onto a cell for a program that tracks it. Ghostty's own surface turns the move
+        /// into a motion report from its tracking mode and the buttons `sendMouseButton` has pressed on it
+        /// (mode 1002 only while one is held, 1003 always, and one report per cell change), so nothing here
+        /// has to know either.
+        @discardableResult func sendMouseMotion(pointerPosition: TerminalScrollPointerPosition) -> Bool {
+            guard let session, let surface else { return false }
+            guard movePointerToClickedCell(pointerPosition, session: session, surface: surface) else { return false }
+            requestSurfaceRefresh()
+            return true
+        }
+
         /// Puts the pointer on the cell a click named, rather than on a place proportional to the
         /// surface's pixels. A click's normalized position is a cell center in the sender's grid
         /// (`TerminalControlMouseButtonPayload`), so it is resolved against this surface's grid and

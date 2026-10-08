@@ -4087,6 +4087,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 TerminalControlMouseButtonPayload(
                     clientID: clientID, ownerEpoch: payload.ownerEpoch, button: payload.mouseButton, pressed: payload.mousePressed,
                     pointerX: payload.mousePointerX, pointerY: payload.mousePointerY, pointerMods: payload.mousePointerMods))
+        case .mouseMotion:
+            .mouseMotion(
+                TerminalControlMouseMotionPayload(
+                    clientID: clientID, ownerEpoch: payload.ownerEpoch, pointerX: payload.mousePointerX, pointerY: payload.mousePointerY,
+                    pointerMods: payload.mousePointerMods))
         case .setAppearance: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: payload.appearance))
         case .setSelection:
             .setSelection(

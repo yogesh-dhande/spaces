@@ -1111,16 +1111,34 @@ bool spaces_ghostty_vt_session_encode_key(
     return true;
 }
 
-bool spaces_ghostty_vt_session_mouse_tracking_active(SpacesGhosttyVtSession *session, bool *out_active) {
-    if (out_active == NULL) return false;
-    *out_active = false;
+bool spaces_ghostty_vt_session_mouse_tracking_level(SpacesGhosttyVtSession *session, uint8_t *out_level) {
+    if (out_level == NULL) return false;
+    *out_level = SPACES_GHOSTTY_VT_MOUSE_TRACKING_NONE;
     if (session == NULL || session->terminal == NULL) return false;
 
-    bool active = false;
-    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &active) != GHOSTTY_SUCCESS) {
+    // The terminal's single tracking flag, not the tracking mode bits: the flag is what the mouse
+    // encoder reports against and what the macOS host exports. It follows the latest tracking-mode
+    // request and any tracking-mode reset clears it, so the mode bits can disagree (1003 then 1000
+    // sets both bits but tracks clicks only; 1000, 1003, then 1003 reset leaves the 1000 bit set but
+    // tracks nothing).
+    GhosttyMouseTrackingMode event = GHOSTTY_MOUSE_TRACKING_NONE;
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_EVENT, &event) != GHOSTTY_SUCCESS) {
         return false;
     }
-    *out_active = active;
+    switch (event) {
+        case GHOSTTY_MOUSE_TRACKING_X10:
+        case GHOSTTY_MOUSE_TRACKING_NORMAL:
+            *out_level = SPACES_GHOSTTY_VT_MOUSE_TRACKING_CLICKS;
+            break;
+        case GHOSTTY_MOUSE_TRACKING_BUTTON:
+            *out_level = SPACES_GHOSTTY_VT_MOUSE_TRACKING_BUTTON_MOTION;
+            break;
+        case GHOSTTY_MOUSE_TRACKING_ANY:
+            *out_level = SPACES_GHOSTTY_VT_MOUSE_TRACKING_ANY_MOTION;
+            break;
+        default:
+            break;
+    }
     return true;
 }
 
@@ -1151,8 +1169,13 @@ bool spaces_ghostty_vt_session_encode_mouse(
     *out_ptr = NULL;
     *out_len = 0;
     if (session == NULL || session->terminal == NULL) return false;
-    if (button < SPACES_GHOSTTY_VT_MOUSE_BUTTON_LEFT || button > SPACES_GHOSTTY_VT_MOUSE_BUTTON_ELEVEN) return false;
-    if (action != SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS && action != SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE) return false;
+    if (action != SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS && action != SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE &&
+        action != SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION) {
+        return false;
+    }
+    // Motion with no button held passes button 0; every other event names its button.
+    const bool no_button = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION && button == 0;
+    if (!no_button && (button < SPACES_GHOSTTY_VT_MOUSE_BUTTON_LEFT || button > SPACES_GHOSTTY_VT_MOUSE_BUTTON_ELEVEN)) return false;
 
     uint16_t columns = 0;
     uint16_t rows = 0;
@@ -1184,7 +1207,9 @@ bool spaces_ghostty_vt_session_encode_mouse(
         .cell_height = 1,
     };
     session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
-    const bool any_button_pressed = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS;
+    // A press has its button down, and so does motion that names a held button.
+    const bool any_button_pressed = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS ||
+        (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION && !no_button);
     session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed);
 
     GhosttyMouseEvent event = NULL;
@@ -1192,11 +1217,12 @@ bool spaces_ghostty_vt_session_encode_mouse(
         session->symbols.mouse_encoder_free(encoder);
         return false;
     }
-    session->symbols.mouse_event_set_action(
-        event,
-        action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS ? GHOSTTY_MOUSE_ACTION_PRESS : GHOSTTY_MOUSE_ACTION_RELEASE
-    );
-    session->symbols.mouse_event_set_button(event, (GhosttyMouseButton)button);
+    GhosttyMouseAction ghostty_action = GHOSTTY_MOUSE_ACTION_RELEASE;
+    if (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS) ghostty_action = GHOSTTY_MOUSE_ACTION_PRESS;
+    if (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION) ghostty_action = GHOSTTY_MOUSE_ACTION_MOTION;
+    session->symbols.mouse_event_set_action(event, ghostty_action);
+    // A new event starts with no button, which is what button-less motion needs.
+    if (!no_button) session->symbols.mouse_event_set_button(event, (GhosttyMouseButton)button);
     session->symbols.mouse_event_set_mods(event, (GhosttyMods)mods);
     // Aim at the middle of the cell so the encoder's floor-to-cell lands on the requested one.
     GhosttyMousePosition position = { .x = (float)cell_column + 0.5f, .y = (float)cell_row + 0.5f };

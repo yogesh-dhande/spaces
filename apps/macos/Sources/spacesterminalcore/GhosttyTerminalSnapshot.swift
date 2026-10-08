@@ -45,9 +45,12 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     /// The OSC 8 hyperlink target of each cell that belongs to a link, keyed by the cell's index into
     /// `cells`. Empty for a frame with no links.
     public let linkURLs: [Int: String]
-    /// True when the exporting terminal has a mouse tracking mode enabled. Clients arbitrate a pane
-    /// click against this: while it is set the click belongs to the application, not to selection.
-    public let mouseReportingActive: Bool
+    /// Which pointer input the exporting terminal's mouse tracking mode asks for. Clients arbitrate a
+    /// pane click against this (while any mode is on the click belongs to the application, not to
+    /// selection) and decide which pointer motion to forward from it.
+    public let mouseTrackingLevel: TerminalMouseTrackingLevel
+    /// True when the exporting terminal has a mouse tracking mode enabled.
+    public var mouseReportingActive: Bool { mouseTrackingLevel.isActive }
     /// The exporting terminal's shift-capture request as 0 = unset, 1 = false, 2 = true.
     public let mouseShiftCapture: UInt8
     /// True when the exporting terminal has the alternate screen active (DEC modes 1047/1049, which
@@ -78,9 +81,9 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
 
     public init(
         columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32,
-        cells: [Cell], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = 0,
-        alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0,
-        historyRowBase: UInt64 = 0, historyEpoch: UInt64 = 0
+        cells: [Cell], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseTrackingLevel: TerminalMouseTrackingLevel = .none,
+        mouseShiftCapture: UInt8 = 0, alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil,
+        scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0, historyEpoch: UInt64 = 0
     ) {
         self.columns = columns
         self.rows = rows
@@ -92,7 +95,7 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
         self.cells = cells
         self.clusters = Self.normalizedClusters(clusters, cellCount: cells.count)
         self.linkURLs = Self.normalizedLinkURLs(linkURLs, cellCount: cells.count)
-        self.mouseReportingActive = mouseReportingActive
+        self.mouseTrackingLevel = mouseTrackingLevel
         self.mouseShiftCapture = mouseShiftCapture
         self.alternateScreenActive = alternateScreenActive
         self.selection = selection
@@ -108,7 +111,7 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
         GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible,
             defaultForegroundRGB: defaultForegroundRGB, defaultBackgroundRGB: defaultBackgroundRGB, cells: cells, clusters: clusters,
-            linkURLs: linkURLs, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
+            linkURLs: linkURLs, mouseTrackingLevel: mouseTrackingLevel, mouseShiftCapture: mouseShiftCapture,
             alternateScreenActive: alternateScreenActive, selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset,
             historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }

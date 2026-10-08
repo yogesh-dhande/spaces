@@ -54,10 +54,11 @@ public struct GhosttyRenderDeltaFrame: Codable, Sendable, Equatable {
     public let cursorVisible: Bool
     public let defaultForegroundRGB: UInt32
     public let defaultBackgroundRGB: UInt32
-    /// Mouse-reporting state of the target frame. Deltas carry it alongside the cursor state so a
-    /// client's arbitration tracks an application enabling or disabling mouse tracking mid-stream,
-    /// which is a screen change that never forces a full frame.
-    public let mouseReportingActive: Bool
+    /// Mouse-tracking level of the target frame. Deltas carry it alongside the cursor state so a
+    /// client's arbitration tracks an application enabling, disabling or changing mouse tracking
+    /// mid-stream, which is a screen change that never forces a full frame.
+    public let mouseTrackingLevel: TerminalMouseTrackingLevel
+    public var mouseReportingActive: Bool { mouseTrackingLevel.isActive }
     public let mouseShiftCapture: UInt8
     /// Alternate-screen state of the target frame, carried for the same reason mouse reporting is: a
     /// program entering or leaving the alternate screen changes how a client routes scroll gestures,
@@ -90,7 +91,7 @@ public struct GhosttyRenderDeltaFrame: Codable, Sendable, Equatable {
 
     public init(
         baseRevision: UInt64?, targetRevision: UInt64?, ownerEpoch: UInt64, columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int,
-        cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32, mouseReportingActive: Bool = false,
+        cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32, mouseTrackingLevel: TerminalMouseTrackingLevel = .none,
         mouseShiftCapture: UInt8 = 0, alternateScreenActive: Bool = false, scrollRects: [GhosttyRenderScrollRectOperation] = [],
         replaceCellRuns: [GhosttyRenderCellRun] = [], changedCellCount: Int, selection: GhosttyTerminalSelectionRange? = nil,
         scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0, historyEpoch: UInt64 = 0,
@@ -106,7 +107,7 @@ public struct GhosttyRenderDeltaFrame: Codable, Sendable, Equatable {
         self.cursorVisible = cursorVisible
         self.defaultForegroundRGB = defaultForegroundRGB
         self.defaultBackgroundRGB = defaultBackgroundRGB
-        self.mouseReportingActive = mouseReportingActive
+        self.mouseTrackingLevel = mouseTrackingLevel
         self.mouseShiftCapture = mouseShiftCapture
         self.alternateScreenActive = alternateScreenActive
         self.scrollRects = scrollRects
@@ -130,7 +131,9 @@ public struct GhosttyRenderUpdate: Codable, Sendable, Equatable {
     // to both bodies, plus a delta-only scroll-rects-overflowed flag marking that a delta's scroll rects
     // are absent or incomplete. Version 6 compresses the body: the fields keep their layout, but everything
     // after the six-byte header travels as a raw DEFLATE stream behind its uncompressed length.
-    // Version 7 added the alternate-screen flag to both bodies, next to mouse reporting.
+    // Version 7 added the alternate-screen flag to both bodies, next to mouse reporting. The mouse
+    // reporting byte carries the tracking level (0 none, 1 clicks, 2 button motion, 3 any motion); a
+    // payload written when it was a 0/1 flag decodes unchanged.
     // Version 8 added the four history stamps (absolute row base, history epoch, transcript byte offset,
     // transcript file identity) to both bodies, after the scrollbar counters. The first two decode into
     // the snapshot; the transcript pair decodes onto the frame (or delta).
@@ -343,7 +346,7 @@ public enum GhosttyRenderUpdateApplier {
         return GhosttyTerminalSnapshot(
             columns: delta.columns, rows: delta.rows, cursorColumn: delta.cursorColumn, cursorRow: delta.cursorRow,
             cursorVisible: delta.cursorVisible, defaultForegroundRGB: delta.defaultForegroundRGB, defaultBackgroundRGB: delta.defaultBackgroundRGB,
-            cells: grid.cells, clusters: grid.clusters, linkURLs: grid.linkURLs, mouseReportingActive: delta.mouseReportingActive,
+            cells: grid.cells, clusters: grid.clusters, linkURLs: grid.linkURLs, mouseTrackingLevel: delta.mouseTrackingLevel,
             mouseShiftCapture: delta.mouseShiftCapture, alternateScreenActive: delta.alternateScreenActive, selection: delta.selection,
             scrollbarTotal: delta.scrollbarTotal, scrollbarOffset: delta.scrollbarOffset, historyRowBase: delta.historyRowBase,
             historyEpoch: delta.historyEpoch)
@@ -419,7 +422,7 @@ public enum GhosttyRenderUpdateFactory {
             baseRevision: baseline.sessionRevision, targetRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch, columns: target.columns,
             rows: target.rows, cursorColumn: target.cursorColumn, cursorRow: target.cursorRow, cursorVisible: target.cursorVisible,
             defaultForegroundRGB: target.defaultForegroundRGB, defaultBackgroundRGB: target.defaultBackgroundRGB,
-            mouseReportingActive: target.mouseReportingActive, mouseShiftCapture: target.mouseShiftCapture,
+            mouseTrackingLevel: target.mouseTrackingLevel, mouseShiftCapture: target.mouseShiftCapture,
             alternateScreenActive: target.alternateScreenActive, scrollRects: scrollRects, replaceCellRuns: runs,
             changedCellCount: runs.reduce(0) { $0 + $1.cells.count }, selection: target.selection, scrollbarTotal: target.scrollbarTotal,
             scrollbarOffset: target.scrollbarOffset, historyRowBase: target.historyRowBase, historyEpoch: target.historyEpoch,
@@ -439,7 +442,7 @@ public enum GhosttyRenderUpdateFactory {
             columns: snapshot.columns, rows: snapshot.rows, cursorColumn: snapshot.cursorColumn, cursorRow: snapshot.cursorRow,
             cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
             defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells, clusters: snapshot.clusters, linkURLs: snapshot.linkURLs,
-            mouseReportingActive: snapshot.mouseReportingActive, mouseShiftCapture: snapshot.mouseShiftCapture,
+            mouseTrackingLevel: snapshot.mouseTrackingLevel, mouseShiftCapture: snapshot.mouseShiftCapture,
             alternateScreenActive: snapshot.alternateScreenActive, selection: snapshot.selection, scrollbarTotal: snapshot.scrollbarTotal,
             scrollbarOffset: snapshot.scrollbarOffset, historyRowBase: snapshot.historyRowBase, historyEpoch: snapshot.historyEpoch)
     }
@@ -801,7 +804,7 @@ public enum GhosttyRenderUpdateBinaryCodec {
             appendUInt8(snapshot.cursorVisible ? 1 : 0)
             appendUInt32(snapshot.defaultForegroundRGB)
             appendUInt32(snapshot.defaultBackgroundRGB)
-            appendUInt8(snapshot.mouseReportingActive ? 1 : 0)
+            appendUInt8(snapshot.mouseTrackingLevel.rawValue)
             appendUInt8(snapshot.mouseShiftCapture)
             appendUInt8(snapshot.alternateScreenActive ? 1 : 0)
             try appendSelectionScrollbarAndHistory(
@@ -825,7 +828,7 @@ public enum GhosttyRenderUpdateBinaryCodec {
             appendUInt8(delta.cursorVisible ? 1 : 0)
             appendUInt32(delta.defaultForegroundRGB)
             appendUInt32(delta.defaultBackgroundRGB)
-            appendUInt8(delta.mouseReportingActive ? 1 : 0)
+            appendUInt8(delta.mouseTrackingLevel.rawValue)
             appendUInt8(delta.mouseShiftCapture)
             appendUInt8(delta.alternateScreenActive ? 1 : 0)
             try appendSelectionScrollbarAndHistory(
@@ -881,6 +884,11 @@ public enum GhosttyRenderUpdateBinaryCodec {
             guard offset < raw.count else { throw BinaryCodecError.truncated }
             defer { offset += 1 }
             return raw[offset]
+        }
+
+        mutating func readMouseTrackingLevel() throws -> TerminalMouseTrackingLevel {
+            guard let level = TerminalMouseTrackingLevel(rawValue: try readUInt8()) else { throw BinaryCodecError.valueOutOfRange }
+            return level
         }
 
         mutating func readUInt16() throws -> UInt16 { UInt16(littleEndian: try readFixedWidthInteger()) }
@@ -984,7 +992,7 @@ public enum GhosttyRenderUpdateBinaryCodec {
             let cursorVisible = try readUInt8() != 0
             let defaultForegroundRGB = try readUInt32()
             let defaultBackgroundRGB = try readUInt32()
-            let mouseReportingActive = try readUInt8() != 0
+            let mouseTrackingLevel = try readMouseTrackingLevel()
             let mouseShiftCapture = try readUInt8()
             let alternateScreenActive = try readUInt8() != 0
             let (selection, scrollbarTotal, scrollbarOffset, history) = try readSelectionScrollbarAndHistory()
@@ -993,7 +1001,7 @@ public enum GhosttyRenderUpdateBinaryCodec {
             let snapshot = GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible,
                 defaultForegroundRGB: defaultForegroundRGB, defaultBackgroundRGB: defaultBackgroundRGB, cells: block.cells, clusters: block.clusters,
-                linkURLs: block.linkURLs, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
+                linkURLs: block.linkURLs, mouseTrackingLevel: mouseTrackingLevel, mouseShiftCapture: mouseShiftCapture,
                 alternateScreenActive: alternateScreenActive, selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset,
                 historyRowBase: history.rowBase, historyEpoch: history.epoch)
             return (snapshot, (history.transcriptByteOffset, history.transcriptFileIdentity))
@@ -1007,7 +1015,7 @@ public enum GhosttyRenderUpdateBinaryCodec {
             let cursorVisible = try readUInt8() != 0
             let defaultForegroundRGB = try readUInt32()
             let defaultBackgroundRGB = try readUInt32()
-            let mouseReportingActive = try readUInt8() != 0
+            let mouseTrackingLevel = try readMouseTrackingLevel()
             let mouseShiftCapture = try readUInt8()
             let alternateScreenActive = try readUInt8() != 0
             let (selection, scrollbarTotal, scrollbarOffset, history) = try readSelectionScrollbarAndHistory()
@@ -1035,7 +1043,7 @@ public enum GhosttyRenderUpdateBinaryCodec {
             return GhosttyRenderDeltaFrame(
                 baseRevision: baseRevision, targetRevision: targetRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows,
                 cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible, defaultForegroundRGB: defaultForegroundRGB,
-                defaultBackgroundRGB: defaultBackgroundRGB, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
+                defaultBackgroundRGB: defaultBackgroundRGB, mouseTrackingLevel: mouseTrackingLevel, mouseShiftCapture: mouseShiftCapture,
                 alternateScreenActive: alternateScreenActive, scrollRects: scrollRects, replaceCellRuns: runs, changedCellCount: changedCellCount,
                 selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset, historyRowBase: history.rowBase,
                 historyEpoch: history.epoch, transcriptByteOffset: history.transcriptByteOffset,

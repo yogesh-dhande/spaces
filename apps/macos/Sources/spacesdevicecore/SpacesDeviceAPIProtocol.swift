@@ -2178,6 +2178,7 @@ public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equata
     case scroll
     case scrollToBottom
     case mouseButton
+    case mouseMotion
     case setAppearance
     case setSelection
     case clearSelection

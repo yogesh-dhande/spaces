@@ -43,7 +43,7 @@ final class HostTerminalSimulator {
         defer { spaces_ghostty_vt_snapshot_free(&raw) }
         let position = self.position
         let snapshot = GhosttyVtSessionBridge.snapshot(
-            from: raw, mouseReportingActive: false, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session),
+            from: raw, mouseTrackingLevel: .none, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session),
             scrollbarTotal: UInt32(position.total), scrollbarOffset: UInt32(position.offset), historyRowBase: position.rows_pruned + position.offset,
             historyEpoch: position.history_epoch)
         return GhosttyRenderFrame(

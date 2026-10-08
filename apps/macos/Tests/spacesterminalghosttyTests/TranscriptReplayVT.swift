@@ -32,7 +32,7 @@ enum TranscriptReplayVT {
         defer { spaces_ghostty_vt_snapshot_free(&raw) }
         return rowTexts(
             GhosttyVtSessionBridge.snapshot(
-                from: raw, mouseReportingActive: false, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session)))
+                from: raw, mouseTrackingLevel: .none, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session)))
     }
 
     static func rowTexts(_ frame: TranscriptFrame) -> [String] { rowTexts(frame.snapshot) }

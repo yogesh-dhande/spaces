@@ -170,7 +170,7 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
 
     /// Terminal control in Demo Mode is view-only: attach/detach/scroll/scrollToBottom/appearance are accepted no-ops,
     /// resize records the requested viewport so subsequent frames report it, and anything that would
-    /// write to the pty (send/key/takeover/mouseButton) is refused with the demo-input notice.
+    /// write to the pty (send/key/takeover/mouseButton/mouseMotion) is refused with the demo-input notice.
     private func serveTerminalControl(_ request: SpacesDeviceTerminalControlRequest) -> SpacesDeviceAPIResponse {
         switch request.action {
         case .attach, .detach, .heartbeat, .scroll, .scrollToBottom, .clearScreen, .setAppearance: return ok()
@@ -179,7 +179,7 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
                 requestedGridBySession[request.sessionID] = DemoRecordingGrid(columns: columns, rows: rows)
             }
             return ok()
-        case .send, .key, .takeover, .mouseButton: return reject(Self.terminalInputRejection)
+        case .send, .key, .takeover, .mouseButton, .mouseMotion: return reject(Self.terminalInputRejection)
         // Recorded demo frames never carry a shared selection, so no highlight or Copy pill ever
         // appears and these are unreachable in practice; they still answer honestly: clearing nothing
         // is an accepted no-op, committing a selection is a write and is refused like other input, and

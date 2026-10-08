@@ -11654,8 +11654,8 @@
             }
             let snapshot = GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
-                defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, alternateScreenActive: alternateScreenActive
-            )
+                defaultBackgroundRGB: 0x000000, cells: cells, mouseTrackingLevel: mouseReportingActive ? .clicks : .none,
+                alternateScreenActive: alternateScreenActive)
             let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
             return GhosttyRemoteSessionStatePayload(
                 sessionID: "terminal-session", reason: reason.rawValue, emittedAt: emittedAt, sessionStateRevision: sessionRevision,

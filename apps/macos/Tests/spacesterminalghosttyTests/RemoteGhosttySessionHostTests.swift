@@ -5855,8 +5855,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
         return GhosttyTerminalSnapshot(
             columns: columns, rows: paddedRows.count, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
-            defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
-            alternateScreenActive: alternateScreenActive, selection: selection)
+            defaultBackgroundRGB: 0x000000, cells: cells, mouseTrackingLevel: mouseReportingActive ? .clicks : .none,
+            mouseShiftCapture: mouseShiftCapture, alternateScreenActive: alternateScreenActive, selection: selection)
     }
 
     private func renderUpdate(
@@ -6240,6 +6240,83 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(copy(fixture), lines(lineNumber(atRow: anchorRow, fixture)...lineNumber(atRow: extendRow, fixture)))
     }
 
+    /// Selects two lines, lets `extraLines(rows)` of output scroll them up, then Shift-clicks the bottom
+    /// row and returns what Copy puts on the pasteboard together with the lines the extension should span.
+    @MainActor private func shiftClickAfterOutputScrolledTheSelectionUp(sessionID: String, extraLines: ([Int]) -> Int) throws -> (
+        copied: String?, expected: String, anchorWentOffTop: Bool
+    ) {
+        let fixture = try makeSelectionFixture(sessionID: sessionID, lines: 100)
+        let rows = numberedRows(fixture)
+        let anchorRow = rows[1]
+        let endRow = rows[3]
+        let anchorLine = lineNumber(atRow: anchorRow, fixture)
+
+        send(.leftMouseDown, column: 0, row: anchorRow, fixture)
+        send(.leftMouseDragged, column: 25, row: endRow, fixture)
+        send(.leftMouseUp, column: 25, row: endRow, fixture)
+
+        let extra = extraLines(rows)
+        fixture.terminal.writeLines(101...(100 + extra))
+        publishNewestFrame(fixture)
+        let anchorWentOffTop = lineNumber(atRow: rows[0], fixture) > anchorLine
+
+        // A shift-click inside Ghostty's multi-click interval (500 ms) counts toward a double click instead.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.7))
+        let extendRow = try XCTUnwrap(rows.last)
+        send(.leftMouseDown, column: 25, row: extendRow, fixture, modifiers: [.shift])
+        send(.leftMouseUp, column: 25, row: extendRow, fixture, modifiers: [.shift])
+        return (copy(fixture), lines(anchorLine...lineNumber(atRow: extendRow, fixture)), anchorWentOffTop)
+    }
+
+    /// The anchor scrolled off the top while part of the selection is still on screen: a Shift-click
+    /// further down extends from the anchor's line, not from the first line on screen.
+    @MainActor func testShiftClickExtendsFromAnAnchorThatScrolledOffTheTopWithPartOfTheSelectionStillShown() throws {
+        let result = try shiftClickAfterOutputScrolledTheSelectionUp(sessionID: "selection-shift-anchor-off-partial") { $0[1] + 1 }
+
+        XCTAssertTrue(result.anchorWentOffTop, "the anchor line must have scrolled off the top")
+        XCTAssertEqual(result.copied, result.expected)
+    }
+
+    /// The whole selection scrolled off screen, so the pane paints nothing for Ghostty to extend: the
+    /// Shift-click still extends from the anchor's line instead of starting a new selection.
+    @MainActor func testShiftClickExtendsFromAnAnchorWhenTheWholeSelectionScrolledOffScreen() throws {
+        let result = try shiftClickAfterOutputScrolledTheSelectionUp(sessionID: "selection-shift-anchor-off-all") { $0[3] + 2 }
+
+        XCTAssertTrue(result.anchorWentOffTop, "the anchor line must have scrolled off the top")
+        XCTAssertEqual(result.copied, result.expected)
+    }
+
+    /// A rectangle scrolled wholly off screen projects to a frame with no selection, yet its anchor
+    /// column still decides the band: a Shift+Option-click extends the rectangle from the anchor's column
+    /// to the click's, not from column 0.
+    @MainActor func testShiftOptionClickExtendsARectangleFromItsAnchorColumnWhenItScrolledOffScreen() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-shift-rectangle-off", lines: 100)
+        let rows = numberedRows(fixture)
+        let anchorRow = rows[1]
+        let endRow = rows[3]
+        let anchorLine = lineNumber(atRow: anchorRow, fixture)
+
+        send(.leftMouseDown, column: 3, row: anchorRow, fixture, modifiers: [.option])
+        send(.leftMouseDragged, column: 6, row: endRow, fixture, modifiers: [.option])
+        send(.leftMouseUp, column: 6, row: endRow, fixture, modifiers: [.option])
+
+        fixture.terminal.writeLines(101...(100 + endRow + 2))
+        publishNewestFrame(fixture)
+        XCTAssertGreaterThan(
+            lineNumber(atRow: rows[0], fixture), anchorLine + (endRow - anchorRow), "the whole selection must have scrolled off the top")
+
+        // A shift-click inside Ghostty's multi-click interval (500 ms) counts toward a double click instead.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.7))
+        let extendRow = try XCTUnwrap(rows.last)
+        send(.leftMouseDown, column: 8, row: extendRow, fixture, modifiers: [.shift, .option])
+        send(.leftMouseUp, column: 8, row: extendRow, fixture, modifiers: [.shift, .option])
+
+        // The band starts at the anchor's column 3. A click aimed at a cell's center takes the columns
+        // before that cell (3 through 7 for a click on column 8), as in the live rectangle drags.
+        let band = (anchorLine...lineNumber(atRow: extendRow, fixture)).map { String(StampedHostTerminal.line($0).dropFirst(3).prefix(5)) }
+        XCTAssertEqual(copy(fixture), band.joined(separator: "\n"))
+    }
+
     /// A selection made on live rows is still there, over the same text, when the pane scrolls up into
     /// its replay.
     @MainActor func testASelectionMadeOnLiveRowsShowsOnTheReplay() throws {
@@ -6355,7 +6432,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// local escape) scrolls the pane's own replay and still sends the session nothing.
     @MainActor func testSelectionAutoscrollUnderMouseTrackingScrollsTheReplayOnly() throws {
         let fixture = try makeSelectionFixture(sessionID: "selection-autoscroll-tracking", lines: 200)
-        fixture.terminal.mouseReportingActive = true
+        fixture.terminal.mouseTrackingLevel = .clicks
         publishNewestFrame(fixture)
         XCTAssertFalse(fixture.terminal.frame(revision: 0).snapshot.alternateScreenActive)
         waitForCondition("the replay is ready") { fixture.source.arrivedReads >= 1 }

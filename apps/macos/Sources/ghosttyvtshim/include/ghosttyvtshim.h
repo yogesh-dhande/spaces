@@ -74,7 +74,19 @@ typedef enum {
 typedef enum {
     SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS = 0,
     SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE = 1,
+    // Pointer movement. `button` is the held button the caller tracks, or 0 when none is held.
+    // Reported only under a tracking level that wants motion.
+    SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION = 2,
 } SpacesGhosttyVtMouseAction;
+
+// The pointer input a tracking program asks for; the values match the render-frame codec's tracking
+// level byte.
+typedef enum {
+    SPACES_GHOSTTY_VT_MOUSE_TRACKING_NONE = 0,
+    SPACES_GHOSTTY_VT_MOUSE_TRACKING_CLICKS = 1,
+    SPACES_GHOSTTY_VT_MOUSE_TRACKING_BUTTON_MOTION = 2,
+    SPACES_GHOSTTY_VT_MOUSE_TRACKING_ANY_MOTION = 3,
+} SpacesGhosttyVtMouseTracking;
 
 // The most codepoints a snapshot cell's grapheme cluster can carry, base included. A cell whose
 // cluster is longer (combining-mark spam, which no legitimate glyph needs) is exported as its base
@@ -304,11 +316,12 @@ bool spaces_ghostty_vt_session_encode_mouse(
     size_t *out_len
 );
 
-// Reports whether the session's terminal currently has any mouse tracking mode enabled. Returns
-// false if the underlying query fails.
-bool spaces_ghostty_vt_session_mouse_tracking_active(
+// Reports which pointer input the session's terminal currently asks for, as a
+// `SpacesGhosttyVtMouseTracking` value (none when no tracking mode is enabled). Returns false if the
+// underlying query fails.
+bool spaces_ghostty_vt_session_mouse_tracking_level(
     SpacesGhosttyVtSession *session,
-    bool *out_active
+    uint8_t *out_level
 );
 
 // Reports whether the session's terminal has the alternate screen active (what DEC modes 1047/1049

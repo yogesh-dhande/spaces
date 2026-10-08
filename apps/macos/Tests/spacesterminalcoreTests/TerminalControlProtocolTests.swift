@@ -133,6 +133,36 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(noPointer.commandValue.requiredPayloadFailureMessage, "Missing mouse pointer position.")
     }
 
+    func testMouseMotionRequestRoundTripsThroughCodec() throws {
+        let request = TerminalControlRequest(
+            command: .mouseMotion(
+                TerminalControlMouseMotionPayload(clientID: "owner-1", ownerEpoch: 11, pointerX: 0.25, pointerY: 0.75, pointerMods: 3)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "mouseMotion")
+        XCTAssertEqual(decoded.commandValue.name, "mouseMotion")
+        // Motion writes to the program like a click does, so it is owner-gated and does not echo state.
+        XCTAssertTrue(decoded.commandValue.requiresOwnerClientID)
+        XCTAssertFalse(decoded.commandValue.includesSessionStateOnSuccess)
+        XCTAssertTrue(TerminalControlCommand.isMobileTerminalControlName("mouseMotion"))
+        guard case .mouseMotion(let payload) = decoded.commandValue else {
+            return XCTFail("Expected a mouseMotion command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertEqual(payload.clientID, "owner-1")
+        XCTAssertEqual(payload.ownerEpoch, 11)
+        XCTAssertEqual(payload.pointerX, 0.25)
+        XCTAssertEqual(payload.pointerY, 0.75)
+        XCTAssertEqual(payload.pointerMods, 3)
+        // The command names no button: the host tracks the held ones.
+        XCTAssertNil(decoded.mouseButton)
+    }
+
+    func testMouseMotionWithoutPointerReportsMissingPayload() throws {
+        let request = try TerminalControlCodec.decodeRequest(#"{"command":"mouseMotion","clientID":"owner-1","asPaste":false}"#.data(using: .utf8)!)
+        XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing mouse pointer position.")
+    }
+
     func testSetAppearanceRequestRoundTripsThroughCodec() throws {
         let request = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "viewer-1", appearance: .dark)))
 

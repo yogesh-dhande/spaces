@@ -44,7 +44,7 @@ public enum GhosttyVtSessionBridge {
     /// `historyEpoch`, in the host's numbering once the replay is aligned with it
     /// (`TerminalLocalScrollbackModel`).
     public static func snapshot(
-        from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool, alternateScreenActive: Bool,
+        from rawSnapshot: SpacesGhosttyVtSnapshot, mouseTrackingLevel: TerminalMouseTrackingLevel, alternateScreenActive: Bool,
         selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0,
         historyEpoch: UInt64 = 0
     ) -> GhosttyTerminalSnapshot {
@@ -64,7 +64,7 @@ public enum GhosttyVtSessionBridge {
             columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
             cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
             defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells,
-            clusters: clusters, mouseReportingActive: mouseReportingActive, alternateScreenActive: alternateScreenActive, selection: selection,
+            clusters: clusters, mouseTrackingLevel: mouseTrackingLevel, alternateScreenActive: alternateScreenActive, selection: selection,
             scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset, historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }
 

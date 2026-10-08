@@ -91,7 +91,7 @@ final class TerminalScrollbackReplaySession: @unchecked Sendable {
         // active screen is read from the session itself: the replayed bytes can leave the terminal on the
         // alternate screen, and a frame that misreported that would describe a screen the replay is not on.
         return GhosttyVtSessionBridge.snapshot(
-            from: rawSnapshot, mouseReportingActive: false, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session),
+            from: rawSnapshot, mouseTrackingLevel: .none, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session),
             historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }
 

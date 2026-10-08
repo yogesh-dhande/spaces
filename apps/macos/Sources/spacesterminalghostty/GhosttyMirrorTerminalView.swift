@@ -25,6 +25,7 @@
         typealias SendKeyHandler = @MainActor (String) -> Void
         typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32, TerminalScrollPointerPosition?) -> Void
         typealias SendMouseButtonHandler = @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void
+        typealias SendMouseMotionHandler = @MainActor (TerminalScrollPointerPosition) -> Void
         typealias ViewportSizeHandler = @MainActor (Int, Int) -> Void
 
         private struct SurfaceGeometry: Equatable {
@@ -190,6 +191,13 @@
         var onUserChangedSelection: (@MainActor () -> Void)?
         var onSendScroll: SendScrollHandler?
         var onSendMouseButton: SendMouseButtonHandler?
+        var onSendMouseMotion: SendMouseMotionHandler?
+        /// The buttons this pane has forwarded a press for and not yet a release for. The session host
+        /// holds the same set, so this decides whether button-event tracking (1002) wants a motion.
+        private var forwardedHeldButtons = Set<UInt32>()
+        /// The cell the last forwarded press, release or motion named, so a move that stays inside it
+        /// sends nothing: one report per cell change, never per pixel.
+        private var lastForwardedPointerCell: (column: Int, row: Int)?
         var onViewportSizeChanged: ViewportSizeHandler?
         /// Called when the user activates the jump-to-bottom control. `RemoteGhosttySessionHost` wires
         /// this to a `scrollToBottom` control request.
@@ -396,6 +404,7 @@
             if suppressesFocusOnlyMousePress(for: event) { return }
             focusWindow()
             sendMousePosition(event)
+            paintStandInAnchorForShiftExtend(event)
             _ = sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT, event: event)
             selectionGesturePressed(event)
         }
@@ -442,16 +451,26 @@
             _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: Self.ghosttyMouseButton(for: event.buttonNumber), event: event)
         }
 
-        override func mouseMoved(with event: NSEvent) { sendMousePosition(event) }
+        override func mouseMoved(with event: NSEvent) {
+            sendMousePosition(event)
+            forwardMouseMotionIfWanted(event)
+        }
 
         override func mouseDragged(with event: NSEvent) {
             sendMousePosition(event)
+            forwardMouseMotionIfWanted(event)
             selectionGestureMoved(event)
         }
 
-        override func rightMouseDragged(with event: NSEvent) { sendMousePosition(event) }
+        override func rightMouseDragged(with event: NSEvent) {
+            sendMousePosition(event)
+            forwardMouseMotionIfWanted(event)
+        }
 
-        override func otherMouseDragged(with event: NSEvent) { sendMousePosition(event) }
+        override func otherMouseDragged(with event: NSEvent) {
+            sendMousePosition(event)
+            forwardMouseMotionIfWanted(event)
+        }
 
         override func mouseExited(with event: NSEvent) {
             hoveredLink = nil
@@ -927,6 +946,12 @@
             // and resetting the click gesture while an application tracks the mouse) before the same
             // click is forwarded to the session that can actually deliver it.
             let consumed = deliverMouseButtonToMirror(state: state, button: button, event: event)
+            // Any release ends the hold. A release of a button whose press this pane forwarded is itself
+            // forwarded even when the ownership rule would now give it to selection (Shift went down, or
+            // tracking ended mid-click): the session host holds that button until it hears the release,
+            // and a held button turns later hover into a drag. The host applies its own Shift rule to
+            // the release, so the program still sees what Ghostty would natively send.
+            let releasesForwardedPress = state.rawValue != GHOSTTY_MOUSE_PRESS.rawValue && forwardedHeldButtons.remove(button.rawValue) != nil
             if state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue {
                 // Cmd+click is the local link-activation gesture, and Ghostty core requires the
                 // super modifier to activate a link and swallows a successful link click before it
@@ -949,7 +974,7 @@
                 // The matching release is withheld too, as a pair keyed off the press, so the
                 // session never sees a dangling release for a press it never received.
             } else {
-                forwardMouseButtonIfReported(state: state, button: button, event: event)
+                forwardMouseButtonIfReported(state: state, button: button, event: event, releasesForwardedPress: releasesForwardedPress)
             }
             return consumed
         }
@@ -972,11 +997,35 @@
         /// Sends the click on to the session's own terminal when a mouse-aware application there is
         /// tracking the mouse. This repeats the condition Ghostty's surface uses to decide it should
         /// emit a mouse report, which is the same decision the mirror just made locally.
-        private func forwardMouseButtonIfReported(state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent) {
-            guard let onSendMouseButton, mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else { return }
+        private func forwardMouseButtonIfReported(
+            state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent, releasesForwardedPress: Bool = false
+        ) {
+            guard let onSendMouseButton, releasesForwardedPress || mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else { return }
             let mods = Self.ghosttyMouseModifiers(for: event.modifierFlags)
             let pointerPosition = clickedCellPointerPosition(for: event.locationInWindow, mods: mods.rawValue)
-            onSendMouseButton(UInt8(clamping: button.rawValue), state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue, pointerPosition)
+            let pressed = state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue
+            if pressed { forwardedHeldButtons.insert(button.rawValue) } else { forwardedHeldButtons.remove(button.rawValue) }
+            lastForwardedPointerCell = gridCell(at: event.locationInWindow).map { (column: $0.column, row: $0.row) }
+            onSendMouseButton(UInt8(clamping: button.rawValue), pressed, pointerPosition)
+        }
+
+        /// Sends the pointer's move to the session when the program there asked for it: any-event
+        /// tracking (1003) always, button-event tracking (1002) only while a forwarded button is held,
+        /// and never under clicks-only tracking. It follows the same ownership rule as the button
+        /// presses, so a Shift drag (selection) and a session that does not permit mouse capture send
+        /// nothing, and sends once per cell change.
+        private func forwardMouseMotionIfWanted(_ event: NSEvent) {
+            guard let onSendMouseMotion, mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else { return }
+            guard let level = latestFrame?.snapshot.mouseTrackingLevel, level.reportsMotion(buttonHeld: !forwardedHeldButtons.isEmpty) else { return }
+            guard let cell = gridCell(at: event.locationInWindow) else { return }
+            // A drag past an edge keeps reporting at the edge cell, as a terminal's own mouse does.
+            let column = min(max(cell.column, 0), cell.columns - 1)
+            let row = min(max(cell.row, 0), cell.rows - 1)
+            if let last = lastForwardedPointerCell, last.column == column, last.row == row { return }
+            lastForwardedPointerCell = (column, row)
+            let center = TerminalPointerGrid.center(column: column, row: row, columns: cell.columns, rows: cell.rows)
+            onSendMouseMotion(
+                TerminalScrollPointerPosition(x: center.x, y: center.y, mods: Self.ghosttyMouseModifiers(for: event.modifierFlags).rawValue))
         }
 
         /// The cell the click landed on, named as that cell's center in this pane's grid, which is what a
@@ -1220,6 +1269,35 @@
             clientSelection = merged
             let projected = merged?.projection(onto: snapshot)
             if !Self.range(projected, matches: info) { paintMirrorSelection(projected) }
+        }
+
+        /// Gives Ghostty a selection to extend when a Shift-click comes after the selection scrolled wholly
+        /// off the grid.
+        ///
+        /// Ghostty extends on Shift-click only when its surface shows a selection, and a selection with no
+        /// rows on this frame projects to nothing, so the click would start a new selection instead. The
+        /// fork seats the click pin on the stand-in corner cell for an off-grid anchor (top-left above the
+        /// viewport, bottom-right below; a rectangle keeps the anchor's column), so painting that one cell
+        /// is enough for Ghostty to extend from it. The stand-in's anchor side is not the true one, which
+        /// is fine: the drag merge keeps the anchor side it knows and takes only the click's side from
+        /// Ghostty, then repaints the merged selection.
+        private func paintStandInAnchorForShiftExtend(_ event: NSEvent) {
+            guard event.modifierFlags.contains(.shift), clientSelection != nil, let drag = selectionDrag, let snapshot = shownSnapshot else { return }
+            guard !mouseButtonBelongsToSession(modifierFlags: event.modifierFlags), let mirror else { return }
+            var info = ghostty_mirror_selection_info_s()
+            ghostty_mirror_selection_info(mirror, &info)
+            guard !info.present else { return }
+            let frame = TerminalSelectionDragFrame(snapshot: snapshot)
+            let anchorRow = drag.anchorViewportRow(in: frame)
+            guard anchorRow < 0 || anchorRow >= snapshot.rows else { return }
+            let isRectangle = clientSelection?.isRectangle ?? false
+            let above = anchorRow < 0
+            let column = isRectangle ? min(max(drag.anchor.column, 0), snapshot.columns - 1) : (above ? 0 : snapshot.columns - 1)
+            let row = above ? 0 : snapshot.rows - 1
+            paintMirrorSelection(
+                GhosttyTerminalSelectionRange(
+                    startColumn: UInt16(column), startRow: UInt16(row), endColumn: UInt16(column), endRow: UInt16(row), isRectangle: isRectangle,
+                    extendsAbove: false, extendsBelow: false))
         }
 
         /// Right-click outside the selection makes Ghostty select the word under the pointer in the
@@ -1551,11 +1629,18 @@
             // The press cell, projected onto this frame (negative or past the last row when its text is
             // off screen). The fork seats Ghostty's click pin there, so a drag in progress resolves from
             // the true anchor and a later shift-click extends from it.
+            //
+            // A rectangle's anchor row is clamped onto the grid, keeping its true column. The fork seats a
+            // rectangle's click pin on exactly that cell, but it only knows the shape from the frame's
+            // selection flags, and a rectangle wholly off screen projects to a frame without any. Left
+            // unclamped, the pin would fall back to the stream stand-in corner (column 0 or the last
+            // column) and a Shift+Option-click would extend from the wrong column band.
+            let isRectangle = clientSelection?.isRectangle ?? false
             let dragAnchor = selectionDrag.flatMap { drag -> (column: Int32, row: Int32)? in
                 guard drag.historyEpoch == snapshot.historyEpoch else { return nil }
-                return (
-                    Int32(clamping: drag.anchor.column), Int32(clamping: drag.anchorViewportRow(in: TerminalSelectionDragFrame(snapshot: snapshot)))
-                )
+                var row = drag.anchorViewportRow(in: TerminalSelectionDragFrame(snapshot: snapshot))
+                if isRectangle { row = min(max(row, 0), snapshot.rows - 1) }
+                return (Int32(clamping: drag.anchor.column), Int32(clamping: row))
             }
             // The C cell's link fields are export-only — applying a snapshot ignores them — so they
             // stay zeroed here and a cell's OSC 8 target travels no further than the Swift snapshot.

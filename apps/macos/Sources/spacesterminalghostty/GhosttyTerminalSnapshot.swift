@@ -109,10 +109,10 @@
                 columns: Int(snapshot.columns), rows: Int(snapshot.rows), cursorColumn: Int(snapshot.cursor_column),
                 cursorRow: Int(snapshot.cursor_row), cursorVisible: snapshot.cursor_visible, defaultForegroundRGB: snapshot.default_foreground_rgb,
                 defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells, clusters: clusters, linkURLs: linkURLs,
-                mouseReportingActive: snapshot.mouse_reporting_active, mouseShiftCapture: snapshot.mouse_shift_capture,
-                alternateScreenActive: snapshot.alternate_screen_active, selection: selection(of: snapshot), scrollbarTotal: snapshot.scrollbar_total,
-                scrollbarOffset: snapshot.scrollbar_offset, historyRowBase: snapshot.history_rows_pruned + UInt64(snapshot.scrollbar_offset),
-                historyEpoch: snapshot.history_epoch)
+                mouseTrackingLevel: TerminalMouseTrackingLevel(rawValue: snapshot.mouse_tracking_level) ?? .none,
+                mouseShiftCapture: snapshot.mouse_shift_capture, alternateScreenActive: snapshot.alternate_screen_active,
+                selection: selection(of: snapshot), scrollbarTotal: snapshot.scrollbar_total, scrollbarOffset: snapshot.scrollbar_offset,
+                historyRowBase: snapshot.history_rows_pruned + UInt64(snapshot.scrollbar_offset), historyEpoch: snapshot.history_epoch)
         }
 
         /// Ghostty already did the clipping and the viewport rebase (this is an embedded surface, so its

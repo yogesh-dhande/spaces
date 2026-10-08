@@ -114,6 +114,10 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
                 command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch, mouseButton: payload.button,
                 mousePressed: payload.pressed, mousePointerX: payload.pointerX, mousePointerY: payload.pointerY, mousePointerMods: payload.pointerMods
             )
+        case .mouseMotion(let payload):
+            self.init(
+                command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch,
+                mousePointerX: payload.pointerX, mousePointerY: payload.pointerY, mousePointerMods: payload.pointerMods)
         case .setAppearance(let payload):
             self.init(command: command.name, authToken: authToken, clientID: payload.clientID, appearance: payload.appearance)
         case .setSelection(let payload):
@@ -415,6 +419,29 @@ public struct TerminalControlMouseButtonPayload: Sendable, Equatable {
     }
 }
 
+/// Pointer movement for a program that tracks the mouse. The pointer names a cell center exactly as
+/// ``TerminalControlMouseButtonPayload`` does, and the wire reuses its pointer fields. The command carries
+/// no button: the host tracks which buttons the owner has pressed and released through `mouseButton` and
+/// reports the motion with the one held (mode 1002 reports motion only while one is held, mode 1003
+/// always). It is ordered with key input and button presses, and a motion still waiting to be sent is
+/// replaced by a newer one, since an intermediate position means nothing to the program once a newer one
+/// exists.
+public struct TerminalControlMouseMotionPayload: Sendable, Equatable {
+    public let clientID: String?
+    public let ownerEpoch: UInt64?
+    public let pointerX: Double?
+    public let pointerY: Double?
+    public let pointerMods: UInt32?
+
+    public init(clientID: String?, ownerEpoch: UInt64?, pointerX: Double?, pointerY: Double?, pointerMods: UInt32?) {
+        self.clientID = clientID
+        self.ownerEpoch = ownerEpoch
+        self.pointerX = pointerX
+        self.pointerY = pointerY
+        self.pointerMods = pointerMods
+    }
+}
+
 public enum TerminalControlCommand: Sendable, Equatable {
     case attach(TerminalControlAttachPayload)
     case detach(TerminalControlClientPayload)
@@ -427,6 +454,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
     case scroll(TerminalControlScrollPayload)
     case scrollToBottom(TerminalControlOwnerPayload)
     case mouseButton(TerminalControlMouseButtonPayload)
+    case mouseMotion(TerminalControlMouseMotionPayload)
     case setAppearance(TerminalControlSetAppearancePayload)
     case setSelection(TerminalControlSetSelectionPayload)
     case clearSelection(TerminalControlClientPayload)
@@ -465,6 +493,11 @@ public enum TerminalControlCommand: Sendable, Equatable {
                 TerminalControlMouseButtonPayload(
                     clientID: request.clientID, ownerEpoch: request.ownerEpoch, button: request.mouseButton, pressed: request.mousePressed,
                     pointerX: request.mousePointerX, pointerY: request.mousePointerY, pointerMods: request.mousePointerMods))
+        case "mouseMotion":
+            self = .mouseMotion(
+                TerminalControlMouseMotionPayload(
+                    clientID: request.clientID, ownerEpoch: request.ownerEpoch, pointerX: request.mousePointerX, pointerY: request.mousePointerY,
+                    pointerMods: request.mousePointerMods))
         case "setAppearance": self = .setAppearance(TerminalControlSetAppearancePayload(clientID: request.clientID, appearance: request.appearance))
         case "setSelection":
             self = .setSelection(
@@ -490,6 +523,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
         case .scroll: "scroll"
         case .scrollToBottom: "scrollToBottom"
         case .mouseButton: "mouseButton"
+        case .mouseMotion: "mouseMotion"
         case .setAppearance: "setAppearance"
         case .setSelection: "setSelection"
         case .clearSelection: "clearSelection"
@@ -500,7 +534,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
 
     public var requiresOwnerClientID: Bool {
         switch self {
-        case .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton: true
+        case .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton, .mouseMotion: true
         // setAppearance is a per-client view preference, not an ownership-gated mutation. Selection
         // is not gated either, but for a different reason: scroll and mouse input are exclusive
         // because two viewers driving them at once would fight (each frame reflects only the last
@@ -518,8 +552,8 @@ public enum TerminalControlCommand: Sendable, Equatable {
     public var includesSessionStateOnSuccess: Bool {
         switch self {
         case .attach, .detach, .takeover: true
-        case .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton, .setAppearance, .setSelection, .clearSelection,
-            .readSelectionText, .unsupported:
+        case .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton, .mouseMotion, .setAppearance, .setSelection,
+            .clearSelection, .readSelectionText, .unsupported:
             false
         }
     }
@@ -541,6 +575,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
             } else {
                 nil
             }
+        case .mouseMotion(let payload): payload.pointerX == nil || payload.pointerY == nil ? "Missing mouse pointer position." : nil
         case .setSelection(let payload):
             if payload.startColumn == nil || payload.startRow == nil || payload.endColumn == nil || payload.endRow == nil {
                 "Missing selection endpoints."
@@ -554,7 +589,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
     public static func isMobileTerminalControlName(_ name: String) -> Bool {
         switch name {
         case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll", "scrollToBottom", "mouseButton",
-            "setAppearance", "setSelection", "clearSelection", "readSelectionText":
+            "mouseMotion", "setAppearance", "setSelection", "clearSelection", "readSelectionText":
             true
         default: false
         }

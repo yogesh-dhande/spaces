@@ -378,6 +378,7 @@
             terminalView.onSendMouseButton = { [weak self] button, pressed, pointerPosition in
                 self?.sendRemoteMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
             }
+            terminalView.onSendMouseMotion = { [weak self] pointerPosition in self?.sendRemoteMouseMotion(pointerPosition: pointerPosition) }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
             terminalView.onSelectionAutoscroll = { [weak self] towardOlderRows in self?.autoscrollSelection(towardOlderRows: towardOlderRows) }
             terminalView.onUserChangedSelection = { [weak self] in self?.cancelPendingSelectAll() }
@@ -1230,6 +1231,34 @@
                                     pointerY: pointerPosition?.y, pointerMods: pointerPosition?.mods))), sessionID: sessionID, socketPath: socketPath,
                         requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "mouse_button") } }
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+        }
+
+        /// Rides the same input queue as keys and button presses so the application sees a press, the
+        /// motion after it and the release in the order the user produced them. Unlike them it is
+        /// `supersedable`: a pointer crossing cells quickly queues a motion per cell, and once a newer
+        /// position is queued behind a motion that has not been sent, the older one is worthless to the
+        /// program.
+        private func sendRemoteMouseMotion(pointerPosition: TerminalScrollPointerPosition) {
+            guard isInteractiveRuntimeStateForControl() else { return }
+            guard let client = attachedClient, attachedMode == .owner else { return }
+            scrollCoalescer.flush()
+            let socketPath = paths.controlSocketPath
+            let clientID = client.id
+            let ownerEpoch = latestState?.renderOwnerEpoch
+            let sessionID = launchConfiguration.sessionID
+            let requestSender = terminalServiceRequestSender
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
+            queue.enqueue(
+                priority: .userInitiated, supersedable: true,
+                operation: {
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(
+                            command: .mouseMotion(
+                                .init(
+                                    clientID: clientID, ownerEpoch: ownerEpoch, pointerX: pointerPosition.x, pointerY: pointerPosition.y,
+                                    pointerMods: pointerPosition.mods))), sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                 }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
