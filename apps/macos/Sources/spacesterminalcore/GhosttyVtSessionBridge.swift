@@ -39,8 +39,10 @@ public enum GhosttyVtSessionBridge {
     /// screen is queried separately for the same reason: a caller with a live session passes
     /// `alternateScreenActive(session:)`. Selection, scrollbar, and history position are likewise queried
     /// separately (the shim has no per-snapshot equivalent of the embedded surface's combined export) and
-    /// default to absent/zero, which is what the scrollback replay caller wants: a replay has no live
-    /// selection, scrollbar, or history position to report.
+    /// default to absent/zero. The scrollback replay passes no selection or scrollbar (it has no live
+    /// selection, and the client owns its selection in absolute rows) but does pass `historyRowBase` and
+    /// `historyEpoch`, in the host's numbering once the replay is aligned with it
+    /// (`TerminalLocalScrollbackModel`).
     public static func snapshot(
         from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool, alternateScreenActive: Bool,
         selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0,

@@ -402,7 +402,30 @@ void spaces_ghostty_vt_session_clear_selection(SpacesGhosttyVtSession *session);
 // call fails.
 char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *session, size_t *out_len);
 
-// Releases a buffer returned by `spaces_ghostty_vt_session_selection_text_copy`.
+// Formats an explicit screen-space range as plain text with the options
+// `spaces_ghostty_vt_session_selection_text_copy` uses (soft wraps unwrapped, trailing whitespace on
+// non-blank lines trimmed), without touching the session's active selection. Endpoints are clamped into
+// the screen extent like `spaces_ghostty_vt_session_set_selection`, and must be ordered (start before
+// end in reading order; a rectangle's columns may be given in either order). Returns NULL (with
+// `*out_len` left at 0, when `out_len` is non-NULL) when the format call fails. The result is freed with
+// `spaces_ghostty_vt_session_selection_text_free`.
+char *spaces_ghostty_vt_session_range_text_copy(
+    SpacesGhosttyVtSession *session,
+    uint16_t start_x,
+    uint32_t start_y,
+    uint16_t end_x,
+    uint32_t end_y,
+    bool rectangle,
+    size_t *out_len
+);
+
+// Derives libghostty-vt's select-all span (first to last non-whitespace cell of the whole screen,
+// scrollback included) as screen-space ordered endpoints, without installing it as the session's
+// selection. `out->present` is false when the screen holds no selectable content. Returns false only
+// when the session/terminal is missing or the underlying call fails.
+bool spaces_ghostty_vt_session_select_all_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out);
+
+// Releases a buffer returned by either text-copy function above.
 void spaces_ghostty_vt_session_selection_text_free(char *text);
 
 // Reads the session's active selection. `out->present` is false when there is no selection at all

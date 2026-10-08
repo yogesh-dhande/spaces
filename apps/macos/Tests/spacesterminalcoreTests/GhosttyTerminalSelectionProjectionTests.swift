@@ -98,6 +98,19 @@ import Testing
                     extendsBelow: true))
     }
 
+    /// Absolute rows count every row a host ever numbered, so they outgrow 32 bits long before a screen
+    /// row does.
+    @Test func rowsBeyondThirtyTwoBitsProject() {
+        let top = Int64(UInt32.max) + 1_000
+        let projected = GhosttyTerminalSelectionProjection.project(
+            startColumn: 2, startRow: top + 3, endColumn: 9, endRow: top + 5, isRectangle: false, viewportRowOffset: top, columns: columns, rows: rows
+        )
+        #expect(
+            projected
+                == GhosttyTerminalSelectionRange(
+                    startColumn: 2, startRow: 3, endColumn: 9, endRow: 5, isRectangle: false, extendsAbove: false, extendsBelow: false))
+    }
+
     // MARK: - No overlap
 
     @Test func selectionEntirelyAboveTheViewportProjectsToNil() {

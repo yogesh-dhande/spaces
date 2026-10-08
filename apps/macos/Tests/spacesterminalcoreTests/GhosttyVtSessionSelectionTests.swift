@@ -17,12 +17,9 @@ import ghosttyvtshim
         #expect(data.withUnsafeBytes { spaces_ghostty_vt_session_write(session, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) })
     }
 
-    @discardableResult
-    private func setSelection(
+    @discardableResult private func setSelection(
         _ session: OpaquePointer, startX: UInt16, startY: UInt32, endX: UInt16, endY: UInt32, rectangle: Bool = false
-    ) -> Bool {
-        spaces_ghostty_vt_session_set_selection(session, startX, startY, endX, endY, rectangle)
-    }
+    ) -> Bool { spaces_ghostty_vt_session_set_selection(session, startX, startY, endX, endY, rectangle) }
 
     private func selectionState(_ session: OpaquePointer) throws -> SpacesGhosttyVtSelectionState {
         var state = SpacesGhosttyVtSelectionState()
@@ -95,8 +92,8 @@ import ghosttyvtshim
         let state = try selectionState(session)
         #expect(state.present)
         #expect(state.valid)
-        #expect(state.end_x == 19) // columns - 1
-        #expect(state.end_y == 2) // rows - 1, no scrollback yet
+        #expect(state.end_x == 19)  // columns - 1
+        #expect(state.end_y == 2)  // rows - 1, no scrollback yet
     }
 
     @Test func reportsNoSelectionBeforeAnyIsSet() throws {
@@ -118,7 +115,7 @@ import ghosttyvtshim
     @Test func selectionTextCopyUnwrapsASoftWrappedLine() throws {
         let session = try makeSession(columns: 10, rows: 3)
         defer { spaces_ghostty_vt_session_free(session) }
-        write(session, "abcdefghijklmno") // wraps: row 0 "abcdefghij", row 1 "klmno"
+        write(session, "abcdefghijklmno")  // wraps: row 0 "abcdefghij", row 1 "klmno"
 
         #expect(setSelection(session, startX: 0, startY: 0, endX: 4, endY: 1))
         #expect(selectionText(session) == "abcdefghijklmno")
@@ -142,6 +139,49 @@ import ghosttyvtshim
         #expect(selectionText(session) == nil)
     }
 
+    private func rangeText(_ session: OpaquePointer, startX: UInt16, startY: UInt32, endX: UInt16, endY: UInt32, rectangle: Bool = false) -> String? {
+        var length = 0
+        guard let pointer = spaces_ghostty_vt_session_range_text_copy(session, startX, startY, endX, endY, rectangle, &length) else { return nil }
+        defer { spaces_ghostty_vt_session_selection_text_free(pointer) }
+        return pointer.withMemoryRebound(to: UInt8.self, capacity: length) {
+            String(decoding: UnsafeBufferPointer(start: $0, count: length), as: UTF8.self)
+        }
+    }
+
+    @Test func rangeTextFormatsAnExplicitRangeWithoutTouchingTheActiveSelection() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+        write(session, "hello world   \r\nsecond line")
+        setSelection(session, startX: 0, startY: 0, endX: 4, endY: 0)
+
+        #expect(rangeText(session, startX: 6, startY: 0, endX: 19, endY: 1) == "world\nsecond line")
+        #expect(rangeText(session, startX: 6, startY: 0, endX: 9, endY: 1, rectangle: true) == "worl\n lin")
+        #expect(selectionText(session) == "hello")
+    }
+
+    @Test func selectAllStateReportsTheFirstToLastNonBlankCellWithoutSelecting() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+        write(session, "  first\r\n\r\nlast   \r\n")
+
+        var state = SpacesGhosttyVtSelectionState()
+        #expect(spaces_ghostty_vt_session_select_all_state(session, &state))
+
+        #expect(state.present && state.valid)
+        #expect((state.start_x, state.start_y, state.end_x, state.end_y) == (2, 0, 3, 2))
+        #expect(!(try selectionState(session)).present)
+    }
+
+    @Test func selectAllStateOfABlankScreenIsAbsent() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        var state = SpacesGhosttyVtSelectionState()
+        #expect(spaces_ghostty_vt_session_select_all_state(session, &state))
+
+        #expect(!state.present)
+    }
+
     // MARK: - Tracked anchoring
 
     /// A selection anchored to a row stays pinned to that same physical row (and so reads back with
@@ -151,11 +191,11 @@ import ghosttyvtshim
         defer { spaces_ghostty_vt_session_free(session) }
         write(session, "line0\r\nline1\r\nline2\r\nline3\r\n")
 
-        #expect(setSelection(session, startX: 0, startY: 0, endX: 4, endY: 0)) // anchors to the oldest row
+        #expect(setSelection(session, startX: 0, startY: 0, endX: 4, endY: 0))  // anchors to the oldest row
         let before = try selectionState(session)
         #expect(before.present && before.valid)
 
-        write(session, "line4\r\nline5\r\n") // grows scrollback, well under the byte cap: no trim
+        write(session, "line4\r\nline5\r\n")  // grows scrollback, well under the byte cap: no trim
 
         let after = try selectionState(session)
         #expect(after.present)
@@ -181,11 +221,11 @@ import ghosttyvtshim
         defer { spaces_ghostty_vt_session_free(session) }
         write(session, "line0000000000000000\r\n")
 
-        #expect(setSelection(session, startX: 0, startY: 0, endX: 4, endY: 0)) // anchors to the row now being trimmed
+        #expect(setSelection(session, startX: 0, startY: 0, endX: 4, endY: 0))  // anchors to the row now being trimmed
         let before = try selectionState(session)
         #expect(before.present && before.valid)
 
-        let filler = String(repeating: "abcdefghijklmnopqrst\r\n", count: 100_000) // ~2.3MB, several pages
+        let filler = String(repeating: "abcdefghijklmnopqrst\r\n", count: 100_000)  // ~2.3MB, several pages
         write(session, filler)
 
         let after = try selectionState(session)
@@ -224,7 +264,7 @@ import ghosttyvtshim
     @Test func takeScrollRectsReportsPendingRectsOnceThenDrainsToEmpty() throws {
         let session = try makeSession(columns: 20, rows: 3, maxScrollback: 1 << 20)
         defer { spaces_ghostty_vt_session_free(session) }
-        write(session, "line0\r\nline1\r\nline2\r\nline3\r\n") // one line past the 3-row active area
+        write(session, "line0\r\nline1\r\nline2\r\nline3\r\n")  // one line past the 3-row active area
 
         let first = takeScrollRects(session)
         #expect(!first.overflowed)

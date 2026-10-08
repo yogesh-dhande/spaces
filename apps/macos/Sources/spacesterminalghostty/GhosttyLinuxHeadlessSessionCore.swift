@@ -2248,8 +2248,8 @@
                 return nil
             }
             return GhosttyTerminalSelectionProjection.project(
-                startColumn: state.start_x, startRow: state.start_y, endColumn: state.end_x, endRow: state.end_y, isRectangle: state.rectangle,
-                viewportRowOffset: viewportRowOffset, columns: columns, rows: rows)
+                startColumn: state.start_x, startRow: Int64(state.start_y), endColumn: state.end_x, endRow: Int64(state.end_y),
+                isRectangle: state.rectangle, viewportRowOffset: Int64(viewportRowOffset), columns: columns, rows: rows)
         }
 
         /// Copies out and clears the session's pending render scroll rects. The buffer capacity matches

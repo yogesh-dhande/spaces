@@ -74,6 +74,7 @@ typedef GhosttyResult (*GhosttyTerminalPointFromGridRefFn)(GhosttyTerminal, cons
 typedef GhosttyResult (*GhosttyTerminalSelectionFormatAllocFn)(
     GhosttyTerminal, const GhosttyAllocator *, GhosttyTerminalSelectionFormatOptions, uint8_t **, size_t *
 );
+typedef GhosttyResult (*GhosttyTerminalSelectAllFn)(GhosttyTerminal, GhosttySelection *);
 typedef size_t (*GhosttyTerminalTakeRenderScrollRectsFn)(GhosttyTerminal, GhosttyTerminalScrollRect *, size_t, bool *);
 typedef GhosttyResult (*GhosttyTerminalSetActiveScreenFn)(GhosttyTerminal, GhosttyTerminalScreen);
 typedef GhosttyResult (*GhosttyTerminalTabstopFn)(GhosttyTerminal, uint16_t, bool *);
@@ -134,6 +135,7 @@ typedef GhosttyResult (*GhosttyTerminalTabstopFn)(GhosttyTerminal, uint16_t, boo
     X(terminal_grid_ref, GhosttyTerminalGridRefFn, ghostty_terminal_grid_ref)                                                  \
     X(terminal_point_from_grid_ref, GhosttyTerminalPointFromGridRefFn, ghostty_terminal_point_from_grid_ref)                   \
     X(terminal_selection_format_alloc, GhosttyTerminalSelectionFormatAllocFn, ghostty_terminal_selection_format_alloc)         \
+    X(terminal_select_all, GhosttyTerminalSelectAllFn, ghostty_terminal_select_all)                                            \
     X(terminal_take_render_scroll_rects, GhosttyTerminalTakeRenderScrollRectsFn, ghostty_terminal_take_render_scroll_rects) \
     X(terminal_set_active_screen, GhosttyTerminalSetActiveScreenFn, ghostty_terminal_set_active_screen)                        \
     X(terminal_tabstop, GhosttyTerminalTabstopFn, ghostty_terminal_tabstop)
@@ -1782,8 +1784,16 @@ static bool spaces_ghostty_vt_session_screen_grid_ref(
     return session->symbols.terminal_grid_ref(session->terminal, point, out_ref) == GHOSTTY_SUCCESS;
 }
 
-bool spaces_ghostty_vt_session_set_selection(
-    SpacesGhosttyVtSession *session, uint16_t start_x, uint32_t start_y, uint16_t end_x, uint32_t end_y, bool rectangle
+// Builds an untracked selection snapshot from two screen-space endpoints, clamped into the screen
+// extent. The snapshot is valid until the next mutating terminal call.
+static bool spaces_ghostty_vt_session_screen_selection(
+    SpacesGhosttyVtSession *session,
+    uint16_t start_x,
+    uint32_t start_y,
+    uint16_t end_x,
+    uint32_t end_y,
+    bool rectangle,
+    GhosttySelection *out_selection
 ) {
     if (session == NULL || session->terminal == NULL) return false;
 
@@ -1804,7 +1814,15 @@ bool spaces_ghostty_vt_session_set_selection(
     selection.start = start_ref;
     selection.end = end_ref;
     selection.rectangle = rectangle;
+    *out_selection = selection;
+    return true;
+}
 
+bool spaces_ghostty_vt_session_set_selection(
+    SpacesGhosttyVtSession *session, uint16_t start_x, uint32_t start_y, uint16_t end_x, uint32_t end_y, bool rectangle
+) {
+    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    if (!spaces_ghostty_vt_session_screen_selection(session, start_x, start_y, end_x, end_y, rectangle, &selection)) return false;
     return session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection) == GHOSTTY_SUCCESS;
 }
 
@@ -1813,7 +1831,10 @@ void spaces_ghostty_vt_session_clear_selection(SpacesGhosttyVtSession *session) 
     session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
 }
 
-char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *session, size_t *out_len) {
+// Formats `selection` (NULL means the terminal's active selection) with Ghostty's copy semantics.
+static char *spaces_ghostty_vt_session_format_selection_text(
+    SpacesGhosttyVtSession *session, const GhosttySelection *selection, size_t *out_len
+) {
     if (out_len != NULL) *out_len = 0;
     if (session == NULL || session->terminal == NULL) return NULL;
 
@@ -1821,7 +1842,7 @@ char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *sess
     options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
     options.unwrap = true;
     options.trim = true;
-    options.selection = NULL;  // The terminal's current active selection.
+    options.selection = selection;
 
     uint8_t *formatted = NULL;
     size_t formatted_len = 0;
@@ -1844,8 +1865,51 @@ char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *sess
     return result;
 }
 
+char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *session, size_t *out_len) {
+    return spaces_ghostty_vt_session_format_selection_text(session, NULL, out_len);
+}
+
+char *spaces_ghostty_vt_session_range_text_copy(
+    SpacesGhosttyVtSession *session, uint16_t start_x, uint32_t start_y, uint16_t end_x, uint32_t end_y, bool rectangle, size_t *out_len
+) {
+    if (out_len != NULL) *out_len = 0;
+    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    if (!spaces_ghostty_vt_session_screen_selection(session, start_x, start_y, end_x, end_y, rectangle, &selection)) return NULL;
+    return spaces_ghostty_vt_session_format_selection_text(session, &selection, out_len);
+}
+
 void spaces_ghostty_vt_session_selection_text_free(char *text) {
     free(text);
+}
+
+// Writes `selection`'s screen-space endpoints into `out`, ordered so (start_y, start_x) <= (end_y, end_x).
+// GhosttySelection endpoints preserve drag direction and may be reversed; this flattens that for
+// callers that need the selected span rather than which end the drag started from.
+static bool spaces_ghostty_vt_session_fill_selection_coordinates(
+    SpacesGhosttyVtSession *session, const GhosttySelection *selection, SpacesGhosttyVtSelectionState *out
+) {
+    GhosttyPointCoordinate start_coordinate = {0};
+    GhosttyPointCoordinate end_coordinate = {0};
+    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection->start, GHOSTTY_POINT_TAG_SCREEN, &start_coordinate) !=
+        GHOSTTY_SUCCESS) {
+        return false;
+    }
+    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection->end, GHOSTTY_POINT_TAG_SCREEN, &end_coordinate) !=
+        GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    bool reversed =
+        start_coordinate.y > end_coordinate.y || (start_coordinate.y == end_coordinate.y && start_coordinate.x > end_coordinate.x);
+    GhosttyPointCoordinate ordered_start = reversed ? end_coordinate : start_coordinate;
+    GhosttyPointCoordinate ordered_end = reversed ? start_coordinate : end_coordinate;
+
+    out->rectangle = selection->rectangle;
+    out->start_x = ordered_start.x;
+    out->start_y = ordered_start.y;
+    out->end_x = ordered_end.x;
+    out->end_y = ordered_end.y;
+    return true;
 }
 
 bool spaces_ghostty_vt_session_selection_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out) {
@@ -1873,31 +1937,22 @@ bool spaces_ghostty_vt_session_selection_state(SpacesGhosttyVtSession *session, 
     if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection) != GHOSTTY_SUCCESS) {
         return false;
     }
+    return spaces_ghostty_vt_session_fill_selection_coordinates(session, &selection, out);
+}
 
-    GhosttyPointCoordinate start_coordinate = {0};
-    GhosttyPointCoordinate end_coordinate = {0};
-    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection.start, GHOSTTY_POINT_TAG_SCREEN, &start_coordinate) !=
-        GHOSTTY_SUCCESS) {
-        return false;
-    }
-    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection.end, GHOSTTY_POINT_TAG_SCREEN, &end_coordinate) !=
-        GHOSTTY_SUCCESS) {
-        return false;
-    }
+bool spaces_ghostty_vt_session_select_all_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out) {
+    if (out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (session == NULL || session->terminal == NULL) return false;
 
-    // GhosttySelection endpoints preserve drag direction and may be reversed; order them here so
-    // callers get the selected span rather than which end the drag started from.
-    bool reversed =
-        start_coordinate.y > end_coordinate.y || (start_coordinate.y == end_coordinate.y && start_coordinate.x > end_coordinate.x);
-    GhosttyPointCoordinate ordered_start = reversed ? end_coordinate : start_coordinate;
-    GhosttyPointCoordinate ordered_end = reversed ? start_coordinate : end_coordinate;
+    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    GhosttyResult result = session->symbols.terminal_select_all(session->terminal, &selection);
+    if (result == GHOSTTY_NO_VALUE) return true;  // No selectable content; `out` is already zeroed.
+    if (result != GHOSTTY_SUCCESS) return false;
 
-    out->rectangle = selection.rectangle;
-    out->start_x = ordered_start.x;
-    out->start_y = ordered_start.y;
-    out->end_x = ordered_end.x;
-    out->end_y = ordered_end.y;
-    return true;
+    out->present = true;
+    out->valid = true;
+    return spaces_ghostty_vt_session_fill_selection_coordinates(session, &selection, out);
 }
 
 void spaces_ghostty_vt_snapshot_free(SpacesGhosttyVtSnapshot *snapshot) {

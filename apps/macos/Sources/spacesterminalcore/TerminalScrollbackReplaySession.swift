@@ -11,10 +11,10 @@ import ghosttyvtshim
 final class TerminalScrollbackReplaySession: @unchecked Sendable {
     private let session: OpaquePointer
 
-    /// Builds the replay session and writes the transcript into it. Fails (returns nil) when the vt
-    /// session cannot be created or the transcript cannot be replayed, so the caller can mark
-    /// scrollback unavailable rather than present a broken viewport.
-    init?(columns: Int, rows: Int, maxScrollbackBytes: Int, theme: GhosttyThemeExport, appearance: ThemeAppearance, transcript: Data) {
+    /// Builds an empty replay session; the caller writes the transcript into it, in as many pieces as it
+    /// needs to read the session's state between them. Fails (returns nil) when the vt session cannot be
+    /// created, so the caller can mark scrollback unavailable rather than present a broken viewport.
+    init?(columns: Int, rows: Int, maxScrollbackBytes: Int, theme: GhosttyThemeExport, appearance: ThemeAppearance) {
         var packedTheme = GhosttyVtSessionBridge.packTheme(theme, appearance: appearance)
         guard
             let session = withUnsafePointer(
@@ -24,10 +24,6 @@ final class TerminalScrollbackReplaySession: @unchecked Sendable {
                 })
         else { return nil }
         self.session = session
-        guard write(transcript) else {
-            spaces_ghostty_vt_session_free(session)
-            return nil
-        }
     }
 
     deinit { spaces_ghostty_vt_session_free(session) }
@@ -42,18 +38,49 @@ final class TerminalScrollbackReplaySession: @unchecked Sendable {
         }
     }
 
-    /// Scrolls the replay viewport by `deltaRows` and returns the resulting snapshot, or nil when the
-    /// viewport offset did not move (already at the top or bottom boundary) so the caller can skip
-    /// pushing a duplicate frame. Mirrors the Linux daemon scroll handler's boundary check.
-    func scroll(deltaRows: Int) -> GhosttyTerminalSnapshot? {
+    /// Scrolls the replay viewport by `deltaRows` and reports whether the viewport offset moved (false at
+    /// the top or bottom boundary) so the caller can skip pushing a duplicate frame. Mirrors the Linux
+    /// daemon scroll handler's boundary check.
+    func scroll(deltaRows: Int) -> Bool {
         var before = SpacesGhosttyVtScrollbar()
         var after = SpacesGhosttyVtScrollbar()
-        guard spaces_ghostty_vt_session_scroll_viewport_with_info(session, deltaRows, &before, &after) else { return nil }
-        guard before.offset != after.offset else { return nil }
-        return currentSnapshot()
+        guard spaces_ghostty_vt_session_scroll_viewport_with_info(session, deltaRows, &before, &after) else { return false }
+        return before.offset != after.offset
     }
 
-    func currentSnapshot() -> GhosttyTerminalSnapshot {
+    /// The replay's history position: scrollbar, rows pruned off its top, and its history epoch, read
+    /// together. Nil only for an invalid session (see `TerminalLocalScrollbackModel.scrollbar`).
+    func historyPosition() -> SpacesGhosttyVtHistoryPosition? {
+        var position = SpacesGhosttyVtHistoryPosition()
+        guard spaces_ghostty_vt_session_history_position(session, &position) else { return nil }
+        return position
+    }
+
+    /// The text of screen rows `[startRow, endRow]` (row 0 is the oldest row the replay holds) in the
+    /// shim's copy format, without touching the session's own selection. Endpoints must be ordered; a
+    /// rectangle's columns may come in either order.
+    func text(startColumn: Int, startRow: Int, endColumn: Int, endRow: Int, isRectangle: Bool) -> String? {
+        var length = 0
+        guard
+            let pointer = spaces_ghostty_vt_session_range_text_copy(
+                session, UInt16(clamping: startColumn), UInt32(clamping: startRow), UInt16(clamping: endColumn), UInt32(clamping: endRow),
+                isRectangle, &length)
+        else { return nil }
+        defer { spaces_ghostty_vt_session_selection_text_free(pointer) }
+        return pointer.withMemoryRebound(to: UInt8.self, capacity: length) {
+            String(decoding: UnsafeBufferPointer(start: $0, count: length), as: UTF8.self)
+        }
+    }
+
+    /// libghostty-vt's select-all span in screen rows, nil when the replay holds no text.
+    func selectAllSpan() -> (startColumn: Int, startRow: Int, endColumn: Int, endRow: Int)? {
+        var state = SpacesGhosttyVtSelectionState()
+        guard spaces_ghostty_vt_session_select_all_state(session, &state), state.present else { return nil }
+        return (Int(state.start_x), Int(state.start_y), Int(state.end_x), Int(state.end_y))
+    }
+
+    /// The snapshot of the viewport, stamped with the history coordinates the caller resolved for it.
+    func currentSnapshot(historyRowBase: UInt64, historyEpoch: UInt64) -> GhosttyTerminalSnapshot {
         var rawSnapshot = SpacesGhosttyVtSnapshot()
         guard spaces_ghostty_vt_session_copy_snapshot(session, &rawSnapshot) else {
             return GhosttyTerminalSnapshot(
@@ -64,7 +91,8 @@ final class TerminalScrollbackReplaySession: @unchecked Sendable {
         // active screen is read from the session itself: the replayed bytes can leave the terminal on the
         // alternate screen, and a frame that misreported that would describe a screen the replay is not on.
         return GhosttyVtSessionBridge.snapshot(
-            from: rawSnapshot, mouseReportingActive: false, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session))
+            from: rawSnapshot, mouseReportingActive: false, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session),
+            historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }
 
     func scrollbar() -> TerminalScrollbackReplayScrollbar? {
