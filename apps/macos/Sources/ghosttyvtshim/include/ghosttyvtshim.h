@@ -412,8 +412,11 @@ size_t spaces_ghostty_vt_session_take_scroll_rects(
 // Serializes the session's current persistent terminal state as a self-contained escape-sequence
 // preamble, so a replay that begins at the preamble restores the terminal state the bytes before it had
 // established (alt-screen, mouse reporting, bracketed paste, DECCKM, Kitty keyboard flags, scrolling
-// region, charset designations, cursor position) and repaints the active screen's visible grid (cell
-// text, colors, and style flags) so cells the following bytes never redraw are not lost. The buffer is
+// region, charset designations, tab stops, saved cursor, cursor position) and repaints the visible grid
+// (cell text, colors, and style flags) so cells the following bytes never redraw are not lost. When the
+// alternate screen is active both screens are restored, so an exit in the following bytes returns to the
+// primary screen the program covered. The session is switched to the primary screen while it is read and
+// is switched back before returning. The buffer is
 // malloc'd and must be freed with `spaces_ghostty_vt_free_buffer`. Returns false (and leaves `*out_ptr`
 // NULL) on failure.
 bool spaces_ghostty_vt_session_state_preamble(
