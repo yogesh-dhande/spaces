@@ -44,12 +44,17 @@ import spacesterminalcore
 
     /// Mirrors `AutomationEditorController.makeAgentPromptEditor`: a prose text view at the form's
     /// prompt width, wrapped by the shared helper.
-    private func makePromptEditor(seed: String) -> (NSTextView, AutoGrowingTextScrollView) {
+    ///
+    /// The scroller style is forced because it decides whether a visible scroller takes width from the
+    /// text: a Mac with a trackpad uses overlay scrollers, while a VM or a mouse-only Mac (or "Show
+    /// scroll bars: Always") uses legacy ones. The result must not depend on it.
+    private func makePromptEditor(seed: String, scrollerStyle: NSScroller.Style = .legacy) -> (NSTextView, AutoGrowingTextScrollView) {
         let textView = NSTextView()
         textView.string = seed
         textView.isRichText = false
         textView.font = Typography.body
         let scroll = scrollableTextView(textView, lines: .growingFormEditor, inputBackgroundColor: .textBackgroundColor, borderColor: .separatorColor)
+        scroll.scrollerStyle = scrollerStyle
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 640))
         container.addSubview(scroll)
@@ -114,5 +119,49 @@ import spacesterminalcore
 
         let pinned = TextEditorHeightRule(bounds: .fixed(6), font: Typography.monoMetadata, verticalInset: 6)
         #expect(scroll.heightConstraint.constant == pinned.minimumHeight)
+    }
+
+    /// Typing past the minimum while the window is on screen lets the run loop's display-link flush
+    /// lay the window out between keystrokes. With legacy scrollers the editor used to alternate
+    /// between two heights there until AppKit aborted the process ("more Layout Window passes than
+    /// there are views"), so reaching the end of this test is the assertion that layout converges.
+    @Test(arguments: [NSScroller.Style.legacy, .overlay]) func typingWrappedLinesConvergesWhileTheWindowIsOnScreen(style: NSScroller.Style) {
+        let (textView, scroll) = makePromptEditor(seed: "first line", scrollerStyle: style)
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+
+        for index in 2...40 {
+            let line = "\nline \(index) with some more words to wrap around the edge of the editor maybe"
+            textView.insertText(line, replacementRange: NSRange(location: textView.string.utf16.count, length: 0))
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        #expect(scroll.heightConstraint.constant == rule.maximumHeight)
+        #expect(scroll.hasVerticalScroller)
+    }
+
+    /// The scroller exists only while the text overflows the cap, so a text that fits never loses
+    /// width to it and a text past the cap always scrolls.
+    @Test(arguments: [NSScroller.Style.legacy, .overlay]) func scrollerAppearsOnlyPastTheCap(style: NSScroller.Style) {
+        let (textView, scroll) = makePromptEditor(seed: "first line", scrollerStyle: style)
+        #expect(!scroll.hasVerticalScroller)
+        for index in 2...8 { textView.insertText("\nline \(index)", replacementRange: NSRange(location: textView.string.utf16.count, length: 0)) }
+        #expect(!scroll.hasVerticalScroller)
+        for index in 9...40 { textView.insertText("\nline \(index)", replacementRange: NSRange(location: textView.string.utf16.count, length: 0)) }
+        #expect(scroll.hasVerticalScroller)
+    }
+
+    /// Text whose line breaking depends on the text system's script handling (CJK has no spaces, emoji
+    /// are multi-scalar clusters) must be measured by the same text system that renders it. The
+    /// expected height is what the editor itself lays out.
+    @Test(arguments: [NSScroller.Style.legacy, .overlay], ["日本語漢字句中文测试 ", "👨‍👩‍👧‍👦🎉🙂 "]) func heightMatchesWhatTheEditorLaysOut(
+        style: NSScroller.Style, unit: String
+    ) {
+        let (textView, scroll) = makePromptEditor(seed: String(repeating: unit, count: 25), scrollerStyle: style)
+        let ownLayout = try! #require(textView.layoutManager)
+        let ownContainer = try! #require(textView.textContainer)
+        ownLayout.ensureLayout(for: ownContainer)
+        let rendered = ownLayout.usedRect(for: ownContainer).height
+        #expect(rendered > 2 * rule.lineHeight)
+        #expect(scroll.heightConstraint.constant == rule.height(forUsedTextHeight: rendered))
     }
 }
