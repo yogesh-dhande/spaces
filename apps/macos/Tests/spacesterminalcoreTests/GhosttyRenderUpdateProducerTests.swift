@@ -83,19 +83,6 @@ struct GhosttyRenderUpdateProducerTests {
         #expect(producer.baseline?.sessionRevision == 2)
     }
 
-    /// A one-shot read drains Ghostty's pending scroll rects and cannot ship them (it forces a full frame,
-    /// and a full frame carries none), so the next stream delta must still report that movement.
-    @Test func aOneShotReadCarriesItsDrainedScrollRectsIntoTheNextStreamDelta() {
-        var producer = GhosttyRenderUpdateProducer()
-        _ = producer.makeUpdate(for: frame(lines: ["one", "two"], revision: 1), reason: .initial, exportMode: .streamDeltaAllowed)
-        let rect = GhosttyRenderScrollRectOperation(rowStart: 0, rowCount: 2, columnStart: 0, columnCount: 3, deltaRows: 1, deltaColumns: 0)
-        _ = producer.makeUpdate(
-            for: frame(lines: ["one", "two"], revision: 1), reason: .output, nativeScrollRects: [rect], exportMode: .selfContained)
-
-        let update = producer.makeUpdate(for: frame(lines: ["xxx", "one"], revision: 2), reason: .output, exportMode: .streamDeltaAllowed)
-        #expect(update.delta?.scrollRects == [rect])
-    }
-
     private func frame(lines: [String], revision: UInt64, ownerEpoch: UInt64 = 1) -> GhosttyRenderFrame {
         GhosttyRenderFrame(sessionRevision: revision, ownerEpoch: ownerEpoch, snapshot: makeSnapshot(lines: lines))
     }

@@ -95,7 +95,7 @@ public enum GhosttyTerminalSnapshotViewport {
         return cropped
     }
 
-    /// Rebases the shared selection into the cropped grid, the same way `croppedCellText` rebases the
+    /// Rebases the selection into the cropped grid, the same way `croppedCellText` rebases the
     /// per-cell text tables: an entry entirely outside the window disappears, and one that straddles a
     /// window edge is clamped to it with the extends flags recording what got cut off.
     ///

@@ -9,13 +9,13 @@ import spacesterminalghostty
 public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let renderedOutput: String
     public let visibleSurfaceOutput: String?
-    /// The live surface's shared-selection text (the daemon-owned selection the mirror paints from
-    /// streamed frames), gated the same as `visibleSurfaceOutput`. Nil when the terminal container is
-    /// hidden, there is no surface, or there is no active selection.
+    /// The live surface's selection text (this client's own selection, painted into the mirror),
+    /// gated the same as `visibleSurfaceOutput`. Nil when the terminal container is hidden, there is no
+    /// surface, or there is no active selection.
     public let surfaceSelectionText: String?
     /// Whether the pane is painting its own local replay of scrollback rather than the session's own
-    /// frames. While true, `surfaceSelectionText` is nil even if the shared selection's text is still
-    /// scrolled into view: painting it is a replay row's own local highlight, not the shared selection.
+    /// frames. While true, `surfaceSelectionText` is nil even if the selection's text is still scrolled
+    /// into view: painting it is a replay row's own local highlight.
     public let isShowingLocalScrollbackFrame: Bool
     public let showsTerminalSurface: Bool
     public let showsTextRenderer: Bool

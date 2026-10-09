@@ -10,9 +10,9 @@ import spacesterminalcore
 /// already made, and the highlight has to stay on the words they picked: what they copy afterwards
 /// is what they saw highlighted, not a range the new output moved or erased.
 ///
-/// The selection is the pane's own, kept in absolute rows and painted onto every frame, while a drag
-/// still in progress rides the stream's scroll-rect carry. The harness below stands in for the daemon's
-/// frames.
+/// The selection is the pane's own, kept in absolute rows and painted onto every frame, and a drag in
+/// progress anchors at the cell the pane supplies with each frame. The harness below stands in for the
+/// daemon's frames.
 @MainActor final class GhosttyMirrorSelectionAcrossFramesTests: XCTestCase {
     /// One row of distinct characters, so any two ranges of it differ in text. The frame that arrives
     /// mid-selection changes only the far-right end of the row, well right of every cell the drags
@@ -65,8 +65,8 @@ import spacesterminalcore
         XCTAssertEqual(view.debugSurfaceSelectionText, selected, "output printed after the selection moved it off the selected text")
     }
 
-    /// The host's shared selection rides every frame; a pane paints its own selection instead, so a
-    /// frame carrying a selection somebody else made highlights nothing here.
+    /// A pane paints its own selection in place of any a frame carries, so a frame carrying a selection
+    /// somebody else made highlights nothing here.
     func testAFrameCarryingAnotherClientsSelectionPaintsNothing() throws {
         let view = makeAttachedView(sessionID: "sel-frames-foreign")
         defer { view.removeFromSuperview() }
@@ -179,17 +179,13 @@ import spacesterminalcore
 
     /// The frame the session sends while the user is selecting: the same row with only its far-right
     /// end rewritten, which is how a test tells an applied frame from a pending one without touching
-    /// any cell either drag covers. Delivered the way the daemon streams it: a delta continuation
-    /// whose scroll rects say nothing moved (empty and not overflowed), carrying whatever selection
-    /// the daemon holds. A default-initialized frame would instead claim an untrustworthy carry,
-    /// which cancels an in-progress drag by design.
+    /// any cell either drag covers.
     private func applyChangedFrame(to view: GhosttyMirrorTerminalView, renderStateKey: String, selection: GhosttyTerminalSelectionRange? = nil) throws
     {
         let grid = try paneGrid(of: view)
         let changed = String(Self.row.dropLast(Self.changedSuffix.count)) + Self.changedSuffix
         let frame = GhosttyRenderFrame(
-            sessionRevision: nil, ownerEpoch: 0, snapshot: Self.snapshot(text: changed, columns: grid.columns, rows: grid.rows, selection: selection),
-            scrollRects: [], scrollRectsOverflowed: false)
+            sessionRevision: nil, ownerEpoch: 0, snapshot: Self.snapshot(text: changed, columns: grid.columns, rows: grid.rows, selection: selection))
         view.update(frame: frame, renderStateKey: renderStateKey)
         try waitFor("the pane to paint the later output") { view.debugMirrorSurfaceText?.contains(Self.changedSuffix) ?? false }
     }

@@ -85,10 +85,6 @@
         private var textSize: TerminalTextSize = .default
         private var latestFrame: GhosttyRenderFrame?
         private var renderStateKey = ""
-        /// Scroll rects accumulated since the last frame this view successfully applied, so a local
-        /// drag anchor can be carried through frames that arrive faster than the mirror applies them.
-        /// See `GhosttyMirrorSelectionMarshalling.ScrollRectCarryBuffer` for the poisoning rules.
-        private var scrollRectCarryBuffer = GhosttyMirrorSelectionMarshalling.ScrollRectCarryBuffer()
         private var lastGeometry: SurfaceGeometry?
         private var lastPushedSurfaceOcclusion: Bool?
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
@@ -546,10 +542,6 @@
         }
 
         func update(frame: GhosttyRenderFrame?, renderStateKey: String) {
-            // Accumulate this frame's contribution to the drag-carry buffer before attempting to apply
-            // it, and only once per distinct frame: a repeat delivery of the same frame (the renderer
-            // reapplying state with nothing new to say) describes no additional movement.
-            if let frame, frame != latestFrame { scrollRectCarryBuffer.append(rects: frame.scrollRects, overflowed: frame.scrollRectsOverflowed) }
             self.renderStateKey = renderStateKey
             latestFrame = frame
             if let frame { dropClientSelectionNotInEpoch(of: frame.snapshot) }
@@ -1196,8 +1188,7 @@
             selectionAutoscrollTask = nil
         }
 
-        /// The snapshot as it is painted: the client's selection in place of the frame's own, which is
-        /// the host's shared selection that no pane shows any more.
+        /// The snapshot as it is painted: the client's selection in place of any the frame carries.
         private func paintedSnapshot(_ snapshot: GhosttyTerminalSnapshot) -> GhosttyTerminalSnapshot {
             guard snapshot.selection != nil || clientSelection != nil else { return snapshot }
             return snapshot.withClientSelection(clientSelection)
@@ -1510,7 +1501,6 @@
                 }
                 lastAppliedRenderFrameIdentity = identity
                 frameApplyRetry = nil
-                scrollRectCarryBuffer.clear()
                 debugRenderFrameApplyCount += 1
                 return
             }
@@ -1547,7 +1537,6 @@
             lastAppliedRenderFrameIdentity = identity
             shownSnapshot = frame.snapshot
             frameApplyRetry = nil
-            scrollRectCarryBuffer.clear()
             GhosttyMirrorAppService.shared.tick()
             surfaceHostView.needsDisplay = true
             scheduleSurfacePresentationRefresh()
@@ -1651,15 +1640,6 @@
             var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
             let selectionFields = GhosttyMirrorSelectionMarshalling.cSnapshotSelectionFields(
                 selection: snapshot.selection, scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset)
-            // Read before the apply attempt below and cleared by the caller only once that attempt
-            // succeeds, so a refused frame leaves the gap it covers in the buffer for the next attempt.
-            var scrollRects = scrollRectCarryBuffer.rects.map { rect in
-                ghostty_render_scroll_rect_s(
-                    row_start: UInt16(clamping: rect.rowStart), row_count: UInt16(clamping: rect.rowCount),
-                    column_start: UInt16(clamping: rect.columnStart), column_count: UInt16(clamping: rect.columnCount),
-                    delta_rows: Int32(clamping: rect.deltaRows), delta_columns: Int32(clamping: rect.deltaColumns))
-            }
-            let scrollCarryValid = scrollRectCarryBuffer.isCarryValid
             return clusterExtras.codepoints.withUnsafeMutableBufferPointer { extras in
                 if let base = extras.baseAddress {
                     for placement in clusterExtras.placements {
@@ -1668,42 +1648,37 @@
                     }
                 }
                 return cells.withUnsafeMutableBufferPointer { buffer in
-                    scrollRects.withUnsafeMutableBufferPointer { scrollRectsBuffer in
-                        var cSnapshot = ghostty_terminal_snapshot_s()
-                        cSnapshot.columns = UInt16(snapshot.columns)
-                        cSnapshot.rows = UInt16(snapshot.rows)
-                        cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
-                        cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
-                        cSnapshot.cursor_visible = snapshot.cursorVisible
-                        cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
-                        cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
-                        cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
-                        cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
-                        cSnapshot.cell_count = buffer.count
-                        cSnapshot.cells = buffer.baseAddress
-                        cSnapshot.scroll_rect_count = scrollRectsBuffer.count
-                        cSnapshot.scroll_rects = scrollRectsBuffer.baseAddress
-                        cSnapshot.scroll_carry_valid = scrollCarryValid
-                        cSnapshot.selection_flags = selectionFields.selectionFlags
-                        cSnapshot.selection_start_x = selectionFields.selectionStartX
-                        cSnapshot.selection_start_y = selectionFields.selectionStartY
-                        cSnapshot.selection_end_x = selectionFields.selectionEndX
-                        cSnapshot.selection_end_y = selectionFields.selectionEndY
-                        cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
-                        cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
-                        cSnapshot.drag_anchor_valid = dragAnchor != nil
-                        cSnapshot.drag_anchor_x = dragAnchor?.column ?? 0
-                        cSnapshot.drag_anchor_y = dragAnchor?.row ?? 0
+                    var cSnapshot = ghostty_terminal_snapshot_s()
+                    cSnapshot.columns = UInt16(snapshot.columns)
+                    cSnapshot.rows = UInt16(snapshot.rows)
+                    cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
+                    cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
+                    cSnapshot.cursor_visible = snapshot.cursorVisible
+                    cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
+                    cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                    cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
+                    cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
+                    cSnapshot.cell_count = buffer.count
+                    cSnapshot.cells = buffer.baseAddress
+                    cSnapshot.selection_flags = selectionFields.selectionFlags
+                    cSnapshot.selection_start_x = selectionFields.selectionStartX
+                    cSnapshot.selection_start_y = selectionFields.selectionStartY
+                    cSnapshot.selection_end_x = selectionFields.selectionEndX
+                    cSnapshot.selection_end_y = selectionFields.selectionEndY
+                    cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
+                    cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
+                    cSnapshot.drag_anchor_valid = dragAnchor != nil
+                    cSnapshot.drag_anchor_x = dragAnchor?.column ?? 0
+                    cSnapshot.drag_anchor_y = dragAnchor?.row ?? 0
 
-                        var cFrame = ghostty_render_frame_s()
-                        cFrame.version = UInt32(frame.version)
-                        cFrame.session_revision = frame.sessionRevision ?? 0
-                        cFrame.owner_epoch = frame.ownerEpoch
-                        cFrame.columns = UInt16(snapshot.columns)
-                        cFrame.rows = UInt16(snapshot.rows)
-                        cFrame.snapshot = cSnapshot
-                        return withUnsafePointer(to: &cFrame, body)
-                    }
+                    var cFrame = ghostty_render_frame_s()
+                    cFrame.version = UInt32(frame.version)
+                    cFrame.session_revision = frame.sessionRevision ?? 0
+                    cFrame.owner_epoch = frame.ownerEpoch
+                    cFrame.columns = UInt16(snapshot.columns)
+                    cFrame.rows = UInt16(snapshot.rows)
+                    cFrame.snapshot = cSnapshot
+                    return withUnsafePointer(to: &cFrame, body)
                 }
             }
         }

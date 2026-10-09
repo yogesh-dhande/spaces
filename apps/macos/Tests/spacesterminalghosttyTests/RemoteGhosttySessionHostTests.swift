@@ -2765,7 +2765,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
     /// The jump control's new-output mark says the session *wrote* something while the user was reading
     /// back, not that a frame arrived. The daemon broadcasts a full frame for repaint-only events too -
-    /// another viewer changing the shared selection is one - and a reader scrolled into history must not
+    /// a resize or an appearance change is one - and a reader scrolled into history must not
     /// be told there is something new to come back to when nothing was written, nor pay for a
     /// continuation read that has nothing to read.
     @MainActor func testARepaintOnlyFrameDuringAReplayMarksNoNewOutput() throws {
@@ -2805,11 +2805,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("the pane shows its own transcript rows") { host.debugIsShowingLocalScrollbackFrame }
         _ = host.sendScroll(horizontal: 0, vertical: 0, scrollMods: gestureEnd, pointerPosition: nil)
 
-        // Another viewer changes the shared selection. A Linux daemon stamps every payload with where
-        // `output.log` ends, so this one carries a full frame at a transcript end that has not moved.
+        // A repaint with no new output. A Linux daemon stamps every payload with where `output.log` ends,
+        // so this one carries a full frame at a transcript end that has not moved.
         recorder.setPayload(
             try liveScrollbackPayload(
-                session, text: "sel-001\nsel-002\nsel-003\nsel-004\nsel-005", revision: 2, outputEndByteOffset: page.count, reason: .selection))
+                session, text: "sel-001\nsel-002\nsel-003\nsel-004\nsel-005", revision: 2, outputEndByteOffset: page.count))
         for _ in 0..<30 {
             host.requestSurfaceRefresh()
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
@@ -2826,7 +2826,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         // The same broadcast from a Mac daemon, which stamps that field on output payloads only: a full
         // frame with no transcript end at all, under a reason that is not output.
-        recorder.setPayload(try liveScrollbackPayload(session, text: "sel-011\nsel-012\nsel-013\nsel-014\nsel-015", revision: 3, reason: .selection))
+        recorder.setPayload(try liveScrollbackPayload(session, text: "sel-011\nsel-012\nsel-013\nsel-014\nsel-015", revision: 3))
         for _ in 0..<30 {
             host.requestSurfaceRefresh()
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
@@ -2859,10 +2859,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(provider.requests.last).fromByteOffset, UInt64(page.count))
     }
 
-    /// Select-all reaches every row the pane can replay, and it is the pane's own selection: no
-    /// selection request leaves the host, so no other viewer's screen changes. The span runs from the
-    /// first to the last row of the transcript, which the live screen alone does not hold.
-    @MainActor func testSelectAllSelectsTheWholeReplayWithoutTouchingTheSession() throws {
+    /// Select-all reaches every row the pane can replay: the span runs from the first to the last row of
+    /// the transcript, which the live screen alone does not hold.
+    @MainActor func testSelectAllSelectsTheWholeReplay() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let session = try makeLiveScrollbackSession(sessionID: "live-scrollback-selection", root: root)
@@ -2891,9 +2890,6 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("select-all selects the replay") { host.debugClientSelection != nil }
         let selection = try XCTUnwrap(host.debugClientSelection)
         XCTAssertLessThan(selection.start.row, selection.end.row)
-        let commands = controlCommands(recorder)
-        XCTAssertFalse(commands.contains("setSelection"), "select-all changed the selection every other viewer sees")
-        XCTAssertFalse(commands.contains("clearSelection"))
     }
 
     /// Discarding a replay (a keystroke, a resize, a relaunch) leaves any continuation read it started

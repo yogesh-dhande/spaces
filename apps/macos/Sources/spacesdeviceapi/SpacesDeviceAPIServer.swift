@@ -4047,12 +4047,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         logDeviceAPIPerformance(
             sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             attributes: responseAttributes)
-        // setSelection and readSelectionText carry their text on the control response rather than in
-        // session state (they are not owner-gated view changes, so they never includeSessionStateOnSuccess);
-        // surface it the same way sessionState surfaces above so mobile/remote clients receive it.
-        let result: SpacesDeviceAPIResult? =
-            sessionState.map(SpacesDeviceAPIResult.terminalState)
-            ?? response.selectionText.map { SpacesDeviceAPIResult.terminalSelectionText(SpacesDeviceTerminalOutputResult(text: $0)) }
+        let result = sessionState.map(SpacesDeviceAPIResult.terminalState)
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message, errorCode: response.errorCode, result: result)
     }
 
@@ -4093,13 +4088,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     clientID: clientID, ownerEpoch: payload.ownerEpoch, pointerX: payload.mousePointerX, pointerY: payload.mousePointerY,
                     pointerMods: payload.mousePointerMods))
         case .setAppearance: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: payload.appearance))
-        case .setSelection:
-            .setSelection(
-                TerminalControlSetSelectionPayload(
-                    clientID: clientID, startColumn: payload.selectionStartColumn, startRow: payload.selectionStartRow,
-                    endColumn: payload.selectionEndColumn, endRow: payload.selectionEndRow, rectangle: payload.selectionRectangle))
-        case .clearSelection: .clearSelection(TerminalControlClientPayload(clientID: clientID))
-        case .readSelectionText: .readSelectionText(TerminalControlClientPayload(clientID: clientID))
         }
     }
 

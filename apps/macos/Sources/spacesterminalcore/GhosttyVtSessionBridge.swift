@@ -37,16 +37,15 @@ public enum GhosttyVtSessionBridge {
     /// `spaces_ghostty_vt_snapshot_free`); this only reads it. Mouse tracking is not part of the raw
     /// snapshot (it is a terminal mode, queried separately), so the caller supplies it. The active
     /// screen is queried separately for the same reason: a caller with a live session passes
-    /// `alternateScreenActive(session:)`. Selection, scrollbar, and history position are likewise queried
-    /// separately (the shim has no per-snapshot equivalent of the embedded surface's combined export) and
-    /// default to absent/zero. The scrollback replay passes no selection or scrollbar (it has no live
-    /// selection, and the client owns its selection in absolute rows) but does pass `historyRowBase` and
-    /// `historyEpoch`, in the host's numbering once the replay is aligned with it
+    /// `alternateScreenActive(session:)`. Scrollbar and history position are likewise queried separately
+    /// (the shim has no per-snapshot equivalent of the embedded surface's combined export) and default
+    /// to zero. The snapshot carries no selection: the client owns its selection in absolute rows and
+    /// paints it onto the frames it displays. The scrollback replay passes no scrollbar but does pass
+    /// `historyRowBase` and `historyEpoch`, in the host's numbering once the replay is aligned with it
     /// (`TerminalLocalScrollbackModel`).
     public static func snapshot(
         from rawSnapshot: SpacesGhosttyVtSnapshot, mouseTrackingLevel: TerminalMouseTrackingLevel, alternateScreenActive: Bool,
-        selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0,
-        historyEpoch: UInt64 = 0
+        scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0, historyEpoch: UInt64 = 0
     ) -> GhosttyTerminalSnapshot {
         var cells: [GhosttyTerminalSnapshot.Cell] = []
         var clusters: [Int: String] = [:]
@@ -64,7 +63,7 @@ public enum GhosttyVtSessionBridge {
             columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
             cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
             defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells,
-            clusters: clusters, mouseTrackingLevel: mouseTrackingLevel, alternateScreenActive: alternateScreenActive, selection: selection,
+            clusters: clusters, mouseTrackingLevel: mouseTrackingLevel, alternateScreenActive: alternateScreenActive,
             scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset, historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }
 

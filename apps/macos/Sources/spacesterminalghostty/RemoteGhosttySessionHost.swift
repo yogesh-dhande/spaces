@@ -993,8 +993,8 @@
             // again (the transcript file the read names is what turns it into a rebuild).
             //
             // Its moving is also what proves the session printed, which is what the jump control's
-            // new-output mark reports. A frame's mere arrival is not proof: a resize, an appearance
-            // repaint, and another viewer's shared-selection change all export a fresh full frame with
+            // new-output mark reports. A frame's mere arrival is not proof: a resize and an appearance
+            // repaint both export a fresh full frame with
             // nothing new in the transcript, and counting those would tell a reader scrolled into history
             // there is new output to come back to when there is none. Only `.output` payloads stamp the
             // offset, so a payload carrying none is read by its reason instead, which is the same rule

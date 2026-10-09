@@ -1,9 +1,9 @@
 import Foundation
 
-/// A terminal selection projected into one viewport's grid: the daemon owns the shared selection in
-/// screen+scrollback coordinates and rebases it into each frame's viewport before export, so every field
-/// here is already relative to the frame that carries it and clipped to that frame's `columns`/`rows`
-/// (a coordinate past the grid is not a valid range). `startRow`/`startColumn` order before
+/// A terminal selection projected into one viewport's grid: a client keeps its selection in absolute
+/// rows and projects it onto each frame it paints, so every field here is relative to the frame that
+/// carries it and clipped to that frame's `columns`/`rows` (a coordinate past the grid is not a valid
+/// range). `startRow`/`startColumn` order before
 /// `endRow`/`endColumn` regardless of which end the selection's drag started from, so a consumer never
 /// has to compare the two ends before walking the range.
 ///

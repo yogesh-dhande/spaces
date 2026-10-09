@@ -10749,12 +10749,12 @@
         }
 
         /// A full frame that carries no output signal is not new output either, even though (unlike the
-        /// metadata-only payload above) it does carry a render update: another viewer changing the shared
-        /// selection broadcasts a fresh full frame under reason `.selection`, and only `.output` payloads
+        /// metadata-only payload above) it does carry a render update: a repaint-only full frame
+        /// broadcast under reason `.stateChange` is one, and only `.output` payloads
         /// stamp `outputEndByteOffset` (see `outputCarriesNewLocalScrollbackOutput`). Repainting the
         /// highlight must not mark the jump control or make the next gesture pay for a continuation read
         /// that would append zero bytes. A payload that does carry new output still does both.
-        func testSelectionBroadcastFullFrameDoesNotMarkNewOutputOrReadAContinuation() async throws {
+        func testRepaintOnlyFullFrameDoesNotMarkNewOutputOrReadAContinuation() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
             let model = try await Self.ownerModelShowingALiveScreen(
@@ -10768,9 +10768,9 @@
             XCTAssertFalse(model.hasNewOutputBelowScrollback, "a quiet session has printed nothing to mark")
 
             _ = await model.applyLatestState(
-                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, reason: .selection), isOutOfBand: false)
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, reason: .stateChange), isOutOfBand: false)
             XCTAssertTrue(model.isShowingLocalScrollFrame, "a repaint-only full frame must not disturb the replay on screen")
-            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a selection broadcast carries no offset and is not new output")
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a repaint-only broadcast carries no offset and is not new output")
 
             let requestsBeforeGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
             model.noteScrollGestureBegan()
@@ -11714,11 +11714,6 @@
             XCTAssertTrue(copied.contains("L00000000"), "the copy reaches the first row of the replay")
             XCTAssertTrue(copied.contains("L00000399"), "and the last")
             XCTAssertNotNil(model.clientSelection, "copying keeps the selection")
-            let copyRequests = await recorder.snapshot().filter {
-                if case .terminalControl(let payload) = $0.command { return payload.action == .readSelectionText }
-                return false
-            }
-            XCTAssertTrue(copyRequests.isEmpty, "the daemon is never asked for the selection's text")
         }
 
         /// A tap while Select All is still reading ends it, though nothing is painted yet to clear: the

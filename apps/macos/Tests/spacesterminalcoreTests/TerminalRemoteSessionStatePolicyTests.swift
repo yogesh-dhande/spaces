@@ -29,7 +29,7 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
             TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.sessionMetadata.rawValue),
             [.spacesTerminalSessionMetadataDidChange])
         let screenContentReasons: [TerminalRemoteSessionStateReason] = [
-            .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .selection, .resize,
+            .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .resize,
         ]
         for reason in screenContentReasons {
             XCTAssertEqual(
@@ -142,17 +142,9 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(payloadWithSnapshot, viewportColumns: 122, viewportRows: 34))
     }
 
-    /// A selection-only frame (no text, no non-default background, no cursor) must still count as
-    /// visible screen content: `resolveRemoteScreenState` drops a frame this policy calls invisible,
-    /// and a selection set or shown on an otherwise blank screen would never reach a viewer.
-    func testHasVisibleScreenContentTreatsSelectionOnBlankGridAsVisible() {
-        let selection = GhosttyTerminalSelectionRange(
-            startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
-        let blankSnapshotWithSelection = blankSnapshot(columns: 10, rows: 4, selection: selection)
-        XCTAssertTrue(TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: blankSnapshotWithSelection, snapshotText: nil))
-
-        let blankSnapshotWithoutSelection = blankSnapshot(columns: 10, rows: 4)
-        XCTAssertFalse(TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: blankSnapshotWithoutSelection, snapshotText: nil))
+    func testHasVisibleScreenContentTreatsABlankGridAsInvisible() {
+        XCTAssertFalse(TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: blankSnapshot(columns: 10, rows: 4), snapshotText: nil))
+        XCTAssertTrue(TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: snapshot(columns: 10, rows: 4), snapshotText: nil))
     }
 
     private func snapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
@@ -166,12 +158,12 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
 
     /// An entirely blank grid: default backgrounds, no visible cursor, whitespace-only cells (codepoint
     /// 0 resolves to a space via the default foreground/background).
-    private func blankSnapshot(columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange? = nil) -> GhosttyTerminalSnapshot {
+    private func blankSnapshot(columns: Int, rows: Int) -> GhosttyTerminalSnapshot {
         GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
             defaultBackgroundRGB: 0x000000,
             cells: Array(
                 repeating: GhosttyTerminalSnapshot.Cell(codepoint: 0, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0),
-                count: columns * rows), selection: selection)
+                count: columns * rows))
     }
 }

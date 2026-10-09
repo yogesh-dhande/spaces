@@ -137,20 +137,13 @@ typedef struct {
     uint64_t history_epoch;
 } SpacesGhosttyVtHistoryPosition;
 
-// A snapshot of the session's active selection. Coordinates are screen-space (row 0 = oldest
-// scrollback row), matching what `spaces_ghostty_vt_session_set_selection` accepts.
+// A screen-space span (row 0 = oldest scrollback row), as `spaces_ghostty_vt_session_select_all_state`
+// reports it.
 typedef struct {
-    // Whether the terminal currently has an active selection at all.
+    // Whether the screen holds any selectable content.
     bool present;
-    // False when a scrollback trim garbaged one of the selection's tracked endpoint pins: the
-    // terminal still reports a selection, but its coordinates have collapsed to a meaningless
-    // position (typically the top-left of the active screen) rather than the original selection.
-    // Meaningless (always false) whenever `present` is false.
-    bool valid;
     bool rectangle;
-    // Ordered so (start_y, start_x) <= (end_y, end_x). The terminal's own selection endpoints
-    // preserve drag direction and may be reversed; this flattens that for callers that only need
-    // the selected span, not which end the drag started from. Zeroed when `valid` is false.
+    // Ordered so (start_y, start_x) <= (end_y, end_x).
     uint16_t start_x;
     uint32_t start_y;
     uint16_t end_x;
@@ -388,38 +381,11 @@ bool spaces_ghostty_vt_session_format_plain(
     size_t *out_len
 );
 
-// Sets the session's active selection from two screen-space endpoints (row 0 = oldest scrollback
-// row). Endpoints are clamped into the terminal's current screen extent (rows against the
-// scrollbar's total row count, columns against the session's column count) before being resolved,
-// so a caller tracking a drag that has moved past the edge of live content does not have to clamp
-// itself. The terminal copies the endpoints into terminal-owned tracked state immediately, so the
-// selection stays anchored to its cells across further writes until scrollback trimming discards
-// the page an endpoint points into (see `spaces_ghostty_vt_session_selection_state`). Returns false
-// only when the session/terminal is missing or the underlying set call fails.
-bool spaces_ghostty_vt_session_set_selection(
-    SpacesGhosttyVtSession *session,
-    uint16_t start_x,
-    uint32_t start_y,
-    uint16_t end_x,
-    uint32_t end_y,
-    bool rectangle
-);
-
-// Clears the session's active selection. A no-op when there is none.
-void spaces_ghostty_vt_session_clear_selection(SpacesGhosttyVtSession *session);
-
-// Copies the terminal's active selection as plain text (soft wraps unwrapped, trailing whitespace
-// on non-blank lines trimmed, matching Ghostty's own copy semantics) into a malloc'd buffer that
-// must be freed with `spaces_ghostty_vt_session_selection_text_free`. Returns NULL (with `*out_len`
-// left at 0, when `out_len` is non-NULL) when there is no active selection or the underlying format
-// call fails.
-char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *session, size_t *out_len);
-
-// Formats an explicit screen-space range as plain text with the options
-// `spaces_ghostty_vt_session_selection_text_copy` uses (soft wraps unwrapped, trailing whitespace on
-// non-blank lines trimmed), without touching the session's active selection. Endpoints are clamped into
-// the screen extent like `spaces_ghostty_vt_session_set_selection`, and must be ordered (start before
-// end in reading order; a rectangle's columns may be given in either order). Returns NULL (with
+// Formats an explicit screen-space range (row 0 = oldest scrollback row) as plain text with Ghostty's
+// copy semantics (soft wraps unwrapped, trailing whitespace on non-blank lines trimmed), without
+// touching the session's selection. Endpoints are clamped into the screen extent (rows against the
+// scrollbar's total row count, columns against the session's column count) and must be ordered (start
+// before end in reading order; a rectangle's columns may be given in either order). Returns NULL (with
 // `*out_len` left at 0, when `out_len` is non-NULL) when the format call fails. The result is freed with
 // `spaces_ghostty_vt_session_selection_text_free`.
 char *spaces_ghostty_vt_session_range_text_copy(
@@ -438,16 +404,8 @@ char *spaces_ghostty_vt_session_range_text_copy(
 // when the session/terminal is missing or the underlying call fails.
 bool spaces_ghostty_vt_session_select_all_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out);
 
-// Releases a buffer returned by either text-copy function above.
+// Releases a buffer returned by `spaces_ghostty_vt_session_range_text_copy`.
 void spaces_ghostty_vt_session_selection_text_free(char *text);
-
-// Reads the session's active selection. `out->present` is false when there is no selection at all
-// (every other field is zeroed). When `present` is true, `out->valid` reports whether both tracked
-// endpoint pins are still healthy: false means a scrollback trim garbaged one of them, so the
-// coordinates in `out` are meaningless and left zero-filled rather than a stale-but-sensical
-// position. Returns false only when the session/terminal is missing or an unexpected API failure
-// occurs; a present-but-invalid selection is reported through `out`, not through the return value.
-bool spaces_ghostty_vt_session_selection_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out);
 
 // Copies out and clears the terminal's pending render scroll rects: viewport regions that scrolled
 // by a row/column delta since the last call to this function. This is a render hint for consumers
@@ -455,15 +413,13 @@ bool spaces_ghostty_vt_session_selection_state(SpacesGhosttyVtSession *session, 
 // authoritative and a consumer must still be able to render from the terminal's current state
 // directly. Copies up to `capacity` rects into `out`, in the order they were recorded, and
 // unconditionally clears the pending buffer, so a second call immediately after returns 0. If more
-// rects accumulated than the terminal's internal buffer can track, they are discarded entirely,
-// `*overflowed` (when non-NULL) is set to true, and this returns 0; a caller that observes overflow
-// should treat its render state as needing a full redraw rather than an incremental scroll. Returns
-// 0 (with `*overflowed` left false) when the session/terminal is missing.
+// rects accumulated than the terminal's internal buffer can track, they are discarded entirely and
+// this returns 0, which a consumer that diffs against its own baseline handles by sending the
+// cells the rects would have moved. Returns 0 when the session/terminal is missing.
 size_t spaces_ghostty_vt_session_take_scroll_rects(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtScrollRect *out,
-    size_t capacity,
-    bool *overflowed
+    size_t capacity
 );
 
 // Serializes the session's current persistent terminal state as a self-contained escape-sequence

@@ -367,7 +367,7 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         guard let reasonKind = update.reasonKind else { return false }
         switch reasonKind {
         case .initial, .runtimeState, .resize, .stateChange: return true
-        case .attachmentState, .sessionMetadata, .input, .inputOutput, .output, .scroll, .clearScreen, .selection, .terminated, .clipboardWrite:
+        case .attachmentState, .sessionMetadata, .input, .inputOutput, .output, .scroll, .clearScreen, .terminated, .clipboardWrite:
             return false
         }
     }

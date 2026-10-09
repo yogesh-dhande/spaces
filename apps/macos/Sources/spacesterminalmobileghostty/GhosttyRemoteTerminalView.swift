@@ -1606,10 +1606,6 @@ import Foundation
                     cSnapshot.selection_end_y = selectionFields.selectionEndY
                     cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
                     cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
-                    // The selection travels in the frame's selection fields, re-projected by this client on
-                    // every frame, so the mirror carries no drag of its own: scroll_rect_count and
-                    // scroll_rects stay at their zero/nil default and scroll_carry_valid stays false.
-                    cSnapshot.scroll_carry_valid = false
 
                     var cFrame = ghostty_render_frame_s()
                     cFrame.version = UInt32(frame.version)

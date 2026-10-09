@@ -1751,16 +1751,16 @@ bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, 
 size_t spaces_ghostty_vt_session_take_scroll_rects(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtScrollRect *out,
-    size_t capacity,
-    bool *overflowed
+    size_t capacity
 ) {
-    if (overflowed != NULL) *overflowed = false;
+    // The wrapped API reports overflow; no consumer acts on it, so it lands in a local.
+    bool overflowed = false;
     if (session == NULL || session->terminal == NULL) return 0;
 
     // No destination (or a zero capacity) still has to drain the terminal's pending buffer, matching
     // the wrapped API's own no-op-but-clears contract.
     if (out == NULL || capacity == 0) {
-        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, overflowed);
+        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, &overflowed);
     }
 
     // GhosttyTerminalScrollRect is a sized (ABI-versioned) struct, so each output slot's `size` is set
@@ -1769,13 +1769,13 @@ size_t spaces_ghostty_vt_session_take_scroll_rects(
     if (vt_rects == NULL) {
         // Still drain the terminal's pending buffer so a caller that retries after freeing memory sees
         // fresh rects rather than a backlog, even though this particular call reports none.
-        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, overflowed);
+        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, &overflowed);
     }
     for (size_t index = 0; index < capacity; index++) {
         vt_rects[index].size = sizeof(GhosttyTerminalScrollRect);
     }
 
-    size_t written = session->symbols.terminal_take_render_scroll_rects(session->terminal, vt_rects, capacity, overflowed);
+    size_t written = session->symbols.terminal_take_render_scroll_rects(session->terminal, vt_rects, capacity, &overflowed);
     for (size_t index = 0; index < written; index++) {
         out[index].row_start = vt_rects[index].row_start;
         out[index].row_count = vt_rects[index].row_count;
@@ -1844,20 +1844,7 @@ static bool spaces_ghostty_vt_session_screen_selection(
     return true;
 }
 
-bool spaces_ghostty_vt_session_set_selection(
-    SpacesGhosttyVtSession *session, uint16_t start_x, uint32_t start_y, uint16_t end_x, uint32_t end_y, bool rectangle
-) {
-    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
-    if (!spaces_ghostty_vt_session_screen_selection(session, start_x, start_y, end_x, end_y, rectangle, &selection)) return false;
-    return session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection) == GHOSTTY_SUCCESS;
-}
-
-void spaces_ghostty_vt_session_clear_selection(SpacesGhosttyVtSession *session) {
-    if (session == NULL || session->terminal == NULL) return;
-    session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
-}
-
-// Formats `selection` (NULL means the terminal's active selection) with Ghostty's copy semantics.
+// Formats `selection` with Ghostty's copy semantics.
 static char *spaces_ghostty_vt_session_format_selection_text(
     SpacesGhosttyVtSession *session, const GhosttySelection *selection, size_t *out_len
 ) {
@@ -1889,10 +1876,6 @@ static char *spaces_ghostty_vt_session_format_selection_text(
 
     if (out_len != NULL) *out_len = formatted_len;
     return result;
-}
-
-char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *session, size_t *out_len) {
-    return spaces_ghostty_vt_session_format_selection_text(session, NULL, out_len);
 }
 
 char *spaces_ghostty_vt_session_range_text_copy(
@@ -1938,34 +1921,6 @@ static bool spaces_ghostty_vt_session_fill_selection_coordinates(
     return true;
 }
 
-bool spaces_ghostty_vt_session_selection_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out) {
-    if (out == NULL) return false;
-    memset(out, 0, sizeof(*out));
-    if (session == NULL || session->terminal == NULL) return false;
-
-    bool valid = false;
-    GhosttyResult valid_result = session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SELECTION_VALID, &valid);
-    if (valid_result == GHOSTTY_NO_VALUE) {
-        // No selection at all; `out` is already zeroed.
-        return true;
-    }
-    if (valid_result != GHOSTTY_SUCCESS) return false;
-
-    out->present = true;
-    out->valid = valid;
-    if (!valid) {
-        // A garbage pin: the raw GHOSTTY_TERMINAL_DATA_SELECTION snapshot has collapsed to a
-        // meaningless position, so it is not read; coordinates stay zeroed.
-        return true;
-    }
-
-    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
-    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection) != GHOSTTY_SUCCESS) {
-        return false;
-    }
-    return spaces_ghostty_vt_session_fill_selection_coordinates(session, &selection, out);
-}
-
 bool spaces_ghostty_vt_session_select_all_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out) {
     if (out == NULL) return false;
     memset(out, 0, sizeof(*out));
@@ -1977,7 +1932,6 @@ bool spaces_ghostty_vt_session_select_all_state(SpacesGhosttyVtSession *session,
     if (result != GHOSTTY_SUCCESS) return false;
 
     out->present = true;
-    out->valid = true;
     return spaces_ghostty_vt_session_fill_selection_coordinates(session, &selection, out);
 }
 

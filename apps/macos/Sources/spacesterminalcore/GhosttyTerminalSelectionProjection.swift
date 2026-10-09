@@ -1,11 +1,10 @@
 import Foundation
 
 /// Projects a selection held in rows of any one numbering (screen rows, where row 0 is the oldest
-/// retained scrollback row, or a client's absolute rows) into one viewport's coordinates. The Linux
-/// headless core projects the screen-space selection `spaces_ghostty_vt_session_selection_state`
-/// reports into the viewport it exports every frame, and a client projects its absolute-row
-/// selection (`TerminalAbsoluteSelection`) onto each frame it paints, the same way
-/// `GhosttyTerminalSnapshotViewport` rebases a snapshot when cropping it for follow-cursor display.
+/// retained scrollback row, or a client's absolute rows) into one viewport's coordinates. A client
+/// projects its absolute-row selection (`TerminalAbsoluteSelection`) onto each frame it paints, the
+/// same way `GhosttyTerminalSnapshotViewport` rebases a snapshot when cropping it for follow-cursor
+/// display.
 ///
 /// Lives next to `GhosttyTerminalSelectionRange` so every projecting caller and its tests share one
 /// implementation. Unlike `GhosttyTerminalSnapshotViewport.crop`, this only crops vertically: the
@@ -13,9 +12,8 @@ import Foundation
 /// window to intersect.
 public enum GhosttyTerminalSelectionProjection {
     /// `startRow`/`endRow` are in the same numbering as `viewportRowOffset` and must already be ordered
-    /// (`startRow <= endRow`, and `startColumn <= endColumn` when they are equal), matching what
-    /// `spaces_ghostty_vt_session_selection_state` guarantees. A rectangle's columns are the one
-    /// exception: lexicographic ordering cannot order them, so they are normalized here.
+    /// (`startRow <= endRow`, and `startColumn <= endColumn` when they are equal). A rectangle's
+    /// columns are the one exception: lexicographic ordering cannot order them, so they are normalized here.
     /// `viewportRowOffset` is the row, in that numbering, of the viewport's first visible row;
     /// `columns`/`rows` are the viewport's dimensions. Returns nil when the selection does not overlap
     /// the viewport at all.

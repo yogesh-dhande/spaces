@@ -14,23 +14,16 @@
         public struct CapturedSnapshot: Sendable, Equatable {
             public let snapshot: GhosttyTerminalSnapshot
             public let scrollRects: [GhosttyRenderScrollRectOperation]
-            /// True when the exporting surface's scroll-rect ring buffer overflowed since the previous
-            /// frame, so `scrollRects` does not fully describe content movement. Mirrors
-            /// `ghostty_terminal_snapshot_s.scroll_carry_valid`, inverted (that field is true when the
-            /// rects ARE trustworthy).
-            public let scrollRectsOverflowed: Bool
             /// PTY bytes the exporting terminal's parser had consumed when the grid was captured
             /// (`ghostty_terminal_snapshot_s.bytes_processed`, read under the same lock as the cells).
             /// The host maps it to an `output.log` offset; see `GhosttyEmbeddedSessionCore`.
             public let bytesProcessed: UInt64
 
             public init(
-                snapshot: GhosttyTerminalSnapshot, scrollRects: [GhosttyRenderScrollRectOperation] = [], scrollRectsOverflowed: Bool = false,
-                bytesProcessed: UInt64 = 0
+                snapshot: GhosttyTerminalSnapshot, scrollRects: [GhosttyRenderScrollRectOperation] = [], bytesProcessed: UInt64 = 0
             ) {
                 self.snapshot = snapshot
                 self.scrollRects = scrollRects
-                self.scrollRectsOverflowed = scrollRectsOverflowed
                 self.bytesProcessed = bytesProcessed
             }
         }
@@ -61,7 +54,7 @@
             defer { ghostty_terminal_snapshot_free(&snapshot) }
             return CapturedSnapshot(
                 snapshot: makeSnapshot(from: snapshot), scrollRects: makeScrollRects(from: snapshot),
-                scrollRectsOverflowed: !snapshot.scroll_carry_valid, bytesProcessed: snapshot.bytes_processed)
+                bytesProcessed: snapshot.bytes_processed)
         }
 
         public static func captureText(from surface: ghostty_surface_t?) -> String? {
@@ -111,20 +104,8 @@
                 defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells, clusters: clusters, linkURLs: linkURLs,
                 mouseTrackingLevel: TerminalMouseTrackingLevel(rawValue: snapshot.mouse_tracking_level) ?? .none,
                 mouseShiftCapture: snapshot.mouse_shift_capture, alternateScreenActive: snapshot.alternate_screen_active,
-                selection: selection(of: snapshot), scrollbarTotal: snapshot.scrollbar_total, scrollbarOffset: snapshot.scrollbar_offset,
+                scrollbarTotal: snapshot.scrollbar_total, scrollbarOffset: snapshot.scrollbar_offset,
                 historyRowBase: snapshot.history_rows_pruned + UInt64(snapshot.scrollbar_offset), historyEpoch: snapshot.history_epoch)
-        }
-
-        /// Ghostty already did the clipping and the viewport rebase (this is an embedded surface, so its
-        /// exported snapshot IS the viewport), so this is a direct field copy with no projection math,
-        /// unlike the headless core which has to rebase a screen-space selection into whichever viewport
-        /// it is exporting.
-        private static func selection(of snapshot: ghostty_terminal_snapshot_s) -> GhosttyTerminalSelectionRange? {
-            let flags = snapshot.selection_flags
-            guard flags & 0x1 != 0 else { return nil }
-            return GhosttyTerminalSelectionRange(
-                startColumn: snapshot.selection_start_x, startRow: snapshot.selection_start_y, endColumn: snapshot.selection_end_x,
-                endRow: snapshot.selection_end_y, isRectangle: flags & 0x2 != 0, extendsAbove: flags & 0x4 != 0, extendsBelow: flags & 0x8 != 0)
         }
 
         /// Cells with no extras — nearly all of them — carry no cluster and render from the base

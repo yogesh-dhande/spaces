@@ -958,7 +958,7 @@ def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: 
     _ = reader.u8()  # mouse reporting active
     _ = reader.u8()  # mouse shift capture
     _ = reader.u8()  # alternate screen active
-    _ = reader.read(49)  # selection, scrollbar, and history section (flag byte, four coordinates, two scrollbar counters, four u64 history stamps)
+    _ = reader.read(40)  # scrollbar and history section (two scrollbar counters, four u64 history stamps)
     cell_count = reader.u32()
     return {
         "columns": columns,
@@ -983,8 +983,7 @@ def read_render_update_delta(
     _ = reader.u8()  # mouse reporting active
     _ = reader.u8()  # mouse shift capture
     _ = reader.u8()  # alternate screen active
-    _ = reader.read(49)  # selection, scrollbar, and history section (flag byte, four coordinates, two scrollbar counters, four u64 history stamps)
-    _ = reader.u8()  # scroll rects overflowed
+    _ = reader.read(40)  # scrollbar and history section (two scrollbar counters, four u64 history stamps)
     changed_cell_count = reader.u32()
     delta = {
         "baseRevision": base_revision,

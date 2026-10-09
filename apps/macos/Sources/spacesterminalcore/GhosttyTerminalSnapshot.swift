@@ -169,13 +169,6 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
 public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
     public static let currentVersion = 1
 
-    /// Upper bound any accumulator of `scrollRects` across frames applies before falling back to the
-    /// overflowed state: content that moved through this many rects has scrolled far past any local
-    /// anchor worth carrying, and an unbounded accumulation (a stalled main actor coalescing frames, a
-    /// view that cannot apply for a while) would otherwise grow without limit. Shared by the reduction
-    /// pipeline's coalesce merge and the mirror view's drag-carry buffer so the two bounds cannot drift.
-    public static let maxAccumulatedScrollRects = 512
-
     public let version: Int
     public let sessionRevision: UInt64?
     public let ownerEpoch: UInt64
@@ -198,25 +191,10 @@ public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
     /// by `TerminalTranscriptFileIdentity`; equals the transcript response's `fileIdentity`. A head
     /// trim swaps in a new file, so the identity changes with it.
     public let transcriptFileIdentity: UInt64
-    /// How the terminal's content moved to produce this frame from the previously materialized one, so a
-    /// mirror view can carry a local drag-selection anchor across the repaint. Empty for a frame that is
-    /// not a delta continuation (an initial baseline, a full re-baseline, or a resync) — see
-    /// `scrollRectsOverflowed` for why those still need a value here.
-    public let scrollRects: [GhosttyRenderScrollRectOperation]
-    /// True when `scrollRects` cannot be trusted to fully describe how content moved since the previous
-    /// frame: either the producing delta's own scroll-rect ring buffer overflowed, or this frame is not a
-    /// delta continuation at all (a full/re-baseline frame carries the whole grid, not a diff, so it has
-    /// no scroll rects to report). A consumer accumulating rects across skipped frames must poison its
-    /// buffer whenever this is true. Defaults to true so that only a construction site that positively
-    /// knows how content moved since the previous frame (the delta materializer) can claim a trustworthy
-    /// carry; every other frame (baselines, replay repaints, daemon-side frames whose carry fields are
-    /// never read) is untrusted by default.
-    public let scrollRectsOverflowed: Bool
 
     public init(
         version: Int = Self.currentVersion, sessionRevision: UInt64?, ownerEpoch: UInt64, snapshot: GhosttyTerminalSnapshot,
-        transcriptByteOffset: UInt64 = 0, transcriptFileIdentity: UInt64 = 0, scrollRects: [GhosttyRenderScrollRectOperation] = [],
-        scrollRectsOverflowed: Bool = true
+        transcriptByteOffset: UInt64 = 0, transcriptFileIdentity: UInt64 = 0
     ) {
         self.version = version
         self.sessionRevision = sessionRevision
@@ -226,8 +204,6 @@ public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
         self.snapshot = snapshot
         self.transcriptByteOffset = transcriptByteOffset
         self.transcriptFileIdentity = transcriptFileIdentity
-        self.scrollRects = scrollRects
-        self.scrollRectsOverflowed = scrollRectsOverflowed
     }
 
     public static func encode(_ frame: GhosttyRenderFrame) throws -> Data { try JSONEncoder().encode(frame) }

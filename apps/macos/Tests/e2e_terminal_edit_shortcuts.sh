@@ -296,8 +296,9 @@ wait_for_rendered_output_contains "$paste_token"
 : | pbcopy
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
   terminal-window-shortcut --session-id "$session_id" --action select-all >/dev/null
-# select-all takes effect on the mirror surface asynchronously while the paste's output frames may still be
-# landing, so copy must wait until the surface reports the selection or it reads nothing.
+# select-all is the pane's own selection: it is computed from the pane's rows and painted onto the mirror
+# surface asynchronously while the paste's output frames may still be landing, so copy must wait until the
+# surface reports the selection or it reads nothing.
 wait_for_surface_selection_contains "$paste_token"
 send_command_key_code 8
 wait_for_pbpaste_contains "$paste_token"

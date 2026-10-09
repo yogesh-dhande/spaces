@@ -64,8 +64,8 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     ///
     /// This is the reason-shaped half of the same question `reportedOutputEndByteOffset` answers by
     /// offset, for the payload that carries no offset at all. Frame arrival is deliberately not part of
-    /// it: a resize, an appearance repaint, and another viewer's selection change all export a fresh full
-    /// frame with nothing new in the transcript.
+    /// it: a resize and an appearance repaint both export a fresh full frame with nothing new in the
+    /// transcript.
     public var reportsTranscriptOutput: Bool { unionCarriesReason(.output) }
 
     /// True when this output, or any payload folded into it, was a `clear_screen` payload. A clear
@@ -143,8 +143,7 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
         return names
     }
 
-    /// This output, carrying forward the one-shot effects of the older output it replaces, plus the
-    /// skipped frame's scroll rects merged into the surviving frame.
+    /// This output, carrying forward the one-shot effects of the older output it replaces.
     ///
     /// The reduction chain already folds the skipped payload's state into this one's `storedPayload`,
     /// and its metrics describe a frame that never reached the screen, so those need no extra work here.
@@ -159,15 +158,9 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// end any folded payload reported, which is what a replay built before a folded `.output` compares
     /// itself against; the first non-nil of this output's own inherited value, `skipped`'s own report, and
     /// `skipped`'s inherited value is the newest, since this output is never older than `skipped` and
-    /// `skipped` is never older than what it absorbed. `scrollRects` is different: the mirror's
-    /// drag-carry buffer (`GhosttyMirrorTerminalView`)
-    /// accumulates rects only from frames that actually get applied, so a coalesced-away frame's rects
-    /// would otherwise vanish with no trace, and the surviving frame would still report
-    /// `scrollRectsOverflowed == false` as if nothing had been skipped. A drag rebased against that
-    /// under-reports how far the content moved and lands on the wrong rows. So when both this output and
-    /// the skipped one carry a frame, the surviving frame is rebuilt with the skipped frame's rects
-    /// (older) ahead of this frame's own rects (newer), and `scrollRectsOverflowed` ORed across both.
-    /// When the skipped output carries no frame there is nothing to merge, and when this one carries none
+    /// `skipped` is never older than what it absorbed. A frame is a whole picture, so when both this output
+    /// and the skipped one carry a frame the surviving frame stays this one's. When the skipped output
+    /// carries no frame there is nothing to merge, and when this one carries none
     /// the skipped frame is adopted whole rather than merged: the surviving output always leaves with the
     /// newest frame either of them had. Only a held pane reaches that adoption
     /// (`ApplyMailbox.mayCollapseWhileHolding`) — a displayed pane's `mayCollapse` refuses to collapse a
@@ -180,26 +173,6 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
         if let base = reduction, base.frameToApply == nil, let skippedFrame = skipped.reduction?.frameToApply {
             mergedReduction = TerminalRemoteStateReductionResult(
                 payload: base.payload, storedPayload: base.storedPayload, decodedUpdate: base.decodedUpdate, frameToApply: skippedFrame,
-                dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedPayload: base.isRefusedPayload)
-        } else if let base = reduction, let survivingFrame = base.frameToApply, let skippedFrame = skipped.reduction?.frameToApply {
-            // Bounded like the mirror's own carry buffer: repeated collapses onto one stalled pending
-            // output would otherwise grow the merged array (and re-copy it per collapse) without limit.
-            // Past the cap the rects are dropped and the frame reports overflowed, which the consumer
-            // already treats as a cancelled carry. A producer-side overflow flag alone keeps its rects:
-            // the flag rides through untouched and the consumer poisons on it, so the merge only has to
-            // bound what the merge itself can grow.
-            var mergedRects = skippedFrame.scrollRects + survivingFrame.scrollRects
-            var mergedOverflowed = skippedFrame.scrollRectsOverflowed || survivingFrame.scrollRectsOverflowed
-            if mergedRects.count > GhosttyRenderFrame.maxAccumulatedScrollRects {
-                mergedRects = []
-                mergedOverflowed = true
-            }
-            let mergedFrame = GhosttyRenderFrame(
-                version: survivingFrame.version, sessionRevision: survivingFrame.sessionRevision, ownerEpoch: survivingFrame.ownerEpoch,
-                snapshot: survivingFrame.snapshot, transcriptByteOffset: survivingFrame.transcriptByteOffset,
-                transcriptFileIdentity: survivingFrame.transcriptFileIdentity, scrollRects: mergedRects, scrollRectsOverflowed: mergedOverflowed)
-            mergedReduction = TerminalRemoteStateReductionResult(
-                payload: base.payload, storedPayload: base.storedPayload, decodedUpdate: base.decodedUpdate, frameToApply: mergedFrame,
                 dropReason: base.dropReason, didRequestResync: base.didRequestResync, isRefusedPayload: base.isRefusedPayload)
         }
         var mergedCoalescedReasons: [String] = []

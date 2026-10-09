@@ -64,7 +64,7 @@ public enum TerminalRemoteSessionStateNotificationRouting {
             // pasteboard — so neither refresh family has anything to do. The row exists because
             // dropping it would make a later reader think this reason was simply forgotten.
             return []
-        case .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .selection, .resize:
+        case .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .resize:
             // Unreachable: the `isOutputShaped` guard above already returned for every one of these
             // cases. Listed anyway because the switch must stay exhaustive over the full enum, which
             // is what forces `isOutputShaped` to be updated (and this switch to be revisited) the
@@ -92,7 +92,7 @@ extension TerminalRemoteSessionStateReason {
     /// and `.isOutputShaped(reason:)` read, so the two entry points cannot disagree about a reason.
     fileprivate var isOutputShaped: Bool {
         switch self {
-        case .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .selection, .resize: return true
+        case .output, .input, .inputOutput, .stateChange, .scroll, .clearScreen, .resize: return true
         case .initial, .attachmentState, .sessionMetadata, .runtimeState, .terminated, .clipboardWrite: return false
         }
     }
