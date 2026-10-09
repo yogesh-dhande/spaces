@@ -6509,6 +6509,32 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(copy(fixture), lines(top...anchorLine))
     }
 
+    /// Typing ends the gesture the queued autoscroll rows belong to, so the continuation read failing
+    /// afterwards must not scroll the pane back into the replay. (The jump control cancels the gesture
+    /// through the same `cancelActiveScrollGesture`, but only once the replay is on screen, which is
+    /// exactly when these rows are not queued.)
+    @MainActor func testTypingDropsTheAutoscrollRowsWaitingOnAContinuationThatThenFails() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-autoscroll-typing-drops-rows", lines: 100)
+        waitForCondition("the pane prefetches its first page") { fixture.source.arrivedReads >= 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        fixture.terminal.writeLines(101...130)
+        publishNewestFrame(fixture)
+        let pressRow = numberedRows(fixture)[3]
+
+        fixture.source.holdReads()
+        try dragToTopEdge(fixture, pressRow: pressRow, pressColumn: 25, edgeColumn: 0)
+        for _ in 0..<3 { fixture.view.performSelectionAutoscrollTick() }
+        waitForCondition("the first tick starts the continuation read") { fixture.source.arrivedReads >= 2 }
+        XCTAssertFalse(fixture.host.debugIsShowingLocalScrollbackFrame, "setup: the ticks wait on the read")
+
+        XCTAssertTrue(fixture.host.sendTextAsPaste("echo hi"))
+        fixture.source.failReads()
+        fixture.source.releaseReads()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+
+        XCTAssertFalse(fixture.host.debugIsShowingLocalScrollbackFrame, "the failed read scrolled the pane back over the screen typing returned to")
+    }
+
     /// A frame whose stamp is past the replay's end while the reported end offset is stale: the copy
     /// still reads the new rows.
     @MainActor func testCopyReadsRowsAFrameStampedBeyondTheReportedOffset() throws {

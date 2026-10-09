@@ -2431,7 +2431,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Dropping the screen is not enough on its own: a flick interrupted mid-momentum keeps
     /// delivering deltas, and the first one after would republish the replay over the screen the session
     /// has moved on to.
+    /// The autoscroll rows still waiting on a continuation read are dropped with it, or that read's
+    /// failure would flush them over the screen the user just returned to.
+    /// The autoscroll rows still waiting on a continuation read go with the gesture, or that read's
+    /// failure would flush them over the screen the user just returned to.
     private func endLocalScrollGesture(reason: String) {
+        pendingAutoscrollRows = 0
         isScrollGestureCancelled = true
         leaveLocalScrollMode(reason: reason)
     }
@@ -2453,6 +2458,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // The replay a copy or select-all was waiting on is gone; the press is not replayed against a
         // different one.
         pendingSelectionReplay = nil
+        pendingAutoscrollRows = 0
         guard !isIdleLocalScrollback || hasAttemptedLocalScrollbackRead else { return }
         localScrollbackGeneration &+= 1
         localScrollbackState = .idle
@@ -2623,6 +2629,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 // replay is still behind the session, and the next gesture asks again.
                 self.hasLiveFrameSinceLocalScrollbackRead = true
                 self.trace("local_scroll_continuation_failure error=\(self.sanitizedTraceDetail(error.localizedDescription))")
+                self.flushPendingAutoscrollRows()
                 // The state did not move, so a waiting copy or select-all is told here that its read ended.
                 self.scheduleSelectionRequestAdvance()
                 return
@@ -2644,7 +2651,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // rebuild puts the rows the user is looking at back the same distance above the newest row,
             // and an append leaves them where Ghostty pins them.
             let install = fetch.restoring(rowsFromBottom: model.rowsFromBottom)
-            let load = LocalScrollbackLoad(pendingDeltaRows: 0, model: model)
+            let load = LocalScrollbackLoad(pendingDeltaRows: self.takePendingAutoscrollRows(), model: model)
             self.localScrollbackState = .loading(load)
             // Gesture-initiated: the only caller is `noteScrollGestureBegan`, so a gesture is in motion
             // for the whole of this read and owns whatever it comes back with.
@@ -2916,9 +2923,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // A failed or empty read cancels the gesture it served, and a finger held at the edge ticks every
         // 15 ms, so honoring the cancel keeps each tick from starting another read that fails the same
         // way. The next selection drag (`beginWordSelection`, `beginSelectionHandleDrag`) lifts it.
-        // A failed or empty read cancels the gesture it served, and a finger held at the edge ticks every
-        // 15 ms, so honoring the cancel keeps each tick from starting another read that fails the same
-        // way. The next selection drag (`beginWordSelection`, `beginSelectionHandleDrag`) lifts it.
         guard !isScrollGestureCancelled else { return }
         if !isSelectionAutoscrolling {
             isSelectionAutoscrolling = true
@@ -2926,7 +2930,30 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // it, so the rows scrolled onto sit directly above the live ones.
             if case .ready(let model) = localScrollbackState, hasLiveFrameSinceLocalScrollbackRead { loadLocalScrollbackContinuation(after: model) }
         }
-        scrollLocalReplay(deltaRows: towardOlderRows ? -1 : 1)
+        let deltaRows = towardOlderRows ? -1 : 1
+        if localScrollbackContinuationTask != nil, !isShowingLocalScrollFrame {
+            pendingAutoscrollRows += deltaRows
+            return
+        }
+        scrollLocalReplay(deltaRows: deltaRows)
+    }
+
+    /// Rows autoscroll ticks asked for while a continuation read was in flight and the screen was not yet
+    /// in the replay. The replay stays `.ready` during that network read but is missing the output the
+    /// read is fetching, so scrolling it would jump by all of that output; the rows go to the caught-up
+    /// replay instead (through the `.loading` state's pending rows, like a pan's), or scroll the replay
+    /// as it is when the read installs nothing.
+    @ObservationIgnored private var pendingAutoscrollRows = 0
+
+    private func takePendingAutoscrollRows() -> Int {
+        defer { pendingAutoscrollRows = 0 }
+        return pendingAutoscrollRows
+    }
+
+    /// A continuation that fails leaves the replay as it was; the rows waiting on it scroll that.
+    private func flushPendingAutoscrollRows() {
+        let rows = takePendingAutoscrollRows()
+        if rows != 0 { scrollLocalReplay(deltaRows: rows) }
     }
 
     /// Copies the selection's text and leaves the selection; with no selection it does nothing. The text

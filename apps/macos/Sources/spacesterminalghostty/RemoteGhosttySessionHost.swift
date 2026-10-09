@@ -1433,7 +1433,10 @@
             isScrollGestureCancelled = true
             // The rows this gesture put on a load that has not installed yet go with it, for the reason the
             // rest of its deltas do: the pane is leaving the replay, and applying them at the install would
-            // paint history back over the screen the user just returned to.
+            // paint history back over the screen the user just returned to. The autoscroll rows still
+            // waiting on a continuation read go too, or its failure would flush them over that screen.
+            // Autoscroll always latches a route, so the guard above cannot skip this while rows are queued.
+            pendingAutoscrollRows = 0
             guard case .loading(let pendingDeltaRows, let model, let grid) = localScrollbackState, pendingDeltaRows != 0 else { return }
             localScrollbackState = .loading(pendingDeltaRows: 0, model: model, grid: grid)
         }

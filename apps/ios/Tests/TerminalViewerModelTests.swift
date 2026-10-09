@@ -11518,6 +11518,85 @@
             XCTAssertTrue(model.isShowingLocalScrollFrame, "the reader stays in the history they scrolled into")
         }
 
+        /// A selection drag held past the top edge while the session has printed since the replay was read:
+        /// its first tick catches the replay up, and the ticks while that read is on the wire wait rather
+        /// than scroll the stale replay, which would jump the screen back by all the output it is missing.
+        /// Once the replay is caught up they scroll it, one row each from its bottom.
+        func testAutoscrollWaitsForTheReplayToCatchUpBeforeScrolling() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let heldContinuation = TranscriptReadGate()
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, pageReadGate: heldContinuation)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+
+            // The session prints enough that the stale replay's rows are far from the live ones.
+            await transcript.append(Self.numberedTranscript(lineCount: 20, startingAt: 400))
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            let tickCount = 3
+            model.beginWordSelection(wordSelection())
+            for _ in 0..<tickCount { model.autoscrollSelection(towardOlderRows: true) }
+            await waitUntilAsync("the first tick to start the continuation read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the stale replay must not be shown while its continuation is on the wire")
+
+            await heldContinuation.release()
+            let grownTranscript = UInt64(await transcript.byteCount())
+            await waitUntil("the continuation to install") { model.localScrollbackTranscriptEndForTesting == grownTranscript }
+            await waitUntil("the caught-up replay to paint the ticks") { model.isShowingLocalScrollFrame }
+            let lineAfterTheTicks = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+
+            // One row above the live bottom, read from the same caught-up replay the ticks scrolled.
+            await model.scrollToBottom()
+            model.endSelectionDrag()
+            model.beginWordSelection(wordSelection())
+            model.autoscrollSelection(towardOlderRows: true)
+            let lineOneRowUp = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertEqual(
+                lineAfterTheTicks, lineOneRowUp - (tickCount - 1), "the ticks scroll the caught-up replay one row each, from the rows above the live screen")
+        }
+
+        /// Typing ends the gesture the queued autoscroll rows belong to, so the continuation read failing
+        /// afterwards must not scroll the replay back over the live screen the keystroke returned to.
+        func testAKeystrokeDropsTheAutoscrollRowsWaitingOnAContinuationThatThenFails() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let heldContinuation = TranscriptReadGate()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalTranscript(let payload) = request.command {
+                    guard payload.fromByteOffset != nil else { return await transcript.response(for: payload) }
+                    await heldContinuation.wait()
+                    return SpacesDeviceAPIResponse(ok: false, message: "refused", errorCode: .internalError)
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+            await transcript.append(Self.numberedTranscript(lineCount: 20, startingAt: 400))
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            model.beginWordSelection(wordSelection())
+            for _ in 0..<3 { model.autoscrollSelection(towardOlderRows: true) }
+            await waitUntilAsync("the first tick to start the continuation read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            await model.sendKey("a")
+
+            await heldContinuation.release()
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the failed read must not scroll the replay over the screen the keystroke returned to")
+        }
+
         /// A session's process exiting writes no transcript and truncates none, so the replay a reader is
         /// scrolling survives it. Only a relaunch invalidates the bytes a replay holds.
         func testTheProcessExitingKeepsTheReplay() async throws {
