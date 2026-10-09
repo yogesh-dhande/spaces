@@ -27,7 +27,7 @@ import Testing
             TerminalLocalScrollbackModel(
                 columns: columns, rows: rows, theme: theme, appearance: .dark, transcript: transcript, transcriptStartByteOffset: startByteOffset,
                 transcriptEndByteOffset: startByteOffset + UInt64(transcript.count), requestedByteCount: requestedByteCount,
-                transcriptFileIdentity: fileIdentity, runIdentity: nil))
+                transcriptFileIdentity: fileIdentity, runIdentity: nil, stamps: []))
     }
 
     private func stamp(offset: UInt64, fileIdentity: UInt64 = 7) -> TerminalLiveFrameStamp {

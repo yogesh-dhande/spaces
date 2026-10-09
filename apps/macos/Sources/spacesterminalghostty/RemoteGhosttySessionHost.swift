@@ -272,7 +272,7 @@
         /// every replay build and append, and to the alignment a copy or select-all does before it reads.
         private var liveFrameStamps = TerminalLiveFrameStampRing()
         /// The copy or select-all waiting on the replay, if any. At most one: a newer request replaces it.
-        private var pendingSelectionReplay: PendingSelectionReplay?
+        private var pendingSelectionReplay: TerminalPendingSelectionReplay?
         /// Where one wheel gesture's events go, decided at its first event and held for the rest of it.
         /// Latching is what keeps a frame landing mid-gesture (a program entering the alternate screen,
         /// say) from splitting one flick between the local replay and the daemon.
@@ -382,6 +382,10 @@
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
             terminalView.onSelectionAutoscroll = { [weak self] towardOlderRows in self?.autoscrollSelection(towardOlderRows: towardOlderRows) }
             terminalView.onUserChangedSelection = { [weak self] in self?.cancelPendingSelectAll() }
+            // Only the press that starts a selection lifts a cancelled autoscroll (see
+            // `autoscrollSelection`). Typing and selection clears must not: they cancel a flick in flight
+            // and its momentum has to stay cancelled.
+            terminalView.onSelectionPressed = { [weak self] in self?.isScrollGestureCancelled = false }
             terminalView.onAppearanceChanged = { [weak self] in self?.discardLocalScrollbackIfAppearanceChanged() }
 
             if let container, terminalView.superview !== container {
@@ -1450,6 +1454,14 @@
             // it brings the replay up to date before the pane enters it, so the rows scrolled onto sit
             // directly above the live ones.
             let now = scrollGestureClock()
+            // A failed or empty read cancels the gesture it served (`cancelActiveScrollGesture`), and a
+            // finger held at the edge ticks every 15 ms, so honoring the cancel is what stops each tick
+            // from starting another read that fails the same way. It lasts until the next selection
+            // gesture, so the clock is refreshed to keep the idle expiry from lifting it mid-drag.
+            if isScrollGestureCancelled {
+                lastScrollEventAt = now
+                return
+            }
             expireLatchedScrollRouteIfIdle(now: now)
             if latchedScrollRoute == nil {
                 latchedScrollRoute = .localReplay
@@ -1862,32 +1874,6 @@
 
         // MARK: - Copy and select-all from the replay
 
-        /// What the user asked of the replay. A copy carries the pasteboard's change count at the press:
-        /// the text is written only if nothing else has written the pasteboard while the replay caught up.
-        private enum SelectionReplayRequest: Equatable {
-            case copy(TerminalAbsoluteSelection, pasteboardChangeCount: Int)
-            case selectAll
-
-            var need: TerminalSelectionReplayNeed {
-                switch self {
-                case .copy(let selection, _): .copy(selection)
-                case .selectAll: .selectAll
-                }
-            }
-        }
-
-        /// A request, the newest live frame stamp when it started (what the replay must catch up to; frames
-        /// arriving during the reads do not move it), and the reads already spent on it. The planner
-        /// reads the performed steps so it never repeats one.
-        private struct PendingSelectionReplay {
-            let request: SelectionReplayRequest
-            let targetStamp: TerminalLiveFrameStamp?
-            var performedSteps: [TerminalSelectionReplayStep] = []
-            /// Set when a copy was pressed while this select-all was pending: the pasteboard's change
-            /// count at that press, and the copy runs on the selection the select-all produces.
-            var copyPasteboardChangeCount: Int?
-        }
-
         /// A press, drag, key or right-click word select by the user replaces whatever selection they
         /// had, so a select-all still waiting on its read must not land over it. A pending copy stays:
         /// it copies the selection the user pressed copy on.
@@ -1898,15 +1884,15 @@
         /// above the viewport this client holds. The replay may not exist yet, may trail the live frame, or
         /// may not reach back to the selection's first row, so the request walks the planner's steps
         /// (shared with the iPhone) one read at a time until the replay can answer.
-        private func startSelectionReplayRequest(_ request: SelectionReplayRequest) {
-            pendingSelectionReplay = PendingSelectionReplay(request: request, targetStamp: liveFrameStamps.stamps.last)
+        private func startSelectionReplayRequest(_ request: TerminalSelectionReplayRequest) {
+            pendingSelectionReplay = TerminalPendingSelectionReplay(request: request, liveStamps: liveFrameStamps)
             advanceSelectionRequest()
         }
 
         private func scheduleSelectionRequestAdvance() { Task { @MainActor [weak self] in self?.advanceSelectionRequest() } }
 
         private func advanceSelectionRequest() {
-            guard let pending = pendingSelectionReplay else { return }
+            guard var pending = pendingSelectionReplay else { return }
             // A load or continuation in flight owns the replay; its exit moves the state and re-plans.
             if case .loading = localScrollbackState { return }
             if localScrollbackContinuationRead != nil { return }
@@ -1917,12 +1903,8 @@
             case .idle, .loading: break
             case .unavailable: isUnavailable = true
             }
-            // The planner compares the selection's epoch with the replay's, so the replay is lined up
-            // with the newest stamps before it is asked.
-            model?.align(with: liveFrameStamps.stamps)
-            let step = TerminalSelectionReplayPlanner.nextStep(
-                model: model, need: pending.request.need, targetStamp: pending.targetStamp, performed: pending.performedSteps,
-                replayIsUnavailable: isUnavailable)
+            let step = pending.progress.nextStep(model: model, liveStamps: liveFrameStamps, replayIsUnavailable: isUnavailable)
+            pendingSelectionReplay = pending
             switch step {
             case .abandon: pendingSelectionReplay = nil
             case .format:
@@ -1934,21 +1916,18 @@
                     }
                 }
             case .readFirstPage:
-                pendingSelectionReplay?.performedSteps.append(step)
                 loadLocalScrollbackPage(
                     maxBytes: TerminalScrollbackBudget.initialLocalScrollbackPageBytes, deepening: nil, pendingDeltaRows: 0, kind: .selection)
             case .readWholeBudget:
-                pendingSelectionReplay?.performedSteps.append(step)
                 loadLocalScrollbackPage(maxBytes: TerminalScrollbackBudget.defaultMaxBytes, deepening: model, pendingDeltaRows: 0, kind: .selection)
             case .readContinuation:
-                pendingSelectionReplay?.performedSteps.append(step)
                 // The session reports no bytes beyond the replay's end (the stamp ran ahead of the file),
                 // so there is nothing to read and the planner formats on the next ask.
                 if !loadLocalScrollbackContinuationIfBehind() { advanceSelectionRequest() }
             }
         }
 
-        private func formatSelectionRequest(_ request: SelectionReplayRequest, from model: TerminalLocalScrollbackModel) {
+        private func formatSelectionRequest(_ request: TerminalSelectionReplayRequest, from model: TerminalLocalScrollbackModel) {
             switch request {
             case .copy(let selection, let pasteboardChangeCount):
                 guard copyPasteboard.changeCount == pasteboardChangeCount,

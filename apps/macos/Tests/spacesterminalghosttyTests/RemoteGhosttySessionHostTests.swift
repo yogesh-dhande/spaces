@@ -5970,11 +5970,26 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             // written while it waits, as a real read in flight does not.
             let fileEnd = noteArrival()
             while isHeld { try await Task.sleep(nanoseconds: 10_000_000) }
+            if readsFail { throw SimulatedTransportFailure() }
             return serve(maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity, fileEnd: fileEnd)
         }
 
         private var held = false
         private var arrivals = 0
+        private var failing = false
+
+        /// Makes every read fail after it arrives (and after any hold), as an unreachable device does.
+        func failReads() {
+            lock.lock()
+            failing = true
+            lock.unlock()
+        }
+
+        private var readsFail: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return failing
+        }
 
         /// Holds every read until `releaseReads()`, so a test can act while a read is in flight.
         func holdReads() {
@@ -6447,6 +6462,25 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertFalse(controlCommands(fixture.recorder).contains("scroll"), "the program received the selection's scroll")
     }
 
+    /// A failed read cancels the gesture it served, and a finger held at the edge ticks every 15 ms: the
+    /// ticks that follow must not each start another read that fails the same way.
+    @MainActor func testSelectionAutoscrollStopsReadingAfterAFailedRead() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-autoscroll-failed-read", lines: 100, holdsReads: true)
+        waitForCondition("the prefetch reaches the provider") { fixture.source.arrivedReads >= 1 }
+        fixture.source.failReads()
+        fixture.source.releaseReads()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let readsBeforeTheDrag = fixture.source.arrivedReads
+
+        try dragToTopEdge(fixture, pressRow: numberedRows(fixture)[3])
+        for _ in 0..<10 {
+            fixture.view.performSelectionAutoscrollTick()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        XCTAssertEqual(fixture.source.arrivedReads, readsBeforeTheDrag + 1, "only the drag's first tick reads; the failure cancels the rest")
+    }
+
     /// Output arrived after the replay was prefetched. The first autoscroll tick that enters the replay
     /// catches it up first, so the rows scrolled onto run on directly from the live rows with no gap.
     @MainActor func testAutoscrollIntoTheReplayCatchesTheReplayUpFirst() throws {
@@ -6560,6 +6594,32 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.8))
 
         XCTAssertNil(fixture.host.debugClientSelection)
+    }
+
+    /// A key typed in the pane (not the host's own input entry point) tells the selection it changed
+    /// before the key reaches the session. That notification must not end the scroll gesture it runs
+    /// inside: the typing has to cancel a flick in flight, or the momentum still travelling scrolls the
+    /// replay and paints history back over the live screen.
+    @MainActor func testTypingInThePaneDuringMomentumKeepsTheRestOfTheFlickCancelled() throws {
+        let fixture = try makeSelectionFixture(sessionID: "selection-typing-momentum", lines: 200)
+        fixture.view.acceptsTerminalInput = true
+        waitForCondition("the pane prefetches its first page") { fixture.source.arrivedReads >= 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let momentum = GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .changed)
+        XCTAssertTrue(fixture.host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: momentum, pointerPosition: nil))
+        waitForCondition("the flick scrolls the pane into its replay") { fixture.host.debugIsShowingLocalScrollbackFrame }
+        let key = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: fixture.window.windowNumber, context: nil,
+                characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0))
+
+        XCTAssertTrue(fixture.view.handleTerminalKeyEvent(key, requireFirstResponder: false))
+        XCTAssertFalse(fixture.host.debugIsShowingLocalScrollbackFrame, "typing must leave the replay")
+
+        _ = fixture.host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: momentum, pointerPosition: nil)
+        for _ in 0..<20 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertFalse(fixture.host.debugIsShowingLocalScrollbackFrame, "the cancelled flick's momentum put the pane back into its replay")
     }
 
     /// Typing while Select All is reading cancels it too.

@@ -189,6 +189,8 @@
         /// Asks the host to scroll one row for a selection drag held past the top (`true`) or bottom edge.
         var onSelectionAutoscroll: (@MainActor (_ towardOlderRows: Bool) -> Void)?
         var onUserChangedSelection: (@MainActor () -> Void)?
+        /// A selection press began, as opposed to any other change of the selection.
+        var onSelectionPressed: (@MainActor () -> Void)?
         var onSendScroll: SendScrollHandler?
         var onSendMouseButton: SendMouseButtonHandler?
         var onSendMouseMotion: SendMouseMotionHandler?
@@ -1204,6 +1206,7 @@
         private func selectionGesturePressed(_ event: NSEvent) {
             guard let snapshot = shownSnapshot, let cell = gridCell(at: event.locationInWindow) else { return }
             onUserChangedSelection?()
+            onSelectionPressed?()
             guard !mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else {
                 // The program owns this click, and Ghostty has already cleared the mirror's selection.
                 clientSelection = nil
@@ -1339,17 +1342,9 @@
 
         // MARK: Auto-scroll
 
-        /// One row per tick, as Ghostty's selection scroll is.
-        private static let selectionAutoscrollInterval: Duration = .milliseconds(15)
-
-        private enum SelectionAutoscrollDirection {
-            case towardOlderRows
-            case towardNewerRows
-        }
-
         /// Ghostty starts a selection scroll when the pointer is within a pixel of the top or bottom edge
         /// or past it.
-        private func selectionAutoscrollDirection() -> SelectionAutoscrollDirection? {
+        private func selectionAutoscrollDirection() -> TerminalSelectionAutoscroll.Direction? {
             guard let pointer = selectionPointer else { return nil }
             let y = convert(pointer.location, from: nil).y
             if y >= bounds.maxY - 1 { return .towardOlderRows }
@@ -1366,7 +1361,7 @@
             guard selectionAutoscrollTask == nil else { return }
             selectionAutoscrollTask = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: Self.selectionAutoscrollInterval)
+                    try? await Task.sleep(for: TerminalSelectionAutoscroll.interval)
                     guard let self, !Task.isCancelled else { return }
                     self.performSelectionAutoscrollTick()
                 }

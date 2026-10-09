@@ -474,7 +474,7 @@
                 TerminalLocalScrollbackModel(
                     columns: columns, rows: rows, theme: theme, appearance: .dark, transcript: transcript, transcriptStartByteOffset: 0,
                     transcriptEndByteOffset: UInt64(transcript.count), requestedByteCount: transcript.count, transcriptFileIdentity: nil,
-                    runIdentity: nil))
+                    runIdentity: nil, stamps: []))
             return ReplayedScreen(snapshot: model.currentSnapshot())
         }
 

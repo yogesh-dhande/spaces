@@ -11,9 +11,9 @@ import spacesterminalcore
             return (columns: max(rawColumns, 1), rows: max(rawRows, 1))
         }
 
-        /// The monospaced cell size a terminal surface at `fontSize` measures. Exposed here so the
-        /// Copy pill's placement math (SwiftUI, outside the host view) can agree with the surface on
-        /// where a row/column lands without duplicating the measurement.
+        /// The monospaced cell size a terminal surface at `fontSize` measures. Exposed here so placement
+        /// math outside the host view can agree with the surface on where a row/column lands without
+        /// duplicating the measurement.
         ///
         /// Consults `GhosttyRemoteTerminalHostView.cellMetricsCache` first (a real
         /// `ghostty_surface_size()` read converted from device pixels back to points, `px / scale`),

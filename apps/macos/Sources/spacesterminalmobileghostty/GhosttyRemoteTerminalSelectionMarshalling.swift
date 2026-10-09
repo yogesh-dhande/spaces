@@ -8,9 +8,8 @@ import spacesterminalcore
 /// This duplicates `GhosttyMirrorSelectionMarshalling` from the macOS-only `spacesterminalghostty` target
 /// rather than importing it: `spacesterminalmobileghostty` depends only on `spacesterminalcore` and
 /// `GhosttyKit`, not on the AppKit mirror target, so the mapping is kept here instead as its own small,
-/// independently testable unit. iOS never drags a local selection, so unlike the macOS counterpart this
-/// has no scroll-rect carry buffer or absolute-row conversion: the mirrored selection is always the
-/// daemon's shared selection, applied read-only.
+/// independently testable unit. The mirror never carries a drag of its own on iOS (the client re-projects
+/// its selection into every frame), so unlike the macOS counterpart this has no scroll-rect carry buffer.
 enum GhosttyRemoteTerminalSelectionMarshalling {
     /// Bit layout `ghostty_terminal_snapshot_s.selection_flags` expects: bit 0 present, bit 1 rectangle,
     /// bit 2 extends_above, bit 3 extends_below.

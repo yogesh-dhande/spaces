@@ -299,7 +299,7 @@ import Testing
         let model = try makeModel(transcript: first, stamps: [firstStamp])
         #expect(model.historyEpoch == firstStamp.historyEpoch)
 
-        #expect(model.append(clearAndMore, transcriptEndByteOffset: UInt64(first.count + clearAndMore.count)))
+        #expect(model.append(clearAndMore, transcriptEndByteOffset: UInt64(first.count + clearAndMore.count), stamps: []))
         #expect(model.historyEpoch != firstStamp.historyEpoch, "the clear renumbered the replay's rows, so the old alignment no longer holds")
 
         host.write(clearAndMore)

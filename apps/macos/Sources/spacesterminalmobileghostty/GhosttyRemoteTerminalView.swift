@@ -105,16 +105,22 @@ import Foundation
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
         public let onPasteClipboardImage: (@MainActor () -> Bool)?
-        /// A plain tap on the terminal content while the daemon's shared selection is present. iOS never
-        /// creates a selection, only clears the shared one (#514 tracks drag-to-select parity), so this
-        /// fires instead of the usual link-probe/focus tap handling; see `handleTapToActivateInput`.
-        public let onClearSelectionTapped: (@MainActor () -> Void)?
+        /// A press or release by a long-press drag in a session whose application is tracking the mouse.
+        /// Answers whether it was sent; a refused press makes the long press select text instead.
+        public let onSendMouseButton: (@MainActor (UInt8, Bool, TerminalScrollPointerPosition) -> Bool)?
+        /// The same drag's pointer motion, sent once per cell and only when the frame's tracking level
+        /// wants it.
+        public let onSendMouseMotion: (@MainActor (TerminalScrollPointerPosition) -> Bool)?
+        /// The selection this client holds, which the view paints and anchors its handles and menu to.
+        /// The owner holds it so it follows its text across frames; the view only reports what the user
+        /// does through `selectionActions`.
+        public let clientSelection: TerminalAbsoluteSelection?
+        public let selectionActions: GhosttyRemoteTerminalSelectionActions?
+        /// The color of the selection handles.
+        public let selectionAccentColor: UIColor
         /// Reports the exact window the host view renders out of the daemon's grid, which the software
         /// keyboard changes without the session's own grid changing at all. The row offset moves with the
-        /// cursor on nearly every frame, so this fires on more frames than a size-only report would, but
-        /// the Copy pill has to crop against exactly the window the surface painted, not a recomputed one
-        /// that can disagree with it while a retained scrollback offset is in play (see
-        /// `TerminalSelectionCopyPillLayout.anchor(snapshot:window:...)`).
+        /// cursor on nearly every frame, so this fires on more frames than a size-only report would.
         public let onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)?
 
         public init(
@@ -127,8 +133,11 @@ import Foundation
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)? = nil,
+            onSendMouseButton: (@MainActor (UInt8, Bool, TerminalScrollPointerPosition) -> Bool)? = nil,
+            onSendMouseMotion: (@MainActor (TerminalScrollPointerPosition) -> Bool)? = nil, clientSelection: TerminalAbsoluteSelection? = nil,
+            selectionActions: GhosttyRemoteTerminalSelectionActions? = nil, selectionAccentColor: UIColor = .systemTeal,
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
-            onPasteClipboardImage: (@MainActor () -> Bool)? = nil, onClearSelectionTapped: (@MainActor () -> Void)? = nil
+            onPasteClipboardImage: (@MainActor () -> Bool)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -148,10 +157,14 @@ import Foundation
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
             self.onSendMouseClick = onSendMouseClick
+            self.onSendMouseButton = onSendMouseButton
+            self.onSendMouseMotion = onSendMouseMotion
+            self.clientSelection = clientSelection
+            self.selectionActions = selectionActions
+            self.selectionAccentColor = selectionAccentColor
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
             self.onPasteClipboardImage = onPasteClipboardImage
-            self.onClearSelectionTapped = onClearSelectionTapped
         }
 
         public func makeUIView(context: Context) -> GhosttyRemoteTerminalHostView { GhosttyRemoteTerminalHostView() }
@@ -186,9 +199,18 @@ import Foundation
             hostView.onSendMouseClick = onSendMouseClick.map { callback in
                 { button, pointerPosition in MainActor.assumeIsolated { callback(button, pointerPosition) } }
             }
+            // Synchronous like the click: the drag's press must be answered before the view decides whether
+            // the long press selects text, and motion follows the finger without a turn in between.
+            hostView.onSendMouseButton = onSendMouseButton.map { callback in
+                { button, pressed, pointerPosition in MainActor.assumeIsolated { callback(button, pressed, pointerPosition) } }
+            }
+            hostView.onSendMouseMotion = onSendMouseMotion.map { callback in
+                { pointerPosition in MainActor.assumeIsolated { callback(pointerPosition) } }
+            }
+            hostView.selectionActions = selectionActions
+            hostView.setSelectionAccentColor(selectionAccentColor)
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
-            hostView.onClearSelectionTapped = onClearSelectionTapped.map { callback in { _ = Task { @MainActor in callback() } } }
             // Synchronous, unlike the Task-hopping callbacks around it: the paste routes need the
             // handler's answer (did the clipboard image claim this paste?) before deciding whether to
             // fall through to the text paste. UIKit delivers the paste on the main thread.
@@ -197,6 +219,7 @@ import Foundation
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
             hostView.setTerminalFontSize(fontSize)
+            hostView.setClientSelection(clientSelection)
             hostView.update(ownerEpoch: ownerEpoch, endedRender: endedRender, fallbackText: fallbackText)
             hostView.reconcileFirstResponderAfterSheetDismissal(dismissalTick: sheetDismissalTick)
         }
@@ -249,7 +272,6 @@ import Foundation
             case openedLink
             case forwardedClick
             case focused
-            case clearedSelection
         }
 
         struct AccessoryToolbarButtonLabels: Equatable {
@@ -298,13 +320,13 @@ import Foundation
             return GhosttyTerminalCellMetricsCache.stamp(appVersion: "\(shortVersion)+\(buildVersion)", configFileContents: configContents)
         }
 
-        private var mirror: ghostty_mirror_t?
-        private var fontSize: TerminalFontSize = .default
+        var mirror: ghostty_mirror_t?
+        var fontSize: TerminalFontSize = .default
         private var activeOwnerEpoch: GhosttyRemoteTerminalOwnerEpoch?
         private var activeEndedRender: GhosttyRemoteTerminalEndedRender?
         private var latestRenderFrame: GhosttyRenderFrame?
         private var latestSnapshot: GhosttyTerminalSnapshot?
-        private var currentRenderedSnapshot: GhosttyTerminalSnapshot?
+        var currentRenderedSnapshot: GhosttyTerminalSnapshot?
         private var lastRenderKey = ""
         /// What the mirror surface currently holds. SwiftUI re-runs `updateUIView` and UIKit re-runs
         /// `layoutSubviews` for reasons that have nothing to do with the terminal's content — a title
@@ -364,7 +386,7 @@ import Foundation
         /// `.began`. While it is set every scroll delta is dropped rather than forwarded: see
         /// `cancelScrollGestureForInput()`.
         private var scrollGestureCancelledByInput = false
-        private var scrollInteractionDepth = 0
+        var scrollInteractionDepth = 0
         private var deferredViewportSizeReport = false
         /// `nonisolated(unsafe)` so `deinit` can read the link it has to invalidate: a `deinit` is
         /// nonisolated and cannot touch a non-`Sendable` isolated property. It has exclusive access to
@@ -388,9 +410,11 @@ import Foundation
         private let suppressedSoftwareKeyboardInputView = UIView(frame: .zero)
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput(_:)))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
+        let selectionInteraction = GhosttyRemoteTerminalSelectionInteraction()
         private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
-            onComposer: { [weak self] in self?.onOpenComposer?() }, onPaste: { [weak self] in self?.pasteFromClipboard() },
-            onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
+            onSelect: { [weak self] in self?.toggleSelectMode() }, onComposer: { [weak self] in self?.onOpenComposer?() },
+            onPaste: { [weak self] in self?.pasteFromClipboard() }, onText: { [weak self] text in self?.sendAccessoryText(text) },
+            onKey: { [weak self] key in self?.sendAccessoryKey(key) },
             onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
         var debugTapLinkHandlerForTesting: ((CGPoint) -> Bool)?
@@ -413,10 +437,7 @@ import Foundation
         /// Reports the exact window this view renders out of the daemon's grid. Distinct from
         /// `onViewportSizeChanged`, which reports the grid the daemon should hold; on iOS the software
         /// keyboard changes only the former (see `reportedViewportBounds()`). The row offset moves with
-        /// the cursor on nearly every frame, so this fires on more frames than a size-only report would;
-        /// the detail view already re-evaluates its placement every frame off `latestState`, and the Copy
-        /// pill has to agree with the rendered rows exactly, so the extra reports are the cost of that
-        /// agreement rather than waste.
+        /// the cursor on nearly every frame, so this fires on more frames than a size-only report would.
         public var onRenderedViewportChanged: ((GhosttyTerminalSnapshotViewport.Window) -> Void)?
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
@@ -431,9 +452,14 @@ import Foundation
         /// (types this layer cannot see) and returns whether it claimed the paste; `false` means the
         /// declared image carried nothing readable, so the text paste runs instead.
         public var onPasteClipboardImage: (() -> Bool)?
-        /// Fires from `handleTapToActivateInput` when a plain tap lands while the daemon's shared
-        /// selection is present. Never fires from the copy pill's own tap target.
-        public var onClearSelectionTapped: (() -> Void)?
+        /// A long-press drag's press or release, forwarded to a program that tracks the mouse; answers
+        /// whether it was sent.
+        public var onSendMouseButton: ((UInt8, Bool, TerminalScrollPointerPosition) -> Bool)?
+        public var onSendMouseMotion: ((TerminalScrollPointerPosition) -> Bool)?
+        /// What the user does to the selection by touch; the owner holds the selection itself.
+        public var selectionActions: GhosttyRemoteTerminalSelectionActions?
+        /// The selection the owner holds, painted into every frame this view shows.
+        public internal(set) var clientSelection: TerminalAbsoluteSelection?
         public var onRenderedTextChanged: ((String) -> Void)? {
             didSet {
                 guard onRenderedTextChanged == nil else {
@@ -503,9 +529,21 @@ import Foundation
             backgroundColor = .black
             inputAssistantItem.leadingBarButtonGroups = []
             inputAssistantItem.trailingBarButtonGroups = []
+            activateInputRecognizer.delegate = self
             addGestureRecognizer(activateInputRecognizer)
             scrollPanRecognizer.maximumNumberOfTouches = 2
+            scrollPanRecognizer.delegate = self
             addGestureRecognizer(scrollPanRecognizer)
+            installSelectionInteraction()
+        }
+
+        /// The accessory Shift key is armed: Shift keeps its meaning of "this is for the terminal, not the
+        /// program", so a long press selects text even in a program that tracks the mouse.
+        var isShiftModifierPending: Bool { pendingAccessoryModifiers.contains(.shift) }
+
+        func setSelectKeyState(isVisible: Bool, isOn: Bool) {
+            terminalAccessoryView.isSelectKeyVisible = isVisible
+            terminalAccessoryView.isSelectKeyOn = isOn
         }
 
         @available(*, unavailable) required init?(coder: NSCoder) { nil }
@@ -547,6 +585,8 @@ import Foundation
             let hadRenderedSnapshot = currentRenderedSnapshot != nil
             momentumDisplayLink?.invalidate()
             momentumDisplayLink = nil
+            stopSelectionAutoscroll()
+            dismissSelectionMenu()
             resignFirstResponder()
             activeOwnerEpoch = nil
             activeEndedRender = nil
@@ -746,6 +786,19 @@ import Foundation
 
         public override func paste(_ sender: Any?) { pasteFromClipboard() }
 
+        /// Cmd+C and Cmd+A from a hardware keyboard, the same actions as the menu's.
+        public override func copy(_ sender: Any?) { selectionActions?.copy() }
+
+        public override func selectAll(_ sender: Any?) { selectionActions?.selectAll() }
+
+        public override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            switch action {
+            case #selector(copy(_:)): return clientSelection != nil
+            case #selector(selectAll(_:)): return selectionActions != nil
+            default: return super.canPerformAction(action, withSender: sender)
+            }
+        }
+
         /// Pastes the clipboard, image first: an image belongs in the composer as an attachment the user
         /// then sends deliberately, never in the terminal as bytes, so `onPasteClipboardImage` takes the
         /// paste when the clipboard holds one. Text is sent as a bracketed paste. Shared by the system
@@ -786,6 +839,8 @@ import Foundation
                 UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: .alternate, action: #selector(sendOptionArrowLeft)),
                 UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: .alternate, action: #selector(sendOptionArrowRight)),
                 UIKeyCommand(input: "k", modifierFlags: .command, action: #selector(sendCommandK)),
+                UIKeyCommand(input: "c", modifierFlags: .command, action: #selector(copy(_:))),
+                UIKeyCommand(input: "a", modifierFlags: .command, action: #selector(selectAll(_:))),
                 // Modified Return has to be claimed explicitly: an unmodified Return arrives through
                 // `insertText`, which cannot see modifier flags at all.
                 UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(sendShiftEnter)),
@@ -854,27 +909,13 @@ import Foundation
         /// application draws. A forwarded tap belongs to the application alone and does not also raise
         /// the keyboard; in every other session a tap focuses the keyboard exactly as it did before.
         ///
-        /// While the daemon's shared selection is present, a plain tap is exclusively a clear gesture
-        /// instead: it neither opens a link nor focuses the keyboard, matching a tap that dismisses a
-        /// transient overlay. The highlight itself is not cleared here; it disappears only once a
-        /// render frame without a selection arrives, so the paint always reflects the daemon's actual
-        /// selection state rather than a locally-guessed one. The copy pill sits in its own SwiftUI
-        /// overlay above this view and captures its own taps, so a pill tap never reaches here.
-        ///
-        /// Reading the rendered snapshot's viewport-projected selection means a selection scrolled
-        /// wholly off this viewport does not turn the tap into a clear, deliberately, matching
-        /// the Mac mirror's guard: the export omits a selection with no viewport overlap, and a tap
-        /// with no visible highlight means link-or-focus, not deselect. See the click-to-clear
-        /// scope note in docs/spec.md.
-        ///
-        /// On an ended session's frozen final frame (`activeEndedRender != nil`) the selection can
-        /// never change again and the daemon rejects a clear with `sessionNotRunning`, so a tap goes
-        /// back to being link-or-focus; the painted highlight simply remains part of the final render.
+        /// A tap also ends this client's selection, and then is handled as any other tap: the selection is
+        /// the user's own and clearing it costs nothing, so the tap does not have to be spent on the
+        /// dismissal. A tap on a handle never reaches here (see the gesture delegate).
         @discardableResult private func handleTapToActivateInput(at location: CGPoint) -> TapActivationResult {
-            if currentRenderedSnapshot?.selection != nil, activeEndedRender == nil {
-                onClearSelectionTapped?()
-                return .clearedSelection
-            }
+            // Always told, even with nothing painted: a Select All still waiting on its read has no
+            // selection yet, and the tap must cancel it before it installs one.
+            selectionActions?.clear()
             let openedLink = openTerminalLink(at: location)
             // The probe above synthesizes a left press/release on the mirror surface even when it finds
             // no link, and Ghostty clears the surface's local selection on that press. An ended surface
@@ -1033,7 +1074,7 @@ import Foundation
             momentumDisplayLink = displayLink
         }
 
-        private func stopMomentum() {
+        func stopMomentum() {
             let hadMomentum = momentumDisplayLink != nil
             if hadMomentum {
                 _ = sendScroll(
@@ -1048,12 +1089,18 @@ import Foundation
             if hadMomentum { endScrollInteraction() }
         }
 
-        private func beginScrollInteraction() { scrollInteractionDepth += 1 }
+        /// The menu steps aside while the page moves and returns when it settles.
+        private func beginScrollInteraction() {
+            scrollInteractionDepth += 1
+            dismissSelectionMenu()
+        }
 
         private func endScrollInteraction() {
             guard scrollInteractionDepth > 0 else { return }
             scrollInteractionDepth -= 1
-            guard scrollInteractionDepth == 0, deferredViewportSizeReport else { return }
+            guard scrollInteractionDepth == 0 else { return }
+            refreshSelectionChrome()
+            guard deferredViewportSizeReport else { return }
             deferredViewportSizeReport = false
             reportViewportSizeIfNeeded()
         }
@@ -1189,13 +1236,17 @@ import Foundation
                 renderedCrop = nil
                 latestRenderFrame = nil
                 setNeedsDisplay()
+                refreshSelectionChrome()
+                refreshSelectKey()
                 emitRenderedTextIfNeeded(force: false)
                 reportInputReadinessIfNeeded()
                 return
             }
             emitHostRenderEvent("host_view_render_begin", dedupeKey: lastRenderKey)
             let window = viewportWindow(for: latestSnapshot)
-            let cropped = GhosttyTerminalSnapshotViewport.crop(latestSnapshot, window: window)
+            // The client's own selection replaces whatever the host's frame carried, and is painted before
+            // the crop so the crop rebases it with the rest of the frame.
+            let cropped = GhosttyTerminalSnapshotViewport.crop(latestSnapshot.withClientSelection(clientSelection), window: window)
             currentRenderedSnapshot = cropped
             renderedSnapshotCoversHostColumns = GhosttyTerminalSnapshotViewport.coversColumns(latestSnapshot, window: window)
             renderedCrop = RenderedCrop(window: window, gridColumns: latestSnapshot.columns, gridRows: latestSnapshot.rows)
@@ -1212,6 +1263,9 @@ import Foundation
             }
             emitRenderedTextIfNeeded(force: false)
             reportInputReadinessIfNeeded()
+            refreshSelectionChrome()
+            refreshSelectKey()
+            scheduleSelectionPointerResolve()
             emitHostRenderEvent("host_view_render_end", dedupeKey: lastRenderKey)
         }
 
@@ -1304,12 +1358,12 @@ import Foundation
             GhosttySharedTerminalMirror.shared.makeSurfaceHost(scaleFactor: Double(window?.screen.scale ?? UIScreen.main.scale))
         }
 
-        private func mirrorSurface() -> ghostty_surface_t? {
+        func mirrorSurface() -> ghostty_surface_t? {
             guard let mirror else { return nil }
             return ghostty_mirror_surface(mirror)
         }
 
-        private var mirrorCapturesMouse: Bool {
+        var mirrorCapturesMouse: Bool {
             if let debugMouseCapturedForTesting { return debugMouseCapturedForTesting }
             guard let surface = mirrorSurface() else { return false }
             return ghostty_surface_mouse_captured(surface)
@@ -1360,9 +1414,7 @@ import Foundation
             return openedLink
         }
 
-        private static func ghosttyMousePosition(for location: CGPoint) -> (x: Double, y: Double) {
-            (Double(max(location.x, 0)), Double(max(location.y, 0)))
-        }
+        static func ghosttyMousePosition(for location: CGPoint) -> (x: Double, y: Double) { (Double(max(location.x, 0)), Double(max(location.y, 0))) }
 
         /// The modifiers the tap's link probe synthesizes. Super is what Ghostty's URL link requires to
         /// match. Shift rides along while the mirror carries the session's mouse tracking, because a
@@ -1554,8 +1606,8 @@ import Foundation
                     cSnapshot.selection_end_y = selectionFields.selectionEndY
                     cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
                     cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
-                    // iOS never drags a local selection (it only paints the daemon's shared selection and
-                    // clears it), so there is no in-progress drag-carry to describe: scroll_rect_count and
+                    // The selection travels in the frame's selection fields, re-projected by this client on
+                    // every frame, so the mirror carries no drag of its own: scroll_rect_count and
                     // scroll_rects stay at their zero/nil default and scroll_carry_valid stays false.
                     cSnapshot.scroll_carry_valid = false
 
@@ -1611,11 +1663,10 @@ import Foundation
         }
 
         /// Hands the window this view renders to whatever outside it needs to agree on what is on screen:
-        /// the Copy pill's placement, and the `keyboard_shift_applied` measurement. Deduped on the whole
-        /// window (`Window` is `Equatable`), not just its size: the row offset moves with the cursor on
-        /// nearly every frame, so this reports on more frames than a size-only dedupe would, but a report
-        /// that skipped an offset-only change would leave the Copy pill cropping against a window this
-        /// view no longer renders.
+        /// the jump-to-bottom button's placement, and the `keyboard_shift_applied` measurement. Deduped on
+        /// the whole window (`Window` is `Equatable`), not just its size: the row offset moves with the
+        /// cursor on nearly every frame, and a report that skipped an offset-only change would leave the
+        /// button placed against a window this view no longer renders.
         private func reportRenderedViewportIfNeeded(window: GhosttyTerminalSnapshotViewport.Window) {
             guard lastReportedRenderedViewport != window else { return }
             lastReportedRenderedViewport = window
@@ -1630,7 +1681,7 @@ import Foundation
         /// regardless of source, since some size is needed either way to lay out the current frame.
         private enum ViewportSizeSource { case surface, cachePrediction, estimate }
 
-        private var currentScaleFactor: Double { Double(window?.screen.scale ?? UIScreen.main.scale) }
+        var currentScaleFactor: Double { Double(window?.screen.scale ?? UIScreen.main.scale) }
 
         /// The grid the daemon is asked to hold, measured against ``reportedViewportBounds()``.
         private func reportedViewportSizeWithSource() -> (size: (columns: Int, rows: Int), source: ViewportSizeSource) {
@@ -1755,16 +1806,11 @@ import Foundation
         /// (`GhosttyRemoteTerminalViewport.cellMetrics(fontSize:scale:)`). The resulting cell is then
         /// rebased through the crop the last render used, exactly as a scroll's pointer is, so the
         /// software keyboard cannot shift which row the daemon expands it to.
-        private func tappedCellPointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {
-            let renderBounds = visibleRenderBounds()
-            guard renderBounds.width > 0, renderBounds.height > 0 else { return nil }
-            let scale = currentScaleFactor
-            let padding = Double(GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale: scale)) / scale
-            let cell = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: fontSize, scale: CGFloat(scale))
-            guard cell.width > 0, cell.height > 0 else { return nil }
+        func tappedCellPointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {
+            guard let geometry = selectionGridGeometry() else { return nil }
             let visibleGrid = renderedCrop.map { (columns: $0.window.columns, rows: $0.window.rows) } ?? renderedViewportSize()
-            let column = Int(((Double(location.x - renderBounds.minX) - padding) / Double(cell.width)).rounded(.down))
-            let row = Int(((Double(location.y - renderBounds.minY) - padding) / Double(cell.height)).rounded(.down))
+            let column = Int(((location.x - geometry.originX) / geometry.cellWidth).rounded(.down))
+            let row = Int(((location.y - geometry.originY) / geometry.cellHeight).rounded(.down))
             let center = TerminalPointerGrid.center(column: column, row: row, columns: visibleGrid.columns, rows: visibleGrid.rows)
             let visible = TerminalScrollPointerPosition(x: center.x, y: center.y)
             guard let renderedCrop else { return visible }
@@ -1851,7 +1897,7 @@ import Foundation
 
         private func toggleAccessorySoftwareKeyboard() { setSoftwareKeyboardVisible(suppressesSoftwareKeyboard) }
 
-        private func visibleRenderBounds() -> CGRect { boundsMinusOcclusion(keyboardAndAccessoryOccludedHeight()) }
+        func visibleRenderBounds() -> CGRect { boundsMinusOcclusion(keyboardAndAccessoryOccludedHeight()) }
 
         /// The bounds the grid reported to the daemon is measured against: this view minus the input
         /// accessory toolbar, plus the software keyboard when the session is on the alternate screen.
@@ -2043,7 +2089,12 @@ import Foundation
 
             var pendingModifiers: Set<AccessoryModifier> = [] { didSet { updateModifierButtonAppearances() } }
             var isKeyboardVisible = true { didSet { updateKeyboardButtonImage() } }
+            /// The Select key is offered only while the program tracks the mouse; it forces the next long
+            /// press to select text instead of going to the program.
+            var isSelectKeyVisible = false { didSet { selectButton.isHidden = !isSelectKeyVisible } }
+            var isSelectKeyOn = false { didSet { updateSelectButtonAppearance() } }
 
+            private let onSelect: () -> Void
             private let onComposer: () -> Void
             private let onPaste: () -> Void
             private let onText: (String) -> Void
@@ -2055,6 +2106,7 @@ import Foundation
             private let contentStackView = UIStackView()
             private let pinnedStackView = UIStackView()
             private var modifierButtons: [AccessoryModifier: UIButton] = [:]
+            private let selectButton = UIButton(type: .system)
             private let composerButton = UIButton(type: .system)
             private let joystickButton = DirectionalPadButton(type: .system)
             private let keyboardButton = UIButton(type: .system)
@@ -2073,9 +2125,10 @@ import Foundation
             override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.toolbarHeight) }
 
             init(
-                onComposer: @escaping () -> Void, onPaste: @escaping () -> Void, onText: @escaping (String) -> Void,
+                onSelect: @escaping () -> Void, onComposer: @escaping () -> Void, onPaste: @escaping () -> Void, onText: @escaping (String) -> Void,
                 onKey: @escaping (String) -> Void, onModifier: @escaping (AccessoryModifier) -> Void, onKeyboardToggle: @escaping () -> Void
             ) {
+                self.onSelect = onSelect
                 self.onComposer = onComposer
                 self.onPaste = onPaste
                 self.onText = onText
@@ -2156,6 +2209,14 @@ import Foundation
                 addModifierButton(.control)
                 addModifierButton(.command)
                 addModifierButton(.option)
+
+                configureButton(selectButton, imageName: "character.cursor.ibeam")
+                selectButton.accessibilityIdentifier = "terminal.accessory.select"
+                selectButton.accessibilityLabel = "Select text"
+                selectButton.accessibilityHint = "Makes the next long press select text instead of going to the program."
+                selectButton.addAction(UIAction { [weak self] _ in self?.onSelect() }, for: .touchUpInside)
+                selectButton.isHidden = true
+                pinnedStackView.addArrangedSubview(selectButton)
 
                 configureButton(composerButton, imageName: "plus.bubble")
                 composerButton.accessibilityIdentifier = "terminal.accessory.composer"
@@ -2282,6 +2343,13 @@ import Foundation
                 }
             }
 
+            private func updateSelectButtonAppearance() {
+                selectButton.backgroundColor = isSelectKeyOn ? .white : UIColor.white.withAlphaComponent(0.13)
+                selectButton.tintColor = isSelectKeyOn ? .black : .white
+                selectButton.layer.borderColor = UIColor.white.withAlphaComponent(isSelectKeyOn ? 0 : 0.14).cgColor
+                selectButton.accessibilityValue = isSelectKeyOn ? "On" : "Off"
+            }
+
             private func updateKeyboardButtonImage() {
                 let imageName = isKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard"
                 keyboardButton.setImage(UIImage(systemName: imageName), for: .normal)
@@ -2326,9 +2394,13 @@ import Foundation
                 layoutIfNeeded()
             }
 
-            private func buttonLabels(in stackView: UIStackView) -> [String] { stackView.arrangedSubviews.compactMap { $0.accessibilityLabel } }
+            private func buttonLabels(in stackView: UIStackView) -> [String] {
+                stackView.arrangedSubviews.filter { !$0.isHidden }.compactMap { $0.accessibilityLabel }
+            }
 
-            private func buttonWidths(in stackView: UIStackView) -> [CGFloat] { stackView.arrangedSubviews.map { $0.bounds.width } }
+            private func buttonWidths(in stackView: UIStackView) -> [CGFloat] {
+                stackView.arrangedSubviews.filter { !$0.isHidden }.map { $0.bounds.width }
+            }
         }
 
         private final class DirectionalPadButton: UIButton {

@@ -95,7 +95,7 @@ public final class TerminalLocalScrollbackModel: @unchecked Sendable {
     public init?(
         columns: Int, rows: Int, maxScrollbackBytes: Int = TerminalScrollbackBudget.defaultMaxBytes, theme: GhosttyThemeExport,
         appearance: ThemeAppearance, transcript: Data, transcriptStartByteOffset: UInt64, transcriptEndByteOffset: UInt64, requestedByteCount: Int,
-        transcriptFileIdentity: UInt64?, runIdentity: String?, stamps: [TerminalLiveFrameStamp] = []
+        transcriptFileIdentity: UInt64?, runIdentity: String?, stamps: [TerminalLiveFrameStamp]
     ) {
         guard
             let replay = TerminalScrollbackReplaySession(
@@ -132,7 +132,7 @@ public final class TerminalLocalScrollbackModel: @unchecked Sendable {
     /// known now; the latest one that names this file at an offset inside the appended bytes (after the
     /// current end, through the new end) aligns the replay with the host there. Returns false when the
     /// bytes could not be replayed, which leaves the model unchanged and unusable for further paging.
-    @discardableResult public func append(_ bytes: Data, transcriptEndByteOffset: UInt64, stamps: [TerminalLiveFrameStamp] = []) -> Bool {
+    @discardableResult public func append(_ bytes: Data, transcriptEndByteOffset: UInt64, stamps: [TerminalLiveFrameStamp]) -> Bool {
         let currentEnd = self.transcriptEndByteOffset
         let appendedOffsets = transcriptEndByteOffset > currentEnd ? currentEnd + 1...transcriptEndByteOffset : nil
         guard write(bytes, fileBytesStart: 0, fileOffsetAtStart: currentEnd, stampOffsets: appendedOffsets, stamps: stamps) else { return false }

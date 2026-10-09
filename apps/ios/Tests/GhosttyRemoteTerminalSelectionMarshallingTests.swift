@@ -7,7 +7,7 @@
     /// host-anchored shared selection: none of it needs a live surface, a window, or the main actor, so
     /// it is exercised directly here instead of through the view. Mirrors
     /// `GhosttyMirrorSelectionMarshallingTests` on the macOS side, minus the scroll-rect carry buffer and
-    /// absolute-row conversion the iOS mirror has no use for (iOS never drags a local selection).
+    /// absolute-row conversion the iOS mirror has no use for (the client projects its selection itself).
     final class GhosttyRemoteTerminalSelectionMarshallingTests: XCTestCase {
         func testNilSelectionMapsToAllZeroFieldsWithScrollbarPassthrough() {
             let fields = GhosttyRemoteTerminalSelectionMarshalling.cSnapshotSelectionFields(selection: nil, scrollbarTotal: 500, scrollbarOffset: 12)

@@ -380,10 +380,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var viewportSize: (columns: Int, rows: Int)?
     /// The exact window `GhosttyRemoteTerminalHostView` last rendered out of `viewportSize`'s grid:
     /// smaller than the grid whenever the software keyboard is up, and shifted down by its row offset
-    /// whenever the frame is scrolled back. This is what the Copy pill crops against (see
-    /// `TerminalSelectionCopyPillLayout.anchor(snapshot:window:...)`); reusing the host view's own window
-    /// rather than recomputing one from columns/rows is what keeps the pill's crop and the surface's own
-    /// crop from disagreeing while a retained scrollback offset is in play.
+    /// whenever the frame is scrolled back. The jump-to-bottom button places itself against this window
+    /// rather than a grid recomputed from columns and rows, so it cannot disagree with the surface while
+    /// a retained scrollback offset is in play.
     private(set) var renderedViewportWindow: GhosttyTerminalSnapshotViewport.Window?
     private var lastSentResizeSize: (columns: Int, rows: Int)?
     private var resizeSerial: UInt64 = 0
@@ -553,7 +552,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var sceneState = TerminalViewerSceneState.active(resume: .none)
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
-    private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
+    private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch? { didSet { endClientSelectionNotInShownEpoch() } }
     /// The screen this open painted from `TerminalRetainedScreenStore` before it asked the device
     /// anything (see `paintRetainedScreenIfAvailable`). Deliberately not `ownerRenderEpochState`: this is
     /// a picture of what the app last showed, not a state this lifecycle has confirmed, so every owner
@@ -668,7 +667,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// one, `loading` while a transcript page is fetched and replayed (accumulating the rows a gesture
     /// scrolled meanwhile, and carrying the replay an incremental page appends to), `ready` once the
     /// replay exists, `unavailable` when a replay could not be built at all.
-    @ObservationIgnored private var localScrollbackState = LocalScrollbackState.idle
+    @ObservationIgnored private var localScrollbackState = LocalScrollbackState.idle {
+        // Every load exit moves the state, so this is where a waiting copy or select-all learns the
+        // replay changed. The hop lets the exit finish its own bookkeeping before the request
+        // re-plans, and keeps a step it starts from nesting inside this observer.
+        didSet {
+            guard pendingSelectionReplay != nil else { return }
+            scheduleSelectionRequestAdvance()
+        }
+    }
     /// Invalidates in-flight transcript loads. Bumped by every discard, and checked after each suspension
     /// in the loader, so a page fetched for a run, grid, or appearance this viewer has already moved past
     /// is dropped instead of installed.
@@ -712,10 +719,24 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     @ObservationIgnored private var isLocalScrollbackRewindPending = false
     /// The locally scrolled screen the view renders instead of the session's live frame. Non-nil exactly
     /// while this client is showing its own replay.
-    private var localScrollRender: GhosttyRemoteTerminalOwnerEpoch?
+    private var localScrollRender: GhosttyRemoteTerminalOwnerEpoch? { didSet { endClientSelectionNotInShownEpoch() } }
     /// Distinguishes consecutive local frames from each other, so the host view's frame dedupe never drops
     /// a scrolled viewport that happens to match the previous one.
     @ObservationIgnored private var localScrollRevision: UInt64 = 0
+    /// The selection this client holds for the terminal, and the touch drag growing it. Never sent to the
+    /// session: it is this client's alone, in absolute rows, and the view paints it over whatever frame is
+    /// on screen (`GhosttyRemoteTerminalView.clientSelection`).
+    @ObservationIgnored private var selectionState = TerminalTouchSelectionState() {
+        // Mirrored into the observable property only when it changes: a live frame touches the state on
+        // every frame, and republishing an unchanged selection would re-evaluate the view each time.
+        didSet { if selectionState.selection != clientSelection { clientSelection = selectionState.selection } }
+    }
+    private(set) var clientSelection: TerminalAbsoluteSelection?
+    /// The recent live frame stamps, which line the replay's rows up with the host's. Fed by every live
+    /// frame, and passed to every replay build and append.
+    @ObservationIgnored private var liveFrameStamps = TerminalLiveFrameStampRing()
+    /// The copy or select-all waiting on the replay, if any.
+    @ObservationIgnored private var pendingSelectionReplay: TerminalPendingSelectionReplay?
     /// True when the session painted at least one frame while this client was showing its own replay,
     /// which is what marks the jump-to-bottom control as carrying new output. Cleared with the replay.
     private var hasLiveFrameDuringLocalScroll = false
@@ -921,13 +942,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// painted from the retained store, which the first live epoch replaces.
     var ownerRenderEpoch: GhosttyRemoteTerminalOwnerEpoch? { localScrollRender ?? ownerRenderEpochState ?? retainedScreenEpochState }
     /// True while the surface is drawing this client's own replay rather than a session frame. The replay
-    /// is built from transcript bytes alone, so it carries no shared selection: anything anchored to the
-    /// session's selection coordinates (the highlight, the Copy pill) belongs to a different frame than
-    /// the one on screen and steps aside until the replay is dropped.
+    /// is built from transcript bytes alone, so the cells under a finger are not cells the program drew:
+    /// mouse events stay home until the replay is dropped.
     var isShowingLocalScrollFrame: Bool { localScrollRender != nil }
     /// An ended session's frozen final frame, and nil while this client's own replay holds the screen: the
-    /// two render states are mutually exclusive, the way the shared selection and the Copy pill already
-    /// step aside on a replay frame.
+    /// two render states are mutually exclusive.
     ///
     /// The host keeps whatever ended render it is handed and pushes that frame back onto the surface after
     /// a tap's link probe (`reapplyActiveEndedRenderFrameIfNeeded`), which heals the surface on an ended
@@ -1124,12 +1143,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Called from the terminal surface's layout and crop pass with the exact window it rendered out of
     /// the session's grid.
     ///
-    /// Two jobs. It is where the Copy pill learns what is actually on screen, so the pill can crop against
-    /// the same window the surface painted rather than recomputing one that can disagree with it (see
-    /// `TerminalSelectionCopyPillLayout.anchor(snapshot:window:...)`). And it closes out a pending keyboard
-    /// toggle with `keyboard_shift_applied`, whose elapsed time is the whole cost of a keyboard transition
-    /// for the terminal: no resize goes out, so there is no round trip, no full frame, and no reflow for
-    /// other clients to wait on.
+    /// Two jobs. It is where the jump-to-bottom button learns what is actually on screen. And it closes out
+    /// a pending keyboard toggle with `keyboard_shift_applied`, whose elapsed time is the whole cost of a
+    /// keyboard transition for the terminal: no resize goes out, so there is no round trip, no full frame,
+    /// and no reflow for other clients to wait on.
     func noteRenderedViewportChanged(window: GhosttyTerminalSnapshotViewport.Window) {
         renderedViewportWindow = window
         guard let toggle = pendingKeyboardToggle else { return }
@@ -1816,6 +1833,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard !text.isEmpty else { return }
         flushPendingScroll()
         endLocalScrollGesture(reason: "input")
+        // Typing ends the selection; a paste is not typing and the selection it replaces is the user's to keep.
+        if !asPaste { clearClientSelection() }
         if appendNewline {
             flushBufferedInputText()
             enqueueInputSend(kind: "send_text", detail: "\(text)\\n") { [weak self, text] in
@@ -1840,6 +1859,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard acceptsInput, hasConfirmedOwnerInputReadiness else { return }
         flushPendingScroll()
         endLocalScrollGesture(reason: "input")
+        clearClientSelection()
         // Cmd+K clears the session's screen and scrollback, and the daemon records that clear in the
         // transcript, so a fresh read reproduces it while the replay already built predates it and still
         // holds the rows the clear removed. Discarded here at the send rather than left to the
@@ -1895,6 +1915,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard canSendComposedMessage, isOwner else { return }
         flushPendingScroll()
         endLocalScrollGesture(reason: "input")
+        clearClientSelection()
         flushBufferedInputText()
         let draftText = composerDraftText
         // Capture only the Sendable payloads (not the attachments, whose UIImage thumbnails are not
@@ -2060,20 +2081,41 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// input is flushed ahead of them for the same reason: a click after typed text has to reach the
     /// application after that text.
     @discardableResult func sendMouseClick(button: UInt8, at pointerPosition: TerminalScrollPointerPosition) -> Bool {
-        guard isOwner, acceptsInput, hasConfirmedOwnerInputReadiness else { return false }
-        guard !isShowingLocalScrollFrame else { return false }
+        guard sendMouseButton(button: button, pressed: true, at: pointerPosition) else { return false }
+        sendMouseButton(button: button, pressed: false, at: pointerPosition)
+        return true
+    }
+
+    /// Forwards one press or release to a program tracking the mouse, under `sendMouseClick`'s gate. A
+    /// long-press drag sends the press when the finger goes down and the release when it lifts, with
+    /// `sendMouseMotion` between.
+    @discardableResult func sendMouseButton(button: UInt8, pressed: Bool, at pointerPosition: TerminalScrollPointerPosition) -> Bool {
+        guard canForwardMouse else { return false }
         flushPendingScroll()
         flushBufferedInputText()
-        enqueueInputSend(kind: "mouse_button", detail: "press") { [weak self, button, pointerPosition] in
+        enqueueInputSend(kind: "mouse_button", detail: pressed ? "press" : "release") { [weak self, button, pressed, pointerPosition] in
             guard let self else { return }
-            try await self.performMouseButtonRequest(button: button, pressed: true, pointerPosition: pointerPosition)
-        }
-        enqueueInputSend(kind: "mouse_button", detail: "release") { [weak self, button, pointerPosition] in
-            guard let self else { return }
-            try await self.performMouseButtonRequest(button: button, pressed: false, pointerPosition: pointerPosition)
+            try await self.performMouseButtonRequest(button: button, pressed: pressed, pointerPosition: pointerPosition)
         }
         return true
     }
+
+    /// Forwards pointer motion over a new cell to a program tracking the mouse. The host view has
+    /// already applied the frame's `mouseTrackingLevel`. Motion rides the queue as supersedable: a burst
+    /// the wire cannot keep up with collapses to the newest position, while presses and releases are
+    /// never dropped or reordered.
+    @discardableResult func sendMouseMotion(at pointerPosition: TerminalScrollPointerPosition) -> Bool {
+        guard canForwardMouse else { return false }
+        enqueueInputSend(kind: "mouse_motion", detail: "motion", supersedable: true) { [weak self, pointerPosition] in
+            guard let self else { return }
+            try await self.performMouseMotionRequest(pointerPosition: pointerPosition)
+        }
+        return true
+    }
+
+    /// Whether a mouse event may go to the program: this client owns input, and the cell under the finger
+    /// is one the program drew rather than a cell of this client's own replay.
+    private var canForwardMouse: Bool { isOwner && acceptsInput && hasConfirmedOwnerInputReadiness && !isShowingLocalScrollFrame }
 
     /// Returns the screen to the session's newest frame, for the jump-to-bottom control offered while
     /// `isScrolledIntoScrollback` is true.
@@ -2290,7 +2332,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func applyLocalScroll(vertical: Double, scrollMods: Int32) {
-        let deltaRows = localScrollDeltaNormalizer.terminalViewportDeltaRows(vertical: vertical, scrollMods: scrollMods)
+        scrollLocalReplay(deltaRows: localScrollDeltaNormalizer.terminalViewportDeltaRows(vertical: vertical, scrollMods: scrollMods))
+    }
+
+    /// Scrolls the replay by `deltaRows` (negative toward older rows), reading the first page when this
+    /// client has none yet. The route a pan takes, and the one a selection drag held past an edge takes.
+    private func scrollLocalReplay(deltaRows: Int) {
         switch localScrollbackState {
         // A replay that could not be built at all cannot be built by trying again on the next event; the
         // gesture is absorbed rather than sent to the daemon, so the session's viewport is never moved by a
@@ -2403,6 +2450,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // dropping, so its bytes have nothing left to append to.
         localScrollbackContinuationTask?.cancel()
         localScrollbackContinuationTask = nil
+        // The replay a copy or select-all was waiting on is gone; the press is not replayed against a
+        // different one.
+        pendingSelectionReplay = nil
         guard !isIdleLocalScrollback || hasAttemptedLocalScrollbackRead else { return }
         localScrollbackGeneration &+= 1
         localScrollbackState = .idle
@@ -2479,6 +2529,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // screen) can deallocate the model while the read is still on the wire.
         let bridgeClient = self.bridgeClient
         let startedAt = Date()
+        let stampsAtReadStart = liveFrameStamps.stamps
         localScrollbackLoadTask = Task { @MainActor [weak self] in
             let transcript: SpacesDeviceTerminalTranscriptResult
             do {
@@ -2528,7 +2579,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 return
             }
             await self.finishLoadingLocalScrollback(
-                fetch, transcript: transcript, load: load, grid: grid, theme: theme, appearance: appearance, isGestureInitiated: isGestureInitiated)
+                fetch, transcript: transcript, load: load, grid: grid, theme: theme, appearance: appearance, isGestureInitiated: isGestureInitiated,
+                stampsAtReadStart: stampsAtReadStart)
         }
     }
 
@@ -2557,6 +2609,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let sessionID = session.id
         let bridgeClient = self.bridgeClient
         let startedAt = Date()
+        let stampsAtReadStart = liveFrameStamps.stamps
         localScrollbackContinuationTask = Task { @MainActor [weak self] in
             let transcript: SpacesDeviceTerminalTranscriptResult
             do {
@@ -2570,6 +2623,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 // replay is still behind the session, and the next gesture asks again.
                 self.hasLiveFrameSinceLocalScrollbackRead = true
                 self.trace("local_scroll_continuation_failure error=\(self.sanitizedTraceDetail(error.localizedDescription))")
+                // The state did not move, so a waiting copy or select-all is told here that its read ended.
+                self.scheduleSelectionRequestAdvance()
                 return
             }
             // The replay must still be the one this read was started for: a deeper page, or any discard,
@@ -2594,7 +2649,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // Gesture-initiated: the only caller is `noteScrollGestureBegan`, so a gesture is in motion
             // for the whole of this read and owns whatever it comes back with.
             await self.finishLoadingLocalScrollback(
-                install, transcript: transcript, load: load, grid: grid, theme: theme, appearance: appearance, isGestureInitiated: true)
+                install, transcript: transcript, load: load, grid: grid, theme: theme, appearance: appearance, isGestureInitiated: true,
+                stampsAtReadStart: stampsAtReadStart)
         }
     }
 
@@ -2624,7 +2680,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     ///   what an empty read does to that gesture; see the empty-transcript path below.
     private func finishLoadingLocalScrollback(
         _ fetch: LocalScrollbackFetch, transcript: SpacesDeviceTerminalTranscriptResult, load: LocalScrollbackLoad, grid: TerminalLocalScrollbackGrid,
-        theme: GhosttyThemeExport, appearance: ThemeAppearance, isGestureInitiated: Bool
+        theme: GhosttyThemeExport, appearance: ThemeAppearance, isGestureInitiated: Bool, stampsAtReadStart: [TerminalLiveFrameStamp]
     ) async {
         let generation = localScrollbackGeneration
         // A continuation the daemon could not serve as one comes back as a fresh suffix it flagged: the
@@ -2662,6 +2718,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // Hoisted out of the detached closure: the load struct itself is not what crosses the isolation
         // boundary, only the replay it is carrying, which is `@unchecked Sendable` for exactly this hop.
         let replayToExtend = load.model
+        // The stamps at the read's start and the ring as it is now: a read on a slow link under streaming
+        // output can outlast the ring, and the stamps inside the bytes it served would otherwise be gone.
+        let stamps = liveFrameStamps.stamps(including: stampsAtReadStart)
         let installed: TerminalLocalScrollbackModel? = await Task.detached(priority: .userInitiated) {
             // The page travels as a raw DEFLATE stream. `deflate` refuses empty input, so a continuation
             // that returned nothing (the replay already ends at the transcript's end) carries an empty
@@ -2675,12 +2734,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 bytes = Data()
             }
             if appendsToReplay, let replayToExtend {
-                return replayToExtend.append(bytes, transcriptEndByteOffset: endByteOffset) ? replayToExtend : nil
+                return replayToExtend.append(bytes, transcriptEndByteOffset: endByteOffset, stamps: stamps) ? replayToExtend : nil
             }
             return TerminalLocalScrollbackModel(
                 columns: grid.columns, rows: grid.rows, theme: theme, appearance: appearance, transcript: bytes,
                 transcriptStartByteOffset: startByteOffset, transcriptEndByteOffset: endByteOffset, requestedByteCount: requestedByteCount,
-                transcriptFileIdentity: fileIdentity, runIdentity: runIdentity)
+                transcriptFileIdentity: fileIdentity, runIdentity: runIdentity, stamps: stamps)
         }.value
         // Building the replay is a suspension like any other: a discard (a run change, a grid change, an
         // appearance change, a stopped viewer) can have landed while it ran, and a replay built for state
@@ -2807,34 +2866,165 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    /// Clears the daemon's shared selection for every viewer of the session. Never owner-gated: iOS
-    /// never creates a selection (#514), it only ever asks to clear the one the daemon already has, and
-    /// any attached client may do that regardless of who owns input. Uses its own short-lived command
-    /// channel, matching `openTerminalLink`, rather than the owner-only input channel `sendText`/
-    /// `sendKey` share.
-    ///
-    /// Best-effort: a failed clear leaves the shared selection painted until the next daemon frame or a
-    /// retap resolves it, so there is nothing to surface to the user for a gesture this transient.
-    func clearSelection() async {
-        // The daemon rejects selection commands for ended sessions with sessionNotRunning; the UI
-        // hides these controls, and this guard keeps any other caller honest.
-        guard !isEndedState else { return }
-        let commandChannel = bridgeClient.makeCommandChannel()
-        defer { Task { await commandChannel.close() } }
-        try? await bridgeClient.clearSelection(sessionID: session.id, clientID: remoteClient.id, commandChannel: commandChannel)
+    // MARK: - Client selection
+
+    /// A long press selected `word`; the finger still down extends it (`extendSelectionDrag`).
+    func beginWordSelection(_ word: TerminalAbsoluteSelection) {
+        cancelPendingSelectAll()
+        isScrollGestureCancelled = false
+        selectionState.beginWordSelection(word)
     }
 
-    /// Reads the daemon's shared selection and writes it to the pasteboard. Returns whether the copy
-    /// succeeded so the Copy pill can swap its label to "Copied" only on success; a failure leaves the
-    /// pill reading "Copy" with no alert, so the user can simply retap.
-    @discardableResult func copySelection() async -> Bool {
-        guard !isEndedState else { return false }
-        let commandChannel = bridgeClient.makeCommandChannel()
-        defer { Task { await commandChannel.close() } }
-        guard let text = try? await bridgeClient.readSelectionText(sessionID: session.id, clientID: remoteClient.id, commandChannel: commandChannel)
-        else { return false }
-        (pasteboardOverrideForTesting ?? .general).string = text
-        return true
+    /// A finger took hold of one of the selection's handles.
+    func beginSelectionHandleDrag(_ handle: TerminalSelectionHandle) {
+        cancelPendingSelectAll()
+        isScrollGestureCancelled = false
+        selectionState.beginHandleDrag(handle)
+    }
+
+    /// The drag's finger is over `cell`, an absolute cell of the frame on screen.
+    func extendSelectionDrag(to cell: TerminalAbsoluteCell) { selectionState.extendDrag(to: cell) }
+
+    /// The finger lifted; the selection stays.
+    func endSelectionDrag() {
+        isSelectionAutoscrolling = false
+        selectionState.endDrag()
+    }
+
+    /// A tap, or typing, ends the selection.
+    func clearClientSelection() {
+        cancelPendingSelectAll()
+        isSelectionAutoscrolling = false
+        selectionState.clear()
+    }
+
+    /// A press, drag or handle drag by the user replaces whatever selection they had, so a select-all
+    /// still waiting on its read must not land over it. A pending copy stays: it copies the selection
+    /// the user pressed copy on.
+    private func cancelPendingSelectAll() { if pendingSelectionReplay?.request == .selectAll { pendingSelectionReplay = nil } }
+
+    /// Whether the held drag has started scrolling the replay, so its first tick can catch the replay up
+    /// the way the start of a pan does.
+    @ObservationIgnored private var isSelectionAutoscrolling = false
+
+    /// One row of a selection drag held past an edge, through the route a pan scrolls the replay by. It
+    /// moves only this client's replay and never the program, which a wheel event on the alternate screen
+    /// or under mouse tracking would reach; the alternate screen has no scrollback, so it does nothing
+    /// there, as in Ghostty.
+    func autoscrollSelection(towardOlderRows: Bool) {
+        guard latestState?.renderSnapshot?.alternateScreenActive != true else { return }
+        // A failed or empty read cancels the gesture it served, and a finger held at the edge ticks every
+        // 15 ms, so honoring the cancel keeps each tick from starting another read that fails the same
+        // way. The next selection drag (`beginWordSelection`, `beginSelectionHandleDrag`) lifts it.
+        // A failed or empty read cancels the gesture it served, and a finger held at the edge ticks every
+        // 15 ms, so honoring the cancel keeps each tick from starting another read that fails the same
+        // way. The next selection drag (`beginWordSelection`, `beginSelectionHandleDrag`) lifts it.
+        guard !isScrollGestureCancelled else { return }
+        if !isSelectionAutoscrolling {
+            isSelectionAutoscrolling = true
+            // The first tick is a gesture start: it brings the replay up to date before the screen enters
+            // it, so the rows scrolled onto sit directly above the live ones.
+            if case .ready(let model) = localScrollbackState, hasLiveFrameSinceLocalScrollbackRead { loadLocalScrollbackContinuation(after: model) }
+        }
+        scrollLocalReplay(deltaRows: towardOlderRows ? -1 : 1)
+    }
+
+    /// Copies the selection's text and leaves the selection; with no selection it does nothing. The text
+    /// is read from this client's replay (never the daemon), so it includes rows above the viewport.
+    func copyClientSelection() {
+        // Select-all then copy in quick succession: the selection does not exist until the replay
+        // answers, so the copy waits on it and copies what it selects.
+        if pendingSelectionReplay?.request == .selectAll {
+            pendingSelectionReplay?.copyPasteboardChangeCount = selectionPasteboard.changeCount
+            return
+        }
+        guard let selection = clientSelection else { return }
+        startSelectionReplayRequest(.copy(selection, pasteboardChangeCount: selectionPasteboard.changeCount))
+    }
+
+    /// Selects everything the client can replay, by Ghostty's select-all rule, and copies nothing.
+    func selectAll() { startSelectionReplayRequest(.selectAll) }
+
+    private var selectionPasteboard: UIPasteboard { pasteboardOverrideForTesting ?? .general }
+
+    /// Copy and select-all read their rows out of this client's own replay: the selection is this
+    /// client's, in absolute rows, and the replay is the only copy of the history above the viewport it
+    /// holds. The replay may not exist yet, may trail the live frame, or may not reach back to the
+    /// selection's first row, so the request walks the planner's steps (shared with the Mac pane) one
+    /// read at a time until the replay can answer.
+    private func startSelectionReplayRequest(_ request: TerminalSelectionReplayRequest) {
+        pendingSelectionReplay = TerminalPendingSelectionReplay(request: request, liveStamps: liveFrameStamps)
+        advanceSelectionRequest()
+    }
+
+    private func scheduleSelectionRequestAdvance() { Task { @MainActor [weak self] in self?.advanceSelectionRequest() } }
+
+    private func advanceSelectionRequest() {
+        guard var pending = pendingSelectionReplay else { return }
+        // A load or continuation in flight owns the replay; its exit moves the state and re-plans.
+        if case .loading = localScrollbackState { return }
+        if localScrollbackContinuationTask != nil { return }
+        var model: TerminalLocalScrollbackModel?
+        var isUnavailable = false
+        switch localScrollbackState {
+        case .ready(let readyModel): model = readyModel
+        case .idle, .loading: break
+        case .unavailable: isUnavailable = true
+        }
+        let step = pending.progress.nextStep(model: model, liveStamps: liveFrameStamps, replayIsUnavailable: isUnavailable)
+        pendingSelectionReplay = pending
+        switch step {
+        case .abandon: pendingSelectionReplay = nil
+        case .format:
+            pendingSelectionReplay = nil
+            guard let model else { return }
+            formatSelectionRequest(pending.request, from: model)
+            if let changeCount = pending.copyPasteboardChangeCount, let selection = clientSelection {
+                formatSelectionRequest(.copy(selection, pasteboardChangeCount: changeCount), from: model)
+            }
+        case .readFirstPage:
+            beginLoadingLocalScrollback(
+                .suffix(maxBytes: TerminalScrollbackBudget.initialLocalScrollbackPageBytes),
+                load: LocalScrollbackLoad(pendingDeltaRows: 0, model: nil), isGestureInitiated: false)
+        case .readWholeBudget:
+            beginLoadingLocalScrollback(
+                .suffix(maxBytes: TerminalScrollbackBudget.defaultMaxBytes, restoreRowsFromBottom: model?.rowsFromBottom ?? 0),
+                load: LocalScrollbackLoad(pendingDeltaRows: 0, model: nil), isGestureInitiated: false)
+        case .readContinuation:
+            guard let model else { return }
+            loadLocalScrollbackContinuation(after: model)
+        }
+    }
+
+    private func formatSelectionRequest(_ request: TerminalSelectionReplayRequest, from model: TerminalLocalScrollbackModel) {
+        switch request {
+        case .copy(let selection, let pasteboardChangeCount):
+            guard selectionPasteboard.changeCount == pasteboardChangeCount,
+                let text = TerminalSelectionReplayPlanner.copyText(for: selection, in: model)
+            else { return }
+            selectionPasteboard.string = text
+        case .selectAll: selectionState.replace(with: TerminalSelectionReplayPlanner.selectAllSelection(in: model))
+        }
+    }
+
+    /// A live frame reached this client, whether or not it is painted. Its epoch ends a selection made
+    /// in the previous live epoch, and its stamp lines the replay up with the host's rows.
+    private func noteLiveFrame(_ frame: GhosttyRenderFrame) {
+        selectionState.noteLiveFrameEpoch(frame.snapshot.historyEpoch)
+        guard let stamp = TerminalLiveFrameStamp(frame: frame) else { return }
+        liveFrameStamps.record(stamp)
+        // A replay already at the file's end can only be lined up by a stamp that arrives after its last
+        // write, so every frame gets the chance. Only a replay this model holds: one a load is building
+        // belongs to that load until it installs.
+        if case .ready(let model) = localScrollbackState { model.align(with: liveFrameStamps.stamps) }
+    }
+
+    /// The frame on screen changed. A selection of another history epoch names rows that frame does not
+    /// number the same way, so it ends. This is also what ends a selection when the session's run
+    /// changes: a relaunch mints a new incarnation, which the host folds into every frame's epoch.
+    private func endClientSelectionNotInShownEpoch() {
+        guard clientSelection != nil, let epoch = (ownerRenderEpoch?.bootstrapSnapshot ?? endedRender?.snapshot)?.historyEpoch else { return }
+        selectionState.noteShownFrameEpoch(epoch)
     }
 
     func recordRenderedText(_ text: String) {
@@ -2920,6 +3110,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    private func performMouseMotionRequest(pointerPosition: TerminalScrollPointerPosition) async throws {
+        let context = TerminalCommandContext(sessionID: session.id, clientID: remoteClient.id, ownerEpoch: currentOwnerEpoch)
+        try await performRequestUsingInputChannel { [bridgeClient, context, pointerPosition] commandChannel in
+            try await bridgeClient.mouseMotion(
+                context: context, pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
+        }
+    }
+
     private func performScrollToBottomRequest() async throws {
         let context = TerminalCommandContext(sessionID: session.id, clientID: remoteClient.id, ownerEpoch: currentOwnerEpoch)
         try await performRequestUsingInputChannel { [bridgeClient, context] commandChannel in
@@ -2952,7 +3150,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func enqueueInputSend(
-        kind: String, detail: String, onDiscarded: (@Sendable () async -> Void)? = nil, _ request: @escaping @Sendable () async throws -> Void
+        kind: String, detail: String, supersedable: Bool = false, onDiscarded: (@Sendable () async -> Void)? = nil,
+        _ request: @escaping @Sendable () async throws -> Void
     ) {
         let enqueuedAt = Date()
         logPerformanceEvent(name: "input_command_enqueue", count: detail.utf8.count, attributes: inputCommandAttributes(kind: kind, detail: detail))
@@ -2964,7 +3163,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // visibility happens to be once this item eventually reaches the head of the queue.
         pulseConnectionBannerIfVisible()
         inputSendQueue.enqueue(
-            priority: .userInitiated,
+            priority: .userInitiated, supersedable: supersedable,
             operation: { [weak self, enqueuedAt] in
                 guard let self, !Task.isCancelled else {
                     // The queue only reports a discard for an operation it never entered. An
@@ -5884,6 +6083,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             beginOwnerRecoveryGracePeriod()
             scheduleOwnershipSynchronization()
         }
+        // Kept whether or not the frame is painted: a client showing its replay paints it again when the
+        // user leaves the replay, and the stamps are what line the replay up with the host's rows. Not
+        // gated on a painted epoch: a quiet session can deliver its only frame before the first paint
+        // (the open hold, or a viewport report that follows the frame), and no later frame would restore
+        // a stamp dropped here, leaving every replay unaligned against the rows the user sees.
+        if !reduction.isRefusedPayload, let liveFrame = reduction.frameToApply { noteLiveFrame(liveFrame) }
         // Covers a clear issued by any other client, whose only news of it is this payload: the daemon
         // records the clear in the transcript and broadcasts it under this reason, stamping no transcript
         // end, so `outputCarriesNewLocalScrollbackOutput` reads it as nothing new and a replay built
