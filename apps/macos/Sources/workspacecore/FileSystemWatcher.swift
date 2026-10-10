@@ -53,17 +53,24 @@
         private let paths: [String]
         private let latency: TimeInterval
         private let queue: DispatchQueue
+        private let watchesRoot: Bool
         private let onChange: @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
         /// Only read or written on `queue`, except in `deinit` where no other
         /// reference to `self` can exist so the access is race-free.
         private var stream: FSEventStreamRef?
 
+        /// `watchesRoot` asks FSEvents to report the watched path (or an ancestor) being moved, replaced,
+        /// or deleted as a `mustRescan` batch. FSEvents pays for it with an open descriptor on every
+        /// ancestor directory of every watched path, so callers that hold many watchers and do not need
+        /// the signal pass `false`.
         public init(
-            paths: [String], latency: TimeInterval = 0.5, queue: DispatchQueue = DispatchQueue(label: "spaces.filesystemwatcher", qos: .utility),
+            paths: [String], latency: TimeInterval = 0.5, watchesRoot: Bool = true,
+            queue: DispatchQueue = DispatchQueue(label: "spaces.filesystemwatcher", qos: .utility),
             onChange: @escaping @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
         ) {
             self.paths = paths
             self.latency = latency
+            self.watchesRoot = watchesRoot
             self.queue = queue
             self.onChange = onChange
         }
@@ -90,9 +97,9 @@
             // File-level events keep the callback path list precise enough for callers
             // to filter (e.g. only git worktree metadata), while NoDefer delivers the
             // first event in an idle period immediately and coalesces the rest.
-            let flags = UInt32(
-                kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer
-                    | kFSEventStreamCreateFlagWatchRoot)
+            var flags = UInt32(
+                kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            if watchesRoot { flags |= UInt32(kFSEventStreamCreateFlagWatchRoot) }
             let callback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, _ in
                 guard let info, count > 0 else { return }
                 let callbackContext = Unmanaged<FSEventCallbackContext>.fromOpaque(info).takeUnretainedValue()
@@ -286,7 +293,8 @@
         private var watchedDirectoriesByDescriptor: [Int32: String] = [:]
 
         public init(
-            paths: [String], latency _: TimeInterval = 0.5, queue: DispatchQueue = DispatchQueue(label: "spaces.filesystemwatcher", qos: .utility),
+            paths: [String], latency _: TimeInterval = 0.5, watchesRoot _: Bool = true,
+            queue: DispatchQueue = DispatchQueue(label: "spaces.filesystemwatcher", qos: .utility),
             onChange: @escaping @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
         ) {
             self.paths = paths
