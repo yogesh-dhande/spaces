@@ -18,8 +18,7 @@ import spacesterminalcore
 public struct SpacesPairedDeviceRecord: Codable, Sendable, Equatable, Identifiable {
     public static let localDeviceID = "local"
     /// Upper bound on the candidate addresses stored for one device. The shared policy, so a record, a
-    /// merge, and a redeemed pairing link are all bounded by one number; matched by the iOS client's
-    /// `SpacesMobileDeviceStore.maxAdvertisedHostCandidates`.
+    /// merge, and a redeemed pairing link are all bounded by one number.
     public static let maxHostCandidates = SpacesDeviceHostCandidates.maxCount
 
     public let id: String
