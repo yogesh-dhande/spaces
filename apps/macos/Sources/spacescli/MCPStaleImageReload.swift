@@ -59,9 +59,10 @@ struct MCPStaleImageReload {
     /// process.
     typealias ExecutableReplacement = (_ path: String, _ arguments: [String]) -> Void
 
-    /// The path this process was exec'd from, as the process itself reports it. It is re-resolved through
-    /// `realpath` at every decision rather than once here, so an indirection an update repointed is
-    /// followed afresh instead of pinning the release it named at launch.
+    /// The path this process was exec'd from, as the process itself reports it. An indirection on it is
+    /// re-resolved at every decision rather than once here, so one an update repointed is followed afresh
+    /// instead of pinning the release it named at launch. A path inside a Linux release tree is not
+    /// resolved at all (see `reloadTargets`), so it keeps working after its release is deleted.
     private let executablePath: String?
     private let runningImage: SpacesBinaryFileIdentity?
     private let identityReader: (String) -> SpacesBinaryFileIdentity?
@@ -87,8 +88,7 @@ struct MCPStaleImageReload {
     func execTarget(for error: Error) -> String? {
         guard Self.daemonSpeaksNewerProtocol(error) else { return nil }
         guard let executablePath, let runningImage else { return nil }
-        guard let resolvedPath = pathResolver(executablePath),
-            let targets = Self.currentReleaseTargets(forResolvedPath: resolvedPath, pathResolver: pathResolver),
+        guard let targets = Self.reloadTargets(forInvokedPath: executablePath, pathResolver: pathResolver),
             let onDiskImage = identityReader(targets.imagePath)
         else { return nil }
         guard onDiskImage != runningImage else { return nil }
@@ -160,10 +160,25 @@ struct MCPStaleImageReload {
     /// against the old release's shared libraries. The loop guard is unaffected by that split because it
     /// rests entirely on the identity comparison: after the exec, the successor's own loaded image is the
     /// binary `current` names, so an unadvanced `current` can never produce a second exec.
-    private static func currentReleaseTargets(forResolvedPath resolvedPath: String, pathResolver: (String) -> String?) -> ReloadTargets? {
+    ///
+    /// Where the release root comes from is decided by the path's shape, never by whether the file
+    /// exists. The process reports its own path inside `releases/<version>/bin/` (that is where its
+    /// binary lives), and that path names the root lexically, so the decision needs nothing from the
+    /// running release's directory. That is what lets a server that outlived an update still reload after
+    /// the superseded release has been deleted. Only a path outside the release tree, such as a stable
+    /// symlink or a macOS bundle path, has to be resolved to learn which layout it is in.
+    private static func reloadTargets(forInvokedPath path: String, pathResolver: (String) -> String?) -> ReloadTargets? {
+        if let location = releaseTreeLocation(ofResolvedPath: path) {
+            return currentReleaseTargets(in: location, pathResolver: pathResolver)
+        }
+        guard let resolvedPath = pathResolver(path) else { return nil }
         guard let location = releaseTreeLocation(ofResolvedPath: resolvedPath) else {
             return ReloadTargets(execPath: resolvedPath, imagePath: resolvedPath)
         }
+        return currentReleaseTargets(in: location, pathResolver: pathResolver)
+    }
+
+    private static func currentReleaseTargets(in location: ReleaseTreeLocation, pathResolver: (String) -> String?) -> ReloadTargets? {
         let currentBinDirectory = URL(fileURLWithPath: location.rootPath, isDirectory: true).appendingPathComponent("current/bin", isDirectory: true)
         guard let imagePath = pathResolver(currentBinDirectory.appendingPathComponent(location.name + binarySuffix, isDirectory: false).path) else {
             return nil

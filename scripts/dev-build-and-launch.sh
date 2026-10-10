@@ -144,7 +144,7 @@ deploy_remote_linux_spacesd_if_configured() (
   quoted_profile_name="$(remote_shell_quote "$remote_profile_name")"
   quoted_profile_root="$(remote_shell_quote "$remote_profile_root")"
   ssh "${ssh_args[@]}" "$ssh_destination" \
-    "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name" >/dev/null
+    "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name && rm -rf $quoted_install" >/dev/null
 
   # Readiness is the profile's own two facts: systemd holds its unit instance active, and its own CLI
   # gets an answer out of it. There is no well-known port to probe -- the daemon assigns its own.
