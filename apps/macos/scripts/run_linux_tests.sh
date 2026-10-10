@@ -79,6 +79,7 @@ for suite in \
   WorkspaceFileWriteModePreservationTests \
   SpacesDeviceWorkspaceGitHashingKnownAnswerTests \
   FileSystemWatcherLinuxInotifyTests \
+  FileSystemWatcherInotifyRoutingTests \
   SpacesDeviceWorkspaceWatchLinuxTests \
   DeviceOverviewStreamServerSigpipeTests \
   GhosttyRemoteSessionStateStreamServerSigpipeTests \

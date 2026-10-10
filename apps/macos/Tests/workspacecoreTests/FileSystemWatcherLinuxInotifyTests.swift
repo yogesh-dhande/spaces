@@ -181,8 +181,7 @@
         /// OUTSIDE the watched root (so nothing re-registers it, unlike a destination still inside the
         /// workspace, which `WorkspaceWatch` picks up again through the parent's `IN_MOVED_TO`), then writes
         /// inside it at the new location and asserts nothing is ever reported under the old path.
-        /// `watchedDirectoriesByDescriptor` is `private` with no test-only accessor, so this does not also
-        /// assert on the descriptor table's size directly.
+        /// The routing rules for this are also covered directly in `FileSystemWatcherInotifyRoutingTests`.
         ///
         /// Root's `IN_MOVED_FROM` for the child name and `a`'s own `IN_MOVE_SELF` both come from the one
         /// `rename()` and both name the bare old path, but they are separate kernel events: the reader can
@@ -263,8 +262,98 @@
                 return
             }
             #expect(event.mustRescan)
-            // `watchedDirectoriesByDescriptor` is `private` with no test-only accessor (see the move-out
-            // test above), so this does not also assert the root's descriptor was dropped from the table.
+        }
+
+        /// Counts this process's inotify instances. `/proc/self/fd` lists the listing's own descriptor too,
+        /// whose `readlink` is not an inotify one, so it never inflates the count.
+        private func inotifyInstanceCount() -> Int {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/fd")) ?? []
+            return names.filter { name in
+                (try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/fd/" + name)) == "anon_inode:inotify"
+            }.count
+        }
+
+        /// Linux caps inotify instances per user (shared with every other program the user runs), so
+        /// the process must hold one however many watchers run. Another suite may have created the shared
+        /// instance already, hence "at most one" for the first batch and exactly zero for the second.
+        @Test func manyWatchersShareOneInotifyInstance() async throws {
+            let before = inotifyInstanceCount()
+            var watchers: [FileSystemWatcher] = []
+            for _ in 0..<3 {
+                let watcher = FileSystemWatcher(paths: [try makeTempDirectory().path]) { _, _ in }
+                try await watcher.start()
+                watchers.append(watcher)
+            }
+            let afterFirstBatch = inotifyInstanceCount()
+            for _ in 0..<3 {
+                let watcher = FileSystemWatcher(paths: [try makeTempDirectory().path]) { _, _ in }
+                try await watcher.start()
+                watchers.append(watcher)
+            }
+            let afterSecondBatch = inotifyInstanceCount()
+            for watcher in watchers { watcher.stop() }
+
+            #expect(afterFirstBatch - before <= 1)
+            #expect(afterSecondBatch == afterFirstBatch)
+        }
+
+        @Test func twoWatchersOnTheSameDirectoryBothReceiveAnEvent() async throws {
+            let directory = try makeTempDirectory()
+            let (firstChanges, firstContinuation) = AsyncStream<[String]>.makeStream()
+            let (secondChanges, secondContinuation) = AsyncStream<[String]>.makeStream()
+            let first = FileSystemWatcher(paths: [directory.path]) { paths, _ in firstContinuation.yield(paths) }
+            let second = FileSystemWatcher(paths: [directory.path]) { paths, _ in secondContinuation.yield(paths) }
+            try await first.start()
+            try await second.start()
+            defer {
+                first.stop()
+                second.stop()
+            }
+
+            try "hello".write(to: directory.appendingPathComponent("probe.txt"), atomically: true, encoding: .utf8)
+
+            let firstPaths = await waitForEvent(in: firstChanges) { $0.contains { $0.contains("probe.txt") } }
+            let secondPaths = await waitForEvent(in: secondChanges) { $0.contains { $0.contains("probe.txt") } }
+            #expect(firstPaths != nil, "the first watcher received no event within 30s")
+            #expect(secondPaths != nil, "the second watcher received no event within 30s")
+        }
+
+        /// Both watchers share one kernel watch descriptor on the directory; removing it when the first
+        /// stops would silently blind the second.
+        @Test func stoppingOneOfTwoWatchersOnTheSameDirectoryLeavesTheOtherWatching() async throws {
+            let directory = try makeTempDirectory()
+            let first = FileSystemWatcher(paths: [directory.path]) { _, _ in }
+            let (changes, continuation) = AsyncStream<[String]>.makeStream()
+            let second = FileSystemWatcher(paths: [directory.path]) { paths, _ in continuation.yield(paths) }
+            try await first.start()
+            try await second.start()
+            defer { second.stop() }
+
+            first.stop()
+            // `stop()` is async onto the shared queue; this sync read queues behind it.
+            _ = FileSystemWatcherInotifyInstance.shared.hasRegistration(atPath: directory.path)
+
+            try "hello".write(to: directory.appendingPathComponent("probe.txt"), atomically: true, encoding: .utf8)
+
+            let paths = await waitForEvent(in: changes) { $0.contains { $0.contains("probe.txt") } }
+            #expect(paths != nil, "the remaining watcher received no event within 30s after the other stopped")
+        }
+
+        @Test func kernelWatchIsRemovedOnceEveryWatcherOnTheDirectoryStops() async throws {
+            let directory = try makeTempDirectory()
+            // Keyed by this test's unique directory: other suites share the instance and run concurrently.
+            let instance = FileSystemWatcherInotifyInstance.shared
+            let first = FileSystemWatcher(paths: [directory.path]) { _, _ in }
+            let second = FileSystemWatcher(paths: [directory.path]) { _, _ in }
+            try await first.start()
+            try await second.start()
+            #expect(instance.hasRegistration(atPath: directory.path))
+
+            // Each read queues behind the preceding async `stop()` on the shared queue.
+            first.stop()
+            #expect(instance.hasRegistration(atPath: directory.path), "the second watcher still needs the kernel watch")
+            second.stop()
+            #expect(!instance.hasRegistration(atPath: directory.path))
         }
     }
 #endif

@@ -97,8 +97,7 @@
             // File-level events keep the callback path list precise enough for callers
             // to filter (e.g. only git worktree metadata), while NoDefer delivers the
             // first event in an idle period immediately and coalesces the rest.
-            var flags = UInt32(
-                kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            var flags = UInt32(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
             if watchesRoot { flags |= UInt32(kFSEventStreamCreateFlagWatchRoot) }
             let callback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, _ in
                 guard let info, count > 0 else { return }
@@ -220,11 +219,17 @@
     /// watched directory itself for self-events, so callers can apply the same path
     /// filter they use on macOS.
     ///
+    /// Every watcher registers on the one process-wide inotify instance
+    /// (`FileSystemWatcherInotifyInstance`) instead of owning its own, because Linux caps
+    /// inotify instances per user and that cap is shared with the user's other programs.
+    /// A watcher is a subscriber id on that instance; it holds no descriptor of its own.
+    ///
     /// Lifecycle invariant (mirrors the macOS backend): `inotify_add_watch` can block
-    /// on a slow filesystem, so stream setup/teardown and the `fileDescriptor`,
-    /// `source`, and `watchedDirectoriesByDescriptor` state they mutate are confined
-    /// to `queue` — also the read source's event queue — via `async` dispatch, keeping
-    /// them off the caller's thread and free of data races.
+    /// on a slow filesystem, so setup/teardown and all inotify state run on the shared
+    /// instance's queue via `async` dispatch (`addPaths` is `sync` so it can throw),
+    /// keeping them off the caller's thread and free of data races. Change batches are
+    /// delivered by `async` onto this watcher's own `queue`, so a handler never runs on
+    /// the shared queue.
     public final class FileSystemWatcher: @unchecked Sendable {
         /// `noPaths` and `streamUnavailable` cover setup failures with no per-syscall detail to report.
         /// `initFailed` and `watchFailed` carry the failing syscall's own errno and `strerror` text (plus,
@@ -247,9 +252,7 @@
 
             /// `strerror`'s human-readable message plus the errno's own macro name (`ENOSPC`, not just its
             /// numeric value), since the macro name is what an operator recognizes and searches for.
-            private static func errnoText(_ code: Int32) -> String {
-                "\(String(cString: strerror(code))) (\(errnoName(code)))"
-            }
+            private static func errnoText(_ code: Int32) -> String { "\(String(cString: strerror(code))) (\(errnoName(code)))" }
 
             /// Only the errno values `inotify_init1`/`inotify_add_watch` actually document (see their man
             /// pages); anything else falls back to the bare number rather than guessing a name.
@@ -271,26 +274,10 @@
             }
         }
 
-        /// Metadata git rewrites on worktree/HEAD changes, plus the directory-level create/delete/move
-        /// events that signal a worktree (or, for `WorkspaceWatch`, any other directory) added or removed,
-        /// and self-delete/move so a vanished directory drops its watch. `IN_ATTRIB` covers a `chmod`,
-        /// `chown`, `utimes`, or `truncate` on a tracked file (all report through `setattr`, never through
-        /// `IN_MODIFY` alone), which is what `chmod +x` on a tracked file needs to be observed: it changes
-        /// the rendered diff and `scopeSignature` without writing any new file content. `IN_ATTRIB` fires
-        /// only from those `setattr`-driven changes, not from an inode's atime updating on an ordinary
-        /// read, so this adds no read-driven churn. Shared by `startOnQueue` and `addPaths` so a directory
-        /// registered after start gets the identical mask.
-        private static let watchMask = UInt32(
-            IN_MODIFY | IN_ATTRIB | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF | IN_ONLYDIR)
-
         private let paths: [String]
         private let queue: DispatchQueue
         private let onChange: @Sendable (_ paths: [String], _ mustRescan: Bool) -> Void
-        /// Only read or written on `queue`, except in `deinit` where no other
-        /// reference to `self` can exist so the access is race-free.
-        private var fileDescriptor: Int32 = -1
-        private var source: DispatchSourceRead?
-        private var watchedDirectoriesByDescriptor: [Int32: String] = [:]
+        private let subscriber = FileSystemWatcherInotifyInstance.shared.makeSubscriberID()
 
         public init(
             paths: [String], latency _: TimeInterval = 0.5, watchesRoot _: Bool = true,
@@ -304,176 +291,34 @@
 
         /// Starts delivering change events. Idempotent while running. Throws when the
         /// path list is empty or no watch can be added. The inotify setup runs on
-        /// `queue`, so a slow filesystem suspends the awaiting caller instead of
-        /// blocking its thread.
+        /// the shared instance's queue, so a slow filesystem suspends the awaiting
+        /// caller instead of blocking its thread.
         public func start() async throws {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                queue.async {
-                    do {
-                        try self.startOnQueue()
-                        continuation.resume()
-                    } catch { continuation.resume(throwing: error) }
-                }
-            }
+            try await FileSystemWatcherInotifyInstance.shared.start(subscriber: subscriber, roots: paths, queue: queue, onChange: onChange)
         }
 
-        /// Serialized on `queue`; see the type's lifecycle invariant. A path missing by the time its watch
-        /// is registered (`ENOENT`, e.g. it was created and removed again between listing and this call)
-        /// is not a failure: it is simply skipped, and the loop continues with the remaining paths. Any
-        /// other `inotify_add_watch` failure (most commonly `ENOSPC`, the `fs.inotify.max_user_watches`
-        /// limit) stops the whole install immediately rather than silently leaving the workspace with
-        /// partial coverage the caller has no way to know about.
-        private func startOnQueue() throws {
-            guard fileDescriptor < 0 else { return }
-            guard !paths.isEmpty else { throw WatchError.noPaths }
-            let descriptor = inotify_init1(Int32(IN_NONBLOCK) | Int32(IN_CLOEXEC))
-            guard descriptor >= 0 else { throw WatchError.initFailed(errno: errno) }
-            for path in paths {
-                let watchDescriptor = inotify_add_watch(descriptor, path, Self.watchMask)
-                if watchDescriptor >= 0 {
-                    watchedDirectoriesByDescriptor[watchDescriptor] = path
-                    continue
-                }
-                let failureErrno = errno
-                if failureErrno == ENOENT { continue }
-                close(descriptor)
-                throw WatchError.watchFailed(path: path, errno: failureErrno)
-            }
-            guard !watchedDirectoriesByDescriptor.isEmpty else {
-                close(descriptor)
-                throw WatchError.streamUnavailable
-            }
-            fileDescriptor = descriptor
-            let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
-            source.setEventHandler { [weak self] in self?.drainEvents() }
-            source.setCancelHandler { close(descriptor) }
-            self.source = source
-            source.resume()
-        }
-
-        /// Stops delivering events and releases the watch. Idempotent and
-        /// non-blocking: the teardown is dispatched onto `queue`, so it never runs on
-        /// the caller's thread. Because the teardown is async, a callback already in
-        /// flight may still be delivered shortly after `stop()` returns; callers that
-        /// must not act on late callbacks guard on their own stopped state.
-        public func stop() { queue.async { self.stopOnQueue() } }
-
-        /// Serialized on `queue`; see the type's lifecycle invariant.
-        private func stopOnQueue() {
-            guard fileDescriptor >= 0 else { return }
-            source?.cancel()
-            source = nil
-            // The cancel handler owns closing the descriptor.
-            fileDescriptor = -1
-            watchedDirectoriesByDescriptor.removeAll()
-        }
+        /// Stops delivering events and releases the watches. Idempotent and
+        /// non-blocking: the teardown is dispatched onto the shared queue, so it never
+        /// runs on the caller's thread. Because the teardown is async, a callback
+        /// already in flight may still be delivered shortly after `stop()` returns;
+        /// callers that must not act on late callbacks guard on their own stopped state.
+        public func stop() { FileSystemWatcherInotifyInstance.shared.stop(subscriber: subscriber) }
 
         /// Registers additional directories on a running watcher, e.g. one created or moved in after
-        /// `start()`. Serialized on `queue` like the other lifecycle calls, synchronously (`queue.sync`,
-        /// not `queue.async`) so a failure can actually propagate back to the caller instead of being
+        /// `start()`. Synchronous so a failure can propagate back to the caller instead of being
         /// swallowed by an untracked background dispatch. A no-op while the watcher is not running;
         /// `WorkspaceWatch` only calls this once its own `start()` has succeeded, so this arises only from
         /// a caller-side race and is not worth reporting.
         ///
-        /// Same `ENOENT`-is-not-a-failure rule as `startOnQueue`: a directory that vanished between being
+        /// Same `ENOENT`-is-not-a-failure rule as `start()`: a directory that vanished between being
         /// listed and registered here is skipped, not thrown; any other `inotify_add_watch` failure stops
         /// the batch and throws immediately.
-        public func addPaths(_ paths: [String]) throws {
-            try queue.sync {
-                guard fileDescriptor >= 0 else { return }
-                for path in paths {
-                    let watchDescriptor = inotify_add_watch(fileDescriptor, path, Self.watchMask)
-                    if watchDescriptor >= 0 {
-                        watchedDirectoriesByDescriptor[watchDescriptor] = path
-                        continue
-                    }
-                    let failureErrno = errno
-                    if failureErrno == ENOENT { continue }
-                    throw WatchError.watchFailed(path: path, errno: failureErrno)
-                }
-            }
-        }
-
-        /// Reads all currently-available inotify events in one pass (the read source
-        /// fires once per readable burst, which coalesces a change burst into one
-        /// `onChange`) and reports the affected absolute paths.
-        private func drainEvents() {
-            let headerSize = MemoryLayout<inotify_event>.size
-            var buffer = [UInt8](repeating: 0, count: 8192)
-            var changedPaths: [String] = []
-            // The kernel reports a lost-events window as one event with `wd == -1` and `IN_Q_OVERFLOW`
-            // set (never paired with a watch descriptor), meaning some events between the last drain and
-            // this one were dropped rather than delivered. There is no way to know which paths those were,
-            // so this is macOS's `mustScanSubDirs`/dropped-flags equivalent: the caller must rescan.
-            var mustRescan = false
-            while true {
-                let bytesRead = buffer.withUnsafeMutableBytes { read(fileDescriptor, $0.baseAddress, $0.count) }
-                if bytesRead <= 0 { break }
-                var offset = 0
-                while offset + headerSize <= bytesRead {
-                    let event = buffer.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: inotify_event.self) }
-                    let nameLength = Int(event.len)
-                    if event.wd == -1, event.mask & UInt32(IN_Q_OVERFLOW) != 0 {
-                        mustRescan = true
-                        offset += headerSize + nameLength
-                        continue
-                    }
-                    let directory = watchedDirectoriesByDescriptor[event.wd]
-                    if let directory {
-                        if nameLength > 0 {
-                            let nameStart = offset + headerSize
-                            let nameBytes = buffer[nameStart..<(nameStart + nameLength)].prefix { $0 != 0 }
-                            let name = String(decoding: nameBytes, as: UTF8.self)
-                            changedPaths.append(name.isEmpty ? directory : directory + "/" + name)
-                        } else {
-                            // `IN_MOVE_SELF` (the watched directory itself was moved or renamed, to
-                            // anywhere, including outside this watcher's root) and `IN_DELETE_SELF` both
-                            // land here with no name payload, so this also reports the old path for a
-                            // self-move: a destination still inside the workspace is re-registered through
-                            // the parent's `IN_MOVED_TO`, which `WorkspaceWatch` already treats as a new
-                            // directory, so nothing else needs to observe the new location from here.
-                            changedPaths.append(directory)
-                        }
-                    }
-                    // An INSTALL ROOT (one of `paths`) disappearing or moving mirrors FSEvents'
-                    // RootChanged (above): nothing watches its parent, so a directory recreated at the
-                    // same path would go unnoticed. `WorkspaceWatch` answers a rescan with a full
-                    // reinstall, which fails outright with the root gone (`streamUnavailable`, every root
-                    // `ENOENT`), surfacing the live-refresh notice with Retry instead of a silent freeze;
-                    // a root recreated later is picked up by Retry or the next subscribe.
-                    if event.mask & UInt32(IN_DELETE_SELF | IN_MOVE_SELF) != 0, let directory, paths.contains(directory) {
-                        mustRescan = true
-                    }
-                    // `IN_MOVE_SELF` does not make the kernel drop the watch (a delete does, via
-                    // `IN_IGNORED`): left alone, the descriptor keeps reporting events from wherever the
-                    // directory ended up, still mapped to its OLD path. inotify is not recursive, so a
-                    // directory watched beneath the moved one (`root/a/b` under `root/a`) has its own
-                    // descriptor and gets no `IN_MOVE_SELF` of its own; it goes just as stale. So every
-                    // descriptor at or beneath the moved path is removed, from a snapshot since the table
-                    // is mutated in the loop. `IN_IGNORED` (delete, unmount, or the `inotify_rm_watch`
-                    // just below, which queues one for the same descriptor) drops the mapping too.
-                    if event.mask & UInt32(IN_MOVE_SELF) != 0, let movedPath = directory {
-                        let staleDescriptors = watchedDirectoriesByDescriptor.filter { $0.value == movedPath || $0.value.hasPrefix(movedPath + "/") }
-                            .keys
-                        for descriptor in staleDescriptors {
-                            inotify_rm_watch(fileDescriptor, descriptor)
-                            watchedDirectoriesByDescriptor.removeValue(forKey: descriptor)
-                        }
-                    } else if event.mask & UInt32(IN_IGNORED) != 0 {
-                        watchedDirectoriesByDescriptor.removeValue(forKey: event.wd)
-                    }
-                    offset += headerSize + nameLength
-                }
-            }
-            if !changedPaths.isEmpty || mustRescan { onChange(changedPaths, mustRescan) }
-        }
+        public func addPaths(_ paths: [String]) throws { try FileSystemWatcherInotifyInstance.shared.addPaths(subscriber: subscriber, paths: paths) }
 
         deinit {
-            // At deinit no other reference to `self` can exist, so reading `source`
-            // directly is race-free. Cancelling schedules the descriptor close on
-            // `queue` via the cancel handler, so no blocking teardown runs on the
-            // deallocating thread. `self` is not captured.
-            source?.cancel()
+            // The shared instance's registrations are keyed by `subscriber`, never by `self`, so the
+            // teardown is dispatched onto its queue with only the id captured.
+            FileSystemWatcherInotifyInstance.shared.stop(subscriber: subscriber)
         }
     }
 

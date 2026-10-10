@@ -292,7 +292,8 @@ let executableTargets: [Target] = [
         // workspacecoreTests otherwise pulls in AppKit-only test support (TestSupport.swift), so the
         // Linux target compiles only the one file that needs none of it.
         .testTarget(
-            name: "workspacecoreTests", dependencies: ["workspacecore"], sources: ["FileSystemWatcherLinuxInotifyTests.swift"]
+            name: "workspacecoreTests", dependencies: ["workspacecore"],
+            sources: ["FileSystemWatcherLinuxInotifyTests.swift", "FileSystemWatcherInotifyRoutingTests.swift"]
         ),
     ]
 #else
