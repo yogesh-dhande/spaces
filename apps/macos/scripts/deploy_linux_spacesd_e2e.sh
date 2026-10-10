@@ -47,6 +47,8 @@ if [[ "$profile_name" == "installed" ]]; then
 fi
 
 git_common_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)"
+# The artifact cache is per worktree, not shared across worktrees (accepted, #351): this is a dev-only
+# lane, and a shared cache would need cross-worktree invalidation.
 linux_cache_root="$app_root/.build/linux-e2e-cache"
 artifact_cache_root="$linux_cache_root/artifacts"
 

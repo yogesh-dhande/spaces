@@ -1438,6 +1438,9 @@ public final class AutomationService: @unchecked Sendable {
             // launch kind and leave the tracked target and workspace-running state stranded after deletion.
             // The shared orchestrator cleanup finalizes any agent row and subscriber state when present.
             try orchestrator.removeAutomationTerminalSessionRuntimeTargetForDeletion(sessionID: sessionID)
+            // Accepted (#231): the terminate above does not drain the session's write-behind persistence, so a
+            // delete landing on an in-flight persist can leave at most one orphan runtime row. No user data
+            // is lost.
             try store.deleteTerminalSession(sessionID: sessionID)
             if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
                 try? FileManager.default.removeItem(atPath: paths.rootDirectory)
@@ -1514,6 +1517,9 @@ public final class AutomationService: @unchecked Sendable {
         return Int(contents.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    // Accepted (#229): the deadline SIGKILL targets the process group captured at SIGTERM time, after
+    // `pendingKillIsOutstanding` confirms the group is alive. A wrong-process kill needs the whole group to
+    // exit and an unrelated new group leader to take that exact id inside the grace window.
     private func processPendingKills() {
         let currentTime = now()
         for (runID, pending) in pendingKills {

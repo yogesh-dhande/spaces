@@ -69,6 +69,8 @@ public final class TerminalControlServer {
         source.resume()
     }
 
+    // Accepted (#215): a control request accepted just before `stop()` is not covered by the handoff
+    // persistence fence (estimated 1:10,000). The cost is one lease expiry and a reattach.
     public func stop() {
         acceptSource?.cancel()
         acceptSource = nil

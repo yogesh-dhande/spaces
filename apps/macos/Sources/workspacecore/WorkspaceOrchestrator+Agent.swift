@@ -184,6 +184,9 @@ extension WorkspaceOrchestrator {
             WorkspaceOrchestrator.agentLaunchTitleLabel(launchKind: launchConfiguration?.kind, launchTitle: launchConfiguration?.title)
             ?? detectedAgent.label
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: preferredLabel, excludingAgentWindowID: agentID)
+        // Accepted (#216): the label lookup above and the insert below are not one transaction, so two
+        // different sessions detected in the same reconcile window can both take the same label (estimated
+        // 1:10,000). A later reconcile renames one of them, so the duplicate does not persist.
         // Detection only ever creates or refreshes the label/command/runtime-target binding; it never owns
         // lifecycle state. A trailing re-run reaches this call for the same deterministic id the pass before
         // it inserted, and a hook signal can commit newer status/session-key state between this pass's
