@@ -78,7 +78,9 @@ import workspacecore
     /// device does not block the others.
     struct DeviceSection: Sendable {
         let deviceID: String
-        let deviceName: String
+        /// For a remote device this follows the paired record's current name on every sidebar load, so a
+        /// rename from either client shows up without a relaunch.
+        var deviceName: String
         let isLocal: Bool
         var loadState: SidebarDeviceLoadState
         var device: SpacesPairedDeviceRecord?
