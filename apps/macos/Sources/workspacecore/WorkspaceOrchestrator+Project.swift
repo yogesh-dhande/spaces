@@ -534,7 +534,7 @@ extension WorkspaceOrchestrator {
         guard project.isGitRepo else { return }
         let root = try worktreeRoot(project: project)
         let normalizedRoot = normalizePath(root.path)
-        guard isManagedWorkspacesDirectory(path: normalizedRoot, allowEqual: true) else { return }
+        guard try isManagedWorkspacesDirectory(path: normalizedRoot, allowEqual: true) else { return }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: normalizedRoot, isDirectory: &isDirectory), isDirectory.boolValue else { return }
         try FileManager.default.removeItem(atPath: normalizedRoot)
@@ -546,7 +546,7 @@ extension WorkspaceOrchestrator {
         for workspace in workspaces {
             let normalizedWorkspacePath = normalizePath(workspace.dir)
             guard normalizedWorkspacePath != project.dir else { continue }
-            guard isManagedWorkspacesDirectory(path: normalizedWorkspacePath) else { continue }
+            guard try isManagedWorkspacesDirectory(path: normalizedWorkspacePath) else { continue }
             guard !processedPaths.contains(normalizedWorkspacePath) else { continue }
             processedPaths.insert(normalizedWorkspacePath)
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
@@ -556,7 +556,7 @@ extension WorkspaceOrchestrator {
     func removePreparedManagedGitWorkspaceRootIfUnowned(project: ProjectRecord) throws {
         guard project.isGitRepo else { return }
         let root = try worktreeRoot(project: project)
-        guard isManagedWorkspaceEntryPath(root.path) else { return }
+        guard try isManagedWorkspaceEntryPath(root.path) else { return }
         try removePreparedManagedDirectoryIfUnowned(path: root.path)
     }
 }

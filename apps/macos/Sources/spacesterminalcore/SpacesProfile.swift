@@ -55,6 +55,23 @@ public struct SpacesProfile: Sendable, Equatable {
     /// home directory keep compiling; every profile `resolve` actually produces passes this explicitly.
     public let homeDirectoryURL: URL
 
+    /// Where this profile provisions workspace worktrees. An explicit-database-path profile is an ephemeral
+    /// throwaway (a test run or e2e harness), so its worktrees live inside its own root and disappear with
+    /// it; every other profile, and an explicit path that names the installed root, shares the user's
+    /// `~/spaces/workspaces`.
+    public var workspacesRootDirectory: URL { managedRoot(named: "workspaces") }
+
+    /// Where this profile clones managed repositories. Scoped exactly like `workspacesRootDirectory`.
+    public var repositoriesRootDirectory: URL { managedRoot(named: "repos") }
+
+    private func managedRoot(named name: String) -> URL {
+        let base =
+            source == .explicitDatabasePath && !isInstalledProfile
+            ? URL(fileURLWithPath: rootDirectory, isDirectory: true)
+            : homeDirectoryURL.appendingPathComponent("spaces", isDirectory: true)
+        return base.appendingPathComponent(name, isDirectory: true)
+    }
+
     public init(
         source: SpacesProfileSource, databasePath: String, rootDirectory: String, isInstalledProfile: Bool, runtimeDirectory: String,
         ipcNotificationObject: String, developmentContext: SpacesDevelopmentContext?, branchSlug: String?, worktreeHash: String?,

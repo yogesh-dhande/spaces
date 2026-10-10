@@ -68,7 +68,7 @@ Invariants:
 
 ## Persistence
 
-Profile state lives under `~/.spaces` on both platforms (one code path, space-free paths for shells and AF_UNIX sockets, headless-friendly). The user's files live at `~/spaces/{workspaces,repos}`, outside any profile.
+Profile state lives under `~/.spaces` on both platforms (one code path, space-free paths for shells and AF_UNIX sockets, headless-friendly). The user's files live at `~/spaces/{workspaces,repos}`, outside any profile, except for a `SPACES_DB_PATH` profile: `SpacesProfile.workspacesRootDirectory` and `repositoriesRootDirectory` place a throwaway profile's worktrees and clones in `<profile root>/{workspaces,repos}` so they vanish with it. `WorkspaceOrchestrator` takes both roots from the process profile unless a caller injects them (unit tests inject a per-test temp root).
 
 ### Two databases
 

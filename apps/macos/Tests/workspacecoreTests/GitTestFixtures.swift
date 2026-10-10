@@ -179,8 +179,13 @@ func makeTestOrchestrator(
     builtInTerminalLiveActiveAttachmentProber: WorkspaceOrchestrator.BuiltInTerminalLiveActiveAttachmentProber? = nil,
     daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
 ) -> WorkspaceOrchestrator {
-    WorkspaceOrchestrator(
-        store: store, projectsRootDirectory: projectsRootDirectory, workspacesRootDirectory: workspacesRootDirectory,
+    // Without injected roots the orchestrator takes them from the process profile, which most tests never
+    // bind. A tracked temp root per orchestrator keeps every test's worktrees and clones in its own sandbox,
+    // removed at process exit along with the fixture repos they point at.
+    let defaultRoot = try! makeTempDirectory()
+    return WorkspaceOrchestrator(
+        store: store, projectsRootDirectory: projectsRootDirectory ?? defaultRoot.appendingPathComponent("repos", isDirectory: true),
+        workspacesRootDirectory: workspacesRootDirectory ?? defaultRoot.appendingPathComponent("workspaces", isDirectory: true),
         git: GitClient(metadataCommandTimeout: 30), notificationDeliverer: notificationDeliverer,
         builtInTerminalWindowOpener: builtInTerminalWindowOpener, builtInTerminalWindowFocuser: builtInTerminalWindowFocuser,
         builtInTerminalWindowCloser: builtInTerminalWindowCloser, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,

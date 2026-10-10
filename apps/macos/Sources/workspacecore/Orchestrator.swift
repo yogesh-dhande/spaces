@@ -2884,7 +2884,7 @@ public final class WorkspaceOrchestrator {
 
     func worktreeRoot(project: ProjectRecord) throws -> URL {
         let projectDirname: String
-        if isManagedRepositoryDirectory(path: normalizePath(project.dir)) {
+        if try isManagedRepositoryDirectory(path: normalizePath(project.dir)) {
             // Managed git clones live at repos/<leaf>; mirror that leaf under the
             // workspaces root so the worktree root stays deterministic from the
             // import URL (enabling orphaned-folder detection on re-import) even
@@ -2893,7 +2893,7 @@ public final class WorkspaceOrchestrator {
         } else {
             projectDirname = managedProjectStorageDirectoryName(seed: project.id, preferredName: project.name)
         }
-        return workspaceRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
+        return try workspaceRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
     func gitProjectImportPlan(gitURL: String) throws -> GitProjectImportPlan {
@@ -2903,7 +2903,7 @@ public final class WorkspaceOrchestrator {
         let storageHash = managedStorageHash(namespace: "git", source: trimmedURL)
         let projectName = sanitizeDirname(inferredName, fallback: "project")
         let projectDirname = managedProjectStorageDirectoryName(seed: storageHash, preferredName: projectName)
-        let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
+        let destination = try repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
         let normalizedDestination = normalizePathPreservingLeaf(destination.path)
         let project = ProjectRecord(
             id: UUID().uuidString, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: nil, kind: .standard)
@@ -2922,11 +2922,11 @@ public final class WorkspaceOrchestrator {
         let managedPath = standardizePathPreservingSymlinks(path)
         switch kind {
         case .projectRepository:
-            guard isManagedRepositoryEntryPath(managedPath) else { return nil }
-            guard !hasSymlinkedAncestorBelowManagedRoot(path: managedPath, rootPath: repositoriesRootDirectory().path) else { return nil }
+            guard try isManagedRepositoryEntryPath(managedPath) else { return nil }
+            guard try !hasSymlinkedAncestorBelowManagedRoot(path: managedPath, rootPath: repositoriesRootDirectory().path) else { return nil }
         case .workspaceDirectory:
-            guard isManagedWorkspaceEntryPath(managedPath) else { return nil }
-            guard !hasSymlinkedAncestorBelowManagedRoot(path: managedPath, rootPath: workspaceRootDirectory().path) else { return nil }
+            guard try isManagedWorkspaceEntryPath(managedPath) else { return nil }
+            guard try !hasSymlinkedAncestorBelowManagedRoot(path: managedPath, rootPath: workspaceRootDirectory().path) else { return nil }
         }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: managedPath, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
@@ -3105,27 +3105,28 @@ public final class WorkspaceOrchestrator {
         #endif
     }
 
-    private func repositoriesRootDirectory() -> URL {
+    private func repositoriesRootDirectory() throws -> URL {
         if let projectsRootDirectoryURL { return projectsRootDirectoryURL }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "spaces", directoryHint: .isDirectory).appending(path: "repos", directoryHint: .isDirectory)
+        return try SpacesProfile.current().repositoriesRootDirectory
     }
 
-    private func workspaceRootDirectory() -> URL {
+    /// With no injected root, the process profile owns where workspaces live, so a throwaway profile
+    /// keeps them inside its own root. An unresolvable profile throws rather than defaulting to the
+    /// shared `~/spaces`, which would let a run without an isolated profile write into the user's files.
+    private func workspaceRootDirectory() throws -> URL {
         if let workspacesRootDirectoryURL { return workspacesRootDirectoryURL }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appending(path: "spaces", directoryHint: .isDirectory).appending(path: "workspaces", directoryHint: .isDirectory)
+        return try SpacesProfile.current().workspacesRootDirectory
     }
 
     func removeManagedProjectDirectoryIfNeeded(project: ProjectRecord) throws {
-        guard project.isGitRepo, isManagedRepositoryDirectory(path: project.dir) else { return }
+        guard project.isGitRepo, try isManagedRepositoryDirectory(path: project.dir) else { return }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: project.dir, isDirectory: &isDirectory), isDirectory.boolValue else { return }
         try FileManager.default.removeItem(atPath: project.dir)
     }
 
     func removePreparedManagedProjectDirectoryIfUnowned(project: ProjectRecord) throws {
-        guard project.isGitRepo, isManagedRepositoryDirectory(path: project.dir) else { return }
+        guard project.isGitRepo, try isManagedRepositoryDirectory(path: project.dir) else { return }
         try removePreparedManagedDirectoryIfUnowned(path: project.dir)
     }
 
@@ -3145,9 +3146,11 @@ public final class WorkspaceOrchestrator {
         try removeManagedProjectDirectoryIfNeeded(project: project)
     }
 
-    private func isManagedRepositoryDirectory(path: String) -> Bool { isPath(path, inside: repositoriesRootDirectory().path) }
+    private func isManagedRepositoryDirectory(path: String) throws -> Bool { try isPath(path, inside: repositoriesRootDirectory().path) }
 
-    private func isManagedRepositoryEntryPath(_ path: String) -> Bool { isPathPreservingSymlinks(path, inside: repositoriesRootDirectory().path) }
+    private func isManagedRepositoryEntryPath(_ path: String) throws -> Bool {
+        try isPathPreservingSymlinks(path, inside: repositoriesRootDirectory().path)
+    }
 
     private func defaultWorkspace(projectID: String) throws -> WorkspaceRecord? {
         try store.workspaces(projectID: projectID).first(where: \.isDefault)
@@ -3155,17 +3158,17 @@ public final class WorkspaceOrchestrator {
 
     func importedRepositoryDefaultBranch(path: String) throws -> String { try git.repositoryDefaultBranch(path: path) }
 
-    func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
-        isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
+    func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) throws -> Bool {
+        try isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
     }
 
-    func isManagedWorkspaceEntryPath(_ path: String, allowEqual: Bool = false) -> Bool {
-        isPathPreservingSymlinks(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
+    func isManagedWorkspaceEntryPath(_ path: String, allowEqual: Bool = false) throws -> Bool {
+        try isPathPreservingSymlinks(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
     }
 
     private func removeManagedWorkspaceDirectoryIfNeeded(path: String) throws {
         let normalizedPath = normalizePath(path)
-        guard isManagedWorkspacesDirectory(path: normalizedPath) else { return }
+        guard try isManagedWorkspacesDirectory(path: normalizedPath) else { return }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: normalizedPath, isDirectory: &isDirectory), isDirectory.boolValue else { return }
         try FileManager.default.removeItem(atPath: normalizedPath)
