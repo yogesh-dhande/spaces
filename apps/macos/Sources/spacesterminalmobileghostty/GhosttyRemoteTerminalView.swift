@@ -2212,7 +2212,7 @@ import Foundation
                 selectButton.accessibilityHint = "Makes the next long press select text instead of going to the program."
                 selectButton.addAction(UIAction { [weak self] _ in self?.onSelect() }, for: .touchUpInside)
                 selectButton.isHidden = true
-                pinnedStackView.addArrangedSubview(selectButton)
+                contentStackView.addArrangedSubview(selectButton)
 
                 configureButton(composerButton, imageName: "plus.bubble")
                 composerButton.accessibilityIdentifier = "terminal.accessory.composer"

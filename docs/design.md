@@ -53,7 +53,7 @@ The visual system and reusable interaction patterns for the Spaces Mac and iOS a
 - Use monospaced text only for paths, commands, branches, shortcuts, ports, and scripts. Its roles use the same scale: `monoRowLabel` and `monoBody` (12), `monoMetadata` (11), `monoCaption`, `monoBadge`, and `monoBadgeStrong` (10).
 - Digits that must align rather than reflow, such as two version numbers side by side, take `Typography.tabularDigits(_:)` over the role already chosen; it changes only digit advance.
 - Terminal content is not chrome: it follows the terminal's own font size setting.
-- Touch selection on the iOS terminal draws its two handles in the accent token: a 2 pt bar the height of its row with a 10 pt dot beyond the end (above the start, below the end). The Copy and Select All menu is the system edit menu. The accessory bar's Select key reads like the other keys when off and filled white with a black icon when on.
+- Touch selection on the iOS terminal draws its two handles in the accent token: a 2 pt bar the height of its row with a 10 pt dot beyond the end (above the start, below the end). The Copy and Select All menu is the system edit menu. The accessory bar's Select key sits at the end of the scrolling keys, after opt, and reads like the other keys when off and filled white with a black icon when on.
 - Prefer short labels. Omit helper text when the label and control already say what the input is for; keep it for behavior, constraints, or consequences the control does not show.
 
 ## Spacing And Density

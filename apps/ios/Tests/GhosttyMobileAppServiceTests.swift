@@ -963,17 +963,19 @@
         func testRemoteTerminalHostViewShowsTheSelectKeyOnlyWhileTheProgramTracksTheMouse() {
             let log = SelectionEventLog()
             let hostView = selectionHostView(log: log)
-            XCTAssertFalse(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned.contains("Select text"))
+            XCTAssertFalse(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.scrollable.contains("Select text"))
 
             hostView.update(
                 snapshot: filledSnapshot(columns: 40, rows: 10, mouseTrackingLevel: .anyMotion), renderStateKey: "tracking", fallbackText: "")
-            let tracking = hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned
-            XCTAssertEqual(tracking.first, "Select text")
-            XCTAssertEqual(tracking.dropFirst().first, "Compose message", "the key sits just left of Compose")
+            let tracking = hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.scrollable
+            XCTAssertEqual(tracking.last, "Select text")
+            XCTAssertEqual(tracking.dropLast().last, "Option", "the key sits at the end of the scrolling keys, just after opt")
+            XCTAssertEqual(
+                hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Compose message", "Arrow key joystick", "Hide keyboard"])
 
             hostView.debugToggleSelectKeyForTesting()
             hostView.update(snapshot: filledSnapshot(columns: 40, rows: 10), renderStateKey: "not-tracking", fallbackText: "")
-            XCTAssertFalse(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned.contains("Select text"))
+            XCTAssertFalse(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.scrollable.contains("Select text"))
             XCTAssertFalse(hostView.debugIsSelectKeyOnForTesting, "the key does not stay armed after the program stops tracking")
         }
 
@@ -1032,8 +1034,8 @@
 
             let scrollView = try XCTUnwrap(descendants(of: accessoryView, matching: UIScrollView.self).first)
             let buttons = descendants(of: accessoryView, matching: UIButton.self)
-            let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             // The Select key exists only while a program tracks the mouse, so it is hidden here.
+            let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) && !$0.isHidden }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) && !$0.isHidden }
             XCTAssertEqual(
                 scrollableButtons.compactMap(\.accessibilityLabel),
