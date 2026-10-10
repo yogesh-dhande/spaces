@@ -4658,6 +4658,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             footer.setCustomSpacing(3, after: branchIcon)
         }
 
+        // The stored directory in full, never `~`-collapsed, for local and remote workspaces alike: the
+        // label is what ⌘C copies, and a full path works anywhere, while a remote device's home is not
+        // known to this client.
         let dirLabel = NSTextField(labelWithString: workspace.dir)
         dirLabel.font = Typography.monoCaption
         dirLabel.textColor = .tertiaryLabelColor

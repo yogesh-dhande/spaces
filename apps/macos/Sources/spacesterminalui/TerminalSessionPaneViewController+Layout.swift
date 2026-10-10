@@ -542,6 +542,8 @@ extension TerminalSessionPaneViewController {
         return "cwd: \(cwd)    shell: \(shell)    command: \(command)"
     }
 
+    /// Collapses against this Mac's home only. No device reports its home, so a remote session's path
+    /// shows in full; this line appears only while the pane is not showing a live terminal.
     static func abbreviatedPath(_ path: String) -> String {
         let home = NSHomeDirectory()
         guard path.hasPrefix(home) else { return path }
