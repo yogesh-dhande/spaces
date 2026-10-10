@@ -392,6 +392,83 @@ SHIM
             sleep 0.5
         done
         echo "==> smoke: reinstall handoff OK (daemon pid $daemon_pid unchanged, session and child $terminal_child_pid survived)"
+
+        # --- Release pruning leg -----------------------------------------------------------
+        # Each install keeps only the release `current` names, once the handoff has confirmed the daemon
+        # runs it. SPACESD_VERSION makes two distinct releases out of the one archive. A staging
+        # directory whose installer pid is dead is a crashed install's leftover and must go with the
+        # superseded releases.
+        echo "==> smoke: release pruning (smoke-a then smoke-b)"
+        local releases_dir="$smoke_root/reinstall-home/.spaces/daemon/releases"
+        local handoff_generation=1
+        reinstall_as_version() {
+            local release_version="$1"
+            if ! PATH="$install_shim_dir:$PATH" HOME="$smoke_root/reinstall-home" \
+                SPACESD_VERSION="$release_version" \
+                SPACES_SMOKE_DAEMON_PID="$daemon_pid" \
+                SPACES_SMOKE_DAEMON_LOG="$smoke_root/spacesd.log" \
+                SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+                ./install.sh >"$smoke_root/reinstall-$release_version.log" 2>&1; then
+                echo "install.sh reinstall as $release_version failed" >&2
+                cat "$smoke_root/reinstall-$release_version.log" >&2
+                exit 1
+            fi
+            handoff_generation=$((handoff_generation + 1))
+            local resume_deadline=$((SECONDS + 20))
+            until grep -q "handoff_resume generation=$handoff_generation" "$smoke_root/spacesd.log"; do
+                if [ "$SECONDS" -ge "$resume_deadline" ]; then
+                    echo "expected 'handoff_resume generation=$handoff_generation' in spacesd.log within 20s of the $release_version install" >&2
+                    cat "$smoke_root/spacesd.log" >&2
+                    exit 1
+                fi
+                sleep 0.5
+            done
+            if ! kill -0 "$daemon_pid" 2>/dev/null; then
+                echo "daemon pid $daemon_pid vanished across the $release_version handoff; exec-in-place must preserve the pid" >&2
+                exit 1
+            fi
+        }
+
+        reinstall_as_version smoke-a
+        # A staging directory left by an installer that died; the install lock guarantees no live
+        # installer owns it, so pruning removes it with the superseded releases.
+        mkdir -p "$releases_dir/.install-old"
+
+        # A second installer waits for the profile's install lock. Hold it from here, start the install,
+        # and check that nothing was published while it is held: unlocked, the release directory would
+        # appear within milliseconds of the start.
+        local install_lock="$smoke_root/reinstall-home/.spaces/daemon/.install.lock"
+        flock "$install_lock" sleep 4 &
+        local lock_holder_pid=$!
+        sleep 1
+        reinstall_as_version smoke-b &
+        local blocked_installer_pid=$!
+        sleep 2
+        if [ -e "$releases_dir/smoke-b" ]; then
+            echo "install.sh published releases/smoke-b while another installer held the profile lock" >&2
+            exit 1
+        fi
+        if ! kill -0 "$blocked_installer_pid" 2>/dev/null; then
+            echo "install.sh finished while another installer held the profile lock" >&2
+            exit 1
+        fi
+        wait "$lock_holder_pid"
+        wait "$blocked_installer_pid"
+        handoff_generation=$((handoff_generation + 1))
+
+        remaining_releases="$(ls -A "$releases_dir")"
+        if [ "$remaining_releases" != "smoke-b" ]; then
+            echo "expected only releases/smoke-b to remain after pruning, found:" >&2
+            echo "$remaining_releases" >&2
+            exit 1
+        fi
+        if [ "$(readlink "$smoke_root/reinstall-home/.spaces/daemon/current")" != "$releases_dir/smoke-b" ]; then
+            echo "current does not resolve to releases/smoke-b after pruning" >&2
+            exit 1
+        fi
+        env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            bin/spaces terminal list | grep -q '^linux-artifact-smoke\b'
+        echo "==> smoke: release pruning OK (only smoke-b remains, daemon pid $daemon_pid unchanged)"
     )
     rm -rf "$smoke_root"
 }

@@ -77,7 +77,29 @@ final class MCPStaleImageReloadTests: XCTestCase {
         try pointCurrentAtRelease(version: "2.0")
 
         // The wrapper is the exec target, not the binary: it rebuilds LD_LIBRARY_PATH for release 2.0.
-        XCTAssertEqual(reload.execTarget(for: daemonWireIncompatible(.clientTooOld)), currentWrapperPath())
+        XCTAssertEqual(reload.execTarget(for: daemonWireIncompatible(.clientTooOld)), directoryURL.path + "/current/bin/spaces")
+    }
+
+    /// A server that outlived an update keeps reporting a path inside the superseded release. Once that
+    /// directory is deleted the path cannot be resolved, yet the reload must still land on `current`.
+    func testReleaseLayoutExecsCurrentAfterTheRunningReleaseDirectoryIsDeleted() {
+        let root = "/install/daemon"
+        let runningPath = "\(root)/releases/1.0/bin/spaces-bin"
+        var runningReleaseExists = true
+        var currentInode: Int64 = 1
+        let reload = MCPStaleImageReload(
+            executablePath: runningPath,
+            identityReader: { path in
+                guard path.hasSuffix("/bin/spaces-bin") else { return nil }
+                return SpacesBinaryFileIdentity(deviceID: 1, inode: path.hasPrefix("\(root)/current/") ? currentInode : 1)
+            },
+            pathResolver: { path in runningReleaseExists || !path.contains("/releases/1.0/") ? path : nil })
+
+        // Release 2.0 is installed, `current` names its binary, and release 1.0 is pruned.
+        runningReleaseExists = false
+        currentInode = 2
+
+        XCTAssertEqual(reload.execTarget(for: daemonWireIncompatible(.clientTooOld)), "\(root)/current/bin/spaces")
     }
 
     func testReleaseLayoutDoesNotExecOnAnUnchangedInstall() throws {

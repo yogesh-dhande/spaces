@@ -80,7 +80,7 @@ apps/macos/.build/debug/spacese2e profile stop --remote <name>
 apps/macos/.build/debug/spacese2e profile remove --remote <name>
 ```
 
-`--remote` resolves the device from the same `.env` remote keys every remote workflow uses (source `scripts/spaces-e2e-env.sh` first). `stop` stops one unit instance and leaves the profile/unit enabled; `remove` refuses a profile whose daemon still holds sessions (or is running but not answering, `stop` first), then disables the instance and deletes the profile root. Both refuse `(installed)`.
+`--remote` resolves the device from the same `.env` remote keys every remote workflow uses (source `scripts/spaces-e2e-env.sh` first). `stop` stops one unit instance and leaves the profile/unit enabled; `remove` refuses a profile whose daemon still holds sessions (or is running but not answering, `stop` first), then disables the instance and deletes the profile root and its staging directory `~/.spaces/remote-artifact-e2e/<name>/`. `dev-build-and-launch.sh` deletes the extracted `dev-launch-install` tree after a successful remote install, leaving the uploaded archive for reuse. `stop` and `remove` both refuse `(installed)`.
 
 ### Keeping the Chrome Automation grant across rebuilds
 

@@ -677,6 +677,10 @@ private let installedProfileLabel = "(installed)"
 
 private let developmentProfilesRelativePath = ".spaces-dev/profiles/spaces"
 
+/// Where `deploy_linux_spacesd_e2e.sh` stages a profile's uploaded archive, one `<profile>` directory per
+/// profile under `$HOME`. It lives outside the profile root, so removing a profile deletes it separately.
+private let remoteArtifactStagingRelativePath = ".spaces/remote-artifact-e2e"
+
 /// Rejects anything that is not a plain development profile directory name.
 ///
 /// The installed profile is refused by name: it is the profile clients pair with and the one profile on a
@@ -883,7 +887,7 @@ private func stopDevelopmentProfileScript(profileName: String) -> String {
 }
 
 /// Refuses a profile whose daemon still holds terminal sessions, then stops and disables its unit
-/// instance and deletes the profile root.
+/// instance and deletes the profile root and the profile's staged upload archive.
 ///
 /// Disabling before deleting is what makes the deletion safe: the unit restarts on failure, so a unit left
 /// enabled comes straight back up against a half-deleted profile. The unit's stopped state is verified
@@ -937,7 +941,7 @@ private func removeDevelopmentProfileScript(profileName: String) -> String {
     # Clears a leftover failed state for the instance, so a removed profile leaves nothing behind in
     # systemd's view of the account's units.
     systemctl --user reset-failed "$unit" >/dev/null 2>&1
-    rm -rf "$root"
+    rm -rf "$root" "$HOME/\(remoteArtifactStagingRelativePath)/$name"
     printf '\(RemoteDevice.okMarker)\tRemoved %s and disabled %s.\\n' "$root" "$unit"
     """
 }

@@ -26,6 +26,27 @@ final class SpacesCLISearchPathTests: XCTestCase {
         XCTAssertEqual(path, "\(binDirectory.path):/usr/local/bin:/usr/bin:/bin")
     }
 
+    /// The daemon passes its unresolved launch path, so the directory that leads PATH is the stable
+    /// `current/bin` one and survives the versioned release it points at being deleted.
+    func testStableSymlinkDirectoryLeadsPATHInsteadOfTheVersionedRelease() throws {
+        let root = binDirectory.deletingLastPathComponent()
+        let releaseBin = root.appendingPathComponent("releases/1.0.0/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: releaseBin, withIntermediateDirectories: true)
+        for name in ["spacesd", "spaces"] {
+            FileManager.default.createFile(
+                atPath: releaseBin.appendingPathComponent(name).path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        }
+        let current = root.appendingPathComponent("current", isDirectory: false)
+        try FileManager.default.createSymbolicLink(atPath: current.path, withDestinationPath: "releases/1.0.0")
+        let stableBin = current.appendingPathComponent("bin", isDirectory: true).path
+
+        let path = SpacesCLISearchPath.pathPrependingSiblingCLIDirectory(
+            executablePath: "\(stableBin)/spacesd", currentPATH: "/usr/bin:/bin")
+
+        XCTAssertEqual(path, "\(stableBin):/usr/bin:/bin")
+        XCTAssertFalse(path?.contains("releases") ?? true)
+    }
+
     func testReturnsNilWithoutSiblingCLI() throws {
         let daemonPath = try installExecutable(named: "spacesd-bin")
         XCTAssertNil(SpacesCLISearchPath.pathPrependingSiblingCLIDirectory(executablePath: daemonPath, currentPATH: "/usr/bin:/bin"))

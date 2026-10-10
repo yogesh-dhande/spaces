@@ -558,6 +558,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - Every release is published as a pre-release first and reaches everyone only when promoted; promotion changes nothing about the build. A release superseded before promotion is never promoted.
 - "Receive pre-release updates" (off by default) switches the Mac between promoted releases and every published release, from the next update check and without reinstalling. A Mac on pre-releases moves to the superseding release at its next check, so a bad pre-release corrects itself.
 - Upgrading Spaces on Linux with a running daemon keeps the daemon's process and sessions through an in-place handoff, even while a long transcript replay keeps it briefly unavailable. When the handoff cannot be accepted or does not reach the installed build, the installer reports an error and leaves the running daemon alone.
+- A Linux install keeps only the release it installed. Earlier releases are deleted once the new daemon has taken over, never after a failed handoff, so disk use stays flat across updates. Going back to an older version reinstalls it.
 - Launched from `/Applications`, the app keeps its helper links and LaunchAgent aligned with the installed bundle without restarting the daemon.
 
 ### Daemon compatibility and restart

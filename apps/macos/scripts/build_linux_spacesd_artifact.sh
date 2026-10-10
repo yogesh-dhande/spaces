@@ -563,6 +563,14 @@ if [ -n "$profile_name" ]; then
 else
     mkdir -p "$release_parent" "$bin_root" "$user_bin_root" "$runtime_dir" "$HOME/spaces/workspaces" "$HOME/spaces/repos" "$service_dir"
 fi
+# One installer at a time per profile, from before the staging copy until the process exits: it
+# covers publication, link repointing, the daemon handoff, and pruning. A second installer blocks
+# here until the first finishes. The lock file sits beside `releases/`, not inside it, so pruning
+# never touches it, and the descriptor closes with the process. The `spaces` calls below close it
+# (`9>&-`) so a daemon they might start can never inherit the lock and hold it past this installer.
+exec 9>"$install_root/.install.lock"
+flock 9
+
 rm -rf "$release_staging_dir" "$previous_release_dir"
 mkdir -p "$release_staging_dir"
 cp -a "$artifact_root/." "$release_staging_dir/"
@@ -652,7 +660,7 @@ wait_for_staged_daemon() {
         daemon_pid="$(systemd_daemon_pid)"
         if { [ -z "$required_pid" ] || [ "$daemon_pid" = "$required_pid" ]; } \
             && daemon_runs_staged_image "$daemon_pid" \
-            && "$cli_path" terminal list >/dev/null 2>&1; then
+            && "$cli_path" terminal list 9>&- >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.1
@@ -673,7 +681,7 @@ wait_for_staged_daemon() {
 # path and so reaches that profile's daemon and no other.
 handoff_pid="$(systemd_daemon_pid)"
 if [ -n "$handoff_pid" ] && [ "$handoff_pid" -gt 0 ] 2>/dev/null; then
-    if ! "$cli_path" daemon apply-update >/dev/null 2>&1; then
+    if ! "$cli_path" daemon apply-update 9>&- >/dev/null 2>&1; then
         echo "spacesd did not accept the staged handoff; leaving the running daemon and its sessions untouched" >&2
         exit 1
     fi
@@ -692,6 +700,40 @@ else
         echo "spacesd did not start the installed daemon image within 10s" >&2
         exit 1
     fi
+fi
+
+# Keeps only the release `current` names. Every earlier release is superseded once the handoff above
+# has confirmed this profile's daemon runs the new one, and deleting it is safe: children get the
+# stable bin directory on PATH rather than a versioned one, a long-lived `spaces mcp` server finds
+# `current` from the shape of its own path, and the running daemon's image is the one `current` names.
+# A rollback never needs an old release because a downgrade reinstalls the pinned version. See
+# docs/implementation.md, "Linux release pruning".
+#
+# Accepted one-time transition: on the first update from a build that predates the stable child PATH
+# and the path-shaped MCP reload, terminals and MCP servers the old daemon started still point into the
+# release this prune deletes. Their `spaces` lookup falls through to the rest of PATH, and those MCP
+# servers cannot reload until their agent restarts. The release notes tell users to restart agents.
+#
+# The install lock held since before staging means no other installer in this profile is mid-publish,
+# so every `.install-*` and `.previous-*` directory left in `$release_parent` belongs to an installer
+# that died, and is deleted with the superseded releases. Entries are only ever removed by name inside
+# `$release_parent`; `rm -rf` on a symlink removes the link and never follows it.
+#
+# The install itself has already succeeded, so a failure here is a warning and not an exit status. The
+# next install retries the prune.
+prune_superseded_releases() {
+    local current_target keep entry
+    current_target="$(readlink "$install_root/current")" || return 1
+    keep="$(basename "$current_target")"
+    [ "$(dirname "$current_target")" = "$release_parent" ] && [ -d "$release_parent/$keep" ] || return 1
+    for entry in "$release_parent"/* "$release_parent"/.[!.]*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        [ "$(basename "$entry")" = "$keep" ] && continue
+        rm -rf "$entry" || return 1
+    done
+}
+if ! prune_superseded_releases; then
+    echo "warning: could not remove superseded releases under $release_parent; the next install retries" >&2
 fi
 
 if [ -n "$profile_name" ]; then

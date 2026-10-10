@@ -3743,7 +3743,7 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
         configureProcessSignals()
         removeShellIntegrationWrapperFromSearchPath()
-        configureCLISearchPath()
+        configureCLISearchPath(launchExecutablePath: launchExecutablePath)
 
         if environmentValue("SPACESD_PRINT_CERTIFICATE_FINGERPRINT") == "1" {
             do {
@@ -3848,15 +3848,23 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
     /// spacesd is the parent of every terminal shell, workspace runtime process, and
     /// coding-agent hook it spawns, and those children resolve `spaces` from this
-    /// process's PATH. Prepend the daemon executable's own directory (which ships the
+    /// process's PATH. Prepend the directory the daemon was launched from (which ships the
     /// version-matched CLI) so children inherit a PATH that resolves `spaces` without
     /// root-owned symlinks or daemon-specific shell-profile edits. This must run before
     /// anything snapshots the environment.
-    private static func configureCLISearchPath() {
-        guard
-            let path = SpacesCLISearchPath.pathPrependingSiblingCLIDirectory(
-                executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath),
-                currentPATH: environmentValue("PATH"))
+    ///
+    /// On Linux the directory is the unresolved launch path's, `~/.spaces/bin` or
+    /// `daemon/current/bin`, never the symlink-resolved `releases/<version>/bin`: children outlive
+    /// updates, and the release directory they would otherwise hold on PATH can be deleted once a
+    /// newer release supersedes it. On macOS the daemon runs from the app bundle and the resolved
+    /// executable's directory is used, which an update replaces in place.
+    private static func configureCLISearchPath(launchExecutablePath: String) {
+        #if canImport(Glibc)
+            let cliAnchorPath: String? = launchExecutablePath
+        #else
+            let cliAnchorPath = SpacesProfile.currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        #endif
+        guard let path = SpacesCLISearchPath.pathPrependingSiblingCLIDirectory(executablePath: cliAnchorPath, currentPATH: environmentValue("PATH"))
         else { return }
         setenv("PATH", path, 1)
     }
