@@ -109,6 +109,40 @@
             await fulfillment(of: [changed], timeout: 60)
         }
 
+        private func openDescriptorCount() throws -> Int {
+            try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        }
+
+        // The daemon holds one watcher per registered project, so descriptors held per watched
+        // directory (what the root watch costs) multiply by project count and exhaust the process
+        // limit. A watcher without the root watch must still report changes yet hold no descriptor
+        // per ancestor directory of a deeply nested path.
+        func testWatcherWithoutRootWatchReportsChangesAndHoldsNoAncestorDescriptors() async throws {
+            try requireHealthyFSEvents()
+            let depth = 6
+            var directory = try makeTempDirectory()
+            for level in 0..<depth {
+                directory = directory.appendingPathComponent("level\(level)", isDirectory: true)
+            }
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+            let changed = XCTestExpectation(description: "file change reported")
+            let watcher = FileSystemWatcher(paths: [directory.path], latency: 0.1, watchesRoot: false) { paths, _ in
+                if paths.contains(where: { $0.contains("probe.txt") }) { changed.fulfill() }
+            }
+            let descriptorsBefore = try openDescriptorCount()
+            try await watcher.start()
+            defer { watcher.stop() }
+            let descriptorsWhileRunning = try openDescriptorCount()
+
+            XCTAssertLessThan(descriptorsWhileRunning - descriptorsBefore, depth)
+
+            // Write after the stream is live so the change is observed rather than missed.
+            try "hello".write(to: directory.appendingPathComponent("probe.txt"), atomically: true, encoding: .utf8)
+
+            await fulfillment(of: [changed], timeout: 60)
+        }
+
         // A watch on the directory is what makes an atomic replace visible. Tools that rewrite a config
         // file in place do it by renaming a new file over the old one, which leaves a watch held on the
         // file itself pointing at the replaced inode; the Coding Agents rows depend on the directory

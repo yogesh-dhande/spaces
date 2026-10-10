@@ -108,8 +108,13 @@ extension FileSystemWatcher: FileSystemWatching {}
         self.makeWatcher = watcherFactory
     }
 
+    /// Discovery holds one watcher per git project, so it skips the FSEvents watch-root option, which
+    /// costs an open descriptor on every ancestor directory of every project. What it forgoes is a
+    /// rescan when a project's git dir (or an ancestor) is moved or deleted; that leaves nothing for a
+    /// scan to reconcile, since listing worktrees of a vanished project fails, and a deleted git dir
+    /// still reports its `HEAD` removal as an ordinary event.
     private static let liveWatcherFactory: WatcherFactory = { paths, latency, onChange in
-        FileSystemWatcher(paths: paths, latency: latency, onChange: onChange)
+        FileSystemWatcher(paths: paths, latency: latency, watchesRoot: false, onChange: onChange)
     }
 
     /// Runs the catch-up scan and installs the per-project watchers.
