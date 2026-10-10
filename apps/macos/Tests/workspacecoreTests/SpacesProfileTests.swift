@@ -43,6 +43,50 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertNotEqual(profile.homeDirectoryURL.path, NSHomeDirectory())
     }
 
+    /// A throwaway `SPACES_DB_PATH` profile keeps its worktrees and clones inside its own root so a test or
+    /// e2e run never writes to the user's real `~/spaces`; the installed and development-worktree profiles
+    /// share the user's `~/spaces` layout.
+    func testManagedRootsAreScopedToThrowawayProfilesOnly() throws {
+        let repoRoot = try makeFakeRepoRoot()
+        let context = SpacesDevelopmentContext(worktreeRoot: tempHomeURL.appendingPathComponent("worktree").path, branchName: "feature/x")
+        let scratchRoot = tempHomeURL.appendingPathComponent("scratch", isDirectory: true)
+
+        let throwaway = try SpacesProfile.resolve(
+            environment: [SpacesProfile.databasePathEnvironmentVariable: scratchRoot.appendingPathComponent("spaces.db").path],
+            homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
+            executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp", gitProbe: StubGitProfileProbe(context: nil))
+        let installed = try SpacesProfile.resolve(
+            environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
+            executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp", gitProbe: StubGitProfileProbe(context: nil))
+        let worktree = try SpacesProfile.resolve(
+            environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: repoRoot.path,
+            executablePath: repoRoot.appendingPathComponent("apps/macos/.build/debug/spacesd").path, gitProbe: StubGitProfileProbe(context: context))
+
+        XCTAssertEqual(throwaway.workspacesRootDirectory.path, scratchRoot.appendingPathComponent("workspaces").path)
+        XCTAssertEqual(throwaway.repositoriesRootDirectory.path, scratchRoot.appendingPathComponent("repos").path)
+        for profile in [installed, worktree] {
+            XCTAssertEqual(profile.workspacesRootDirectory.path, tempHomeURL.appendingPathComponent("spaces/workspaces").path)
+            XCTAssertEqual(profile.repositoriesRootDirectory.path, tempHomeURL.appendingPathComponent("spaces/repos").path)
+        }
+    }
+
+    /// An orchestrator that is given no roots provisions a workspace inside the bound throwaway profile.
+    func testOrchestratorWithoutInjectedRootsCreatesWorkspacesInsideTheThrowawayProfile() throws {
+        try useIsolatedSpacesProfile()
+        let profile = try SpacesProfile.current()
+        let repo = try makeTempGitRepo(name: "profile-scoped")
+        let store = try SQLiteStore(path: profile.databasePath)
+        let orchestrator = WorkspaceOrchestrator(store: store, git: GitClient(metadataCommandTimeout: 30))
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "profile-scoped-branch")
+
+        let profileRoot = URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).resolvingSymlinksInPath().path
+        XCTAssertTrue(
+            URL(fileURLWithPath: workspace.dir).resolvingSymlinksInPath().path.hasPrefix(profileRoot + "/workspaces/"),
+            "Workspace \(workspace.dir) must live under \(profileRoot)/workspaces.")
+    }
+
     func testResolveStopsSearchingAtFilesystemRootWhenExecutableIsOutsideRepo() throws {
         let profile = try SpacesProfile.resolve(
             environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
