@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import spacesdevicecore
 
 struct SpacesMobilePairedDeviceRecord: Codable, Equatable, Identifiable, Sendable {
     let id: String
@@ -357,15 +358,6 @@ struct SpacesMobileDeviceStoreState: Equatable, Sendable {
         DispatchQueue.main.async { MainActor.assumeIsolated { recordActiveHost(host, certificateFingerprint: certificateFingerprint) } }
     }
 
-    /// Bounds the candidate list `mergeAdvertisedHosts` produces. Without a cap, a device that roams
-    /// across many networks over its lifetime (home Wi-Fi swapped for a new router, a hotel LAN, a
-    /// second Tailscale exit node, ...) could accumulate an ever-growing tail of stale fallback
-    /// addresses, each one costing every future `SpacesDeviceEndpointResolver` race a wasted candidate
-    /// slot. Six comfortably covers the real shape of the problem — a daemon's own reported list (LAN +
-    /// tailnet, rarely more than two) plus a small handful of previously-known fallbacks — while still
-    /// bounding the pathological case.
-    private static let maxAdvertisedHostCandidates = 6
-
     /// Backfills a paired device's `hosts` from the addresses its daemon reports it is reachable at
     /// (`TerminalServiceDaemonStatus.deviceAPIAddresses`). This is how a device paired before its Mac
     /// ever had Tailscale silently gains the tailnet fallback with no rescan required, since the daemon
@@ -391,7 +383,7 @@ struct SpacesMobileDeviceStoreState: Equatable, Sendable {
     /// reachable and must not be silently dropped just because this device's own interface enumeration
     /// does not happen to include it.
     ///
-    /// The result is capped at `maxAdvertisedHostCandidates`, trimming from the tail. Because the
+    /// The result is capped at `SpacesDeviceHostCandidates.maxCount`, trimming from the tail. Because the
     /// daemon's own addresses always lead the union, a plain tail trim only ever drops the appended,
     /// previously-stored-but-unreported fallbacks — the least-recently-useful candidates — never one of
     /// the daemon's own current addresses.
@@ -436,13 +428,15 @@ struct SpacesMobileDeviceStoreState: Equatable, Sendable {
 
     /// The union `mergeAdvertisedHosts` persists: `daemonReported`, de-duplicated and in its own order,
     /// followed by whatever member of `previouslyStored` was not already included, in its own relative
-    /// order, then bounded to `maxAdvertisedHostCandidates` from the tail.
+    /// order, then bounded to `SpacesDeviceHostCandidates.maxCount` from the tail. The bound keeps a
+    /// device that roams across many networks from accumulating stale fallback addresses.
     private static func unionPreservingDaemonOrder(daemonReported: [String], previouslyStored: [String]) -> [String] {
         var seen = Set<String>()
         var merged: [String] = []
         for host in daemonReported where seen.insert(host).inserted { merged.append(host) }
         for host in previouslyStored where seen.insert(host).inserted { merged.append(host) }
-        if merged.count > maxAdvertisedHostCandidates { merged.removeLast(merged.count - maxAdvertisedHostCandidates) }
+        let cap = SpacesDeviceHostCandidates.maxCount
+        if merged.count > cap { merged.removeLast(merged.count - cap) }
         return merged
     }
 
