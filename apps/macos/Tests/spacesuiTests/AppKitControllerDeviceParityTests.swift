@@ -1422,6 +1422,22 @@ import workspacecore
         #expect(request.mousePointerMods == 4)
     }
 
+    @Test func deviceTerminalControlRequestCarriesMouseMotionAndPointerToTheDaemon() throws {
+        let control = TerminalControlRequest(
+            command: .mouseMotion(
+                TerminalControlMouseMotionPayload(clientID: "mac-client", ownerEpoch: 7, pointerX: 0.25, pointerY: 0.75, pointerMods: 4)))
+
+        let request = try TerminalPaneService.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .mouseMotion)
+        #expect(request.clientID == "mac-client")
+        #expect(request.ownerEpoch == 7)
+        #expect(request.mouseButton == nil)
+        #expect(request.mousePointerX == 0.25)
+        #expect(request.mousePointerY == 0.75)
+        #expect(request.mousePointerMods == 4)
+    }
+
     @Test func deviceTerminalControlRequestPreservesPasteIntent() throws {
         let control = TerminalControlRequest(
             command: .send(

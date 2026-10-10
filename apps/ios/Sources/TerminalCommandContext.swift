@@ -7,7 +7,7 @@ import Foundation
 ///
 /// `timeout` and `commandChannel` stay as separate trailing parameters on each method rather than
 /// joining this struct: timeout defaults deliberately differ per method (3s for interactive input, 30s
-/// for `pasteImage`, 6s for `readSelectionText`), and `commandChannel` is a per-call transport override,
+/// for `pasteImage`), and `commandChannel` is a per-call transport override,
 /// not part of a command's identity.
 struct TerminalCommandContext: Sendable {
     var sessionID: String

@@ -89,6 +89,14 @@ export default function TerminalsDocsPage() {
           points; Spaces starts at 12 points and there is no reset key. One size is shared across
           every open pane in the app.
         </Prose>
+        <Prose>
+          A selection belongs to the pane you made it in; other windows showing the same session
+          are unaffected. Drag to select, double-click or triple-click for a word or line, and
+          drag past the top or bottom edge to keep selecting through scrollback. <code>⌘C</code>{" "}
+          copies the whole selection, including rows out of view, and nothing is copied just by
+          selecting. <code>⌘A</code> selects everything the pane can read back. Typing clears the
+          selection. Right-click for Copy, Paste and Select All.
+        </Prose>
       </Section>
     </DocsShell>
   );

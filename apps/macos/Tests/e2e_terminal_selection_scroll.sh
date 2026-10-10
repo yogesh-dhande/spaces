@@ -174,35 +174,50 @@ wait_for_visible_text() {
   fail "Timed out waiting for visible surface output to contain '$include'"
 }
 
-# The 0-based row index of the visible line whose content is exactly `selline-003` (trailing
-# spaces from the grid's fixed-width padding stripped, per GhosttyTerminalSnapshotGrid.fullPlainText).
-# With no scrollback yet, a fresh session's viewport starts at absolute row 0, so this visible
-# index doubles as the absolute row `setSelection` expects -- guarded by comparing the visible
-# line count against the dump's own surfaceRows so a taller/shorter grid fails loudly instead of
-# silently picking the wrong row.
-selection_target_row() {
-  local text="$1"
-  local surface_rows="$2"
-  python3 - "$text" "$surface_rows" <<'PY'
-import sys
-
-text, surface_rows = sys.argv[1], sys.argv[2]
-lines = text.split("\n")
-if not surface_rows.strip():
-    raise SystemExit("dump reported no surfaceRows")
-surface_rows = int(surface_rows)
-if len(lines) > surface_rows:
-    raise SystemExit(f"visible line count {len(lines)} exceeds surfaceRows {surface_rows}; no-scrollback assumption broken")
-target = next((index for index, line in enumerate(lines) if line.rstrip() == "selline-003"), None)
-if target is None:
-    raise SystemExit("selline-003 was not found as an exact visible line")
-print(target)
-PY
+# Waits for the pane's own selection (this client's, painted onto the mirror surface) to contain
+# `needle`. Selection is per client and never reaches the daemon, so the pane dump is the only place
+# it can be observed.
+wait_for_surface_selection_contains() {
+  local needle="$1"
+  local deadline=$((SECONDS + 30))
+  local selection=""
+  while (( SECONDS < deadline )); do
+    dump_terminal_state
+    selection="$(dump_value surfaceSelectionText)"
+    if printf '%s\n' "$selection" | grep -Fq -- "$needle"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  printf '%s\n' "$selection" >&2
+  fail "Timed out waiting for the pane's selection to contain '$needle'"
 }
 
-control_command() {
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
-    terminal-service-control --session-id "$session_id" "$@"
+wait_for_surface_selection_empty() {
+  local deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    dump_terminal_state
+    [[ -z "$(dump_value surfaceSelectionText)" ]] && return 0
+    sleep 0.2
+  done
+  printf '%s\n' "$(cat "$DUMP_PATH")" >&2
+  fail "Timed out waiting for the pane's selection to clear"
+}
+
+# Same polling shape as e2e_terminal_edit_shortcuts.sh.
+wait_for_pbpaste_contains() {
+  local needle="$1"
+  local deadline=$((SECONDS + 10))
+  local output=""
+  while (( SECONDS < deadline )); do
+    output="$(pbpaste)"
+    if printf '%s\n' "$output" | grep -Fq -- "$needle"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  printf '%s\n' "$output" >&2
+  fail "Timed out waiting for pasteboard to contain: $needle"
 }
 
 json_field() {
@@ -262,58 +277,35 @@ OWNER_CLIENT_ID="$(owner_client_id)"
 # Step 1: the fresh grid has no scrollback yet, so every line lands within the visible viewport.
 send_line "seq -f selline-%03g 1 5"
 wait_for_visible_text "selline-005"
-selline_text="$last_visible_text"
 
-surface_rows="$(dump_value surfaceRows)"
-selection_row="$(selection_target_row "$selline_text" "$surface_rows")" || {
-  printf '%s\n' "$selline_text" >&2
-  fail "Failed to resolve the absolute row for selline-003"
-}
+# Step 2: drag-select with the mouse. The drag starts low inside the surface and ends above the top of
+# the content; Ghostty clamps a drag that leaves the surface to row 0, and with no scrollback yet that
+# selects every row, selline-003 included. The selection belongs to this client alone: it is held in
+# absolute rows and painted onto the pane, and the daemon is never told about it.
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+  drag-application-window --executable-name SpacesApp --application-pid "$APP_PID" \
+  --start-normalized-x 0.9 --start-normalized-y 0.9 --end-normalized-x 0.1 --end-normalized-y 0.0 >/dev/null
+wait_for_surface_selection_contains "selline-003"
 
-# Step 2: set the shared selection to span selline-003 (columns 0-10 cover its 11 characters).
-set_response="$(control_command --command setSelection \
-  --selection-start-column 0 --selection-start-row "$selection_row" \
-  --selection-end-column 10 --selection-end-row "$selection_row")"
-[[ "$(json_field "$set_response" ok)" == "true" ]] || {
-  printf '%s\n' "$set_response" >&2
-  fail "setSelection reported failure"
-}
-[[ "$(json_field "$set_response" selectionText)" == "selline-003" ]] || {
-  printf '%s\n' "$set_response" >&2
-  fail "setSelection returned an unexpected selectionText"
-}
-
-read_response="$(control_command --command readSelectionText)"
-[[ "$(json_field "$read_response" ok)" == "true" ]] || {
-  printf '%s\n' "$read_response" >&2
-  fail "readSelectionText reported failure"
-}
-[[ "$(json_field "$read_response" selectionText)" == "selline-003" ]] || {
-  printf '%s\n' "$read_response" >&2
-  fail "readSelectionText returned an unexpected selectionText before scrolling"
-}
-
+# Step 3: output that scrolls selline-003 out of the viewport must not disturb the selection, and the
+# pane's copy still reaches it.
 send_line "seq -f fillline-%03g 1 200"
 wait_for_visible_text "fillline-200" "selline-003"
 
-# Step 5: the daemon keeps the selection anchored to its content, so it survives the scroll
-# even though selline-003 is no longer on screen.
-read_response="$(control_command --command readSelectionText)"
-[[ "$(json_field "$read_response" ok)" == "true" ]] || {
-  printf '%s\n' "$read_response" >&2
-  fail "readSelectionText reported failure after scrollback growth"
-}
-[[ "$(json_field "$read_response" selectionText)" == "selline-003" ]] || {
-  printf '%s\n' "$read_response" >&2
-  fail "readSelectionText lost the selection after selline-003 scrolled into scrollback"
-}
+# Copy while the selected row is off screen: the pane copies its own selection from its transcript, so
+# the pasteboard receives selline-003 even though the viewport no longer shows it. The sentinel proves
+# the pasteboard was written by this copy.
+printf 'sentinel-%s\n' "$$" | pbcopy
+focus_pane
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+  terminal-window-shortcut --session-id "$session_id" --action copy >/dev/null
+wait_for_pbpaste_contains "selline-003"
 
-# Step 6: scroll the pane back up until selline-003 is visible again. A plain shell session always
+# Step 4: scroll the pane back up until selline-003 is visible again. A plain shell session always
 # routes a wheel gesture to this pane's own local replay of the transcript (only a full-screen or
 # mouse-tracking program routes to the session's own viewport instead, see
-# `RemoteGhosttySessionHost.scrollRoute`), and a replay frame's snapshot never carries a selection
-# (`GhosttyVtSessionBridge.snapshot`'s `selection` stays nil for a replay's own reconstruction of the
-# transcript), so the pane paints no selection even with selline-003 back on screen.
+# `RemoteGhosttySessionHost.scrollRoute`), and the pane paints its own selection onto that replay
+# like any other frame, so the highlight is back on selline-003 once its row is on screen.
 selection_revealed=0
 for _ in $(seq 1 40); do
   env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
@@ -330,69 +322,18 @@ done
   printf '%s\n' "${scrolled_text:-}" >&2
   fail "Scrolling never revealed selline-003 in scrollback"
 }
-# Confirm the pane is actually in the mode this step means to exercise, so the next two checks are
-# not passing vacuously (e.g. because a stale live frame happened to still show no selection).
+# Confirm the pane is actually in the mode this step means to exercise, so the checks below are not
+# passing vacuously against the live frame.
 [[ "$(dump_value isShowingLocalScrollbackFrame)" == "true" ]] || {
   printf '%s\n' "$(cat "$DUMP_PATH")" >&2
   fail "The pane must be showing its local replay once selline-003 is scrolled back into view"
 }
-[[ -z "$(dump_value surfaceSelectionText)" ]] || {
-  printf '%s\n' "$(cat "$DUMP_PATH")" >&2
-  fail "A replay frame must paint no selection even where selline-003 is visible"
-}
-read_response="$(control_command --command readSelectionText)"
-[[ "$(json_field "$read_response" ok)" == "true" ]] || {
-  printf '%s\n' "$read_response" >&2
-  fail "readSelectionText reported failure while scrolled into the local replay"
-}
-[[ "$(json_field "$read_response" selectionText)" == "selline-003" ]] || {
-  printf '%s\n' "$read_response" >&2
-  fail "the shared selection did not survive being scrolled into the local replay"
-}
+wait_for_surface_selection_contains "selline-003"
 
-# Step 7: a plain click on the replay is a no-op for the shared selection. The mirror only forwards
-# a click as a clear when its own last-applied frame painted a selection to click away
-# (`GhosttyMirrorTerminalView.clearSharedSelectionIfNeeded`), which a replay frame never does;
-# `RemoteGhosttySessionHost.sendRemoteClearSelection` also refuses to send while a replay is shown.
-# The click must therefore reach neither the daemon nor this pane's own surface.
+# Step 5: a plain click on the replay clears the pane's own selection, and only the pane's: no
+# selection request exists for it to send, so no other viewer's screen changes.
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
   click-application-window --executable-name SpacesApp --application-pid "$APP_PID" --normalized-x 0.5 --normalized-y 0.5 >/dev/null
-sleep 1
-read_response="$(control_command --command readSelectionText)"
-[[ "$(json_field "$read_response" ok)" == "true" ]] || {
-  printf '%s\n' "$read_response" >&2
-  fail "readSelectionText reported failure after clicking the replay"
-}
-[[ "$(json_field "$read_response" selectionText)" == "selline-003" ]] || {
-  printf '%s\n' "$read_response" >&2
-  fail "a click on the replay cleared the selection every other viewer is looking at"
-}
+wait_for_surface_selection_empty
 
-# Step 8: clear the shared selection the way any client's explicit clear affordance does (iOS shows
-# the shared selection and can clear it with no viewport of its own to overlap it). The daemon's
-# session driver clears unconditionally (`GhosttyEmbeddedTerminalSessionDriver.clearSelection`), so
-# this reaches the selection regardless of what this pane happens to be scrolled to. The pane dump
-# has nothing further to prove here: it is still showing the replay, which paints no selection either
-# way, so only the shared selection itself (`readSelectionText`) can show the clear took effect.
-clear_response="$(control_command --command clearSelection)"
-[[ "$(json_field "$clear_response" ok)" == "true" ]] || {
-  printf '%s\n' "$clear_response" >&2
-  fail "clearSelection reported failure"
-}
-
-selection_cleared=0
-deadline=$((SECONDS + 30))
-while (( SECONDS < deadline )); do
-  read_response="$(control_command --command readSelectionText)"
-  if [[ "$(json_field "$read_response" ok)" == "true" ]] && [[ -z "$(json_field "$read_response" selectionText)" ]]; then
-    selection_cleared=1
-    break
-  fi
-  sleep 0.2
-done
-(( selection_cleared == 1 )) || {
-  printf '%s\n' "$read_response" >&2
-  fail "readSelectionText never reported the selection cleared"
-}
-
-echo "Spaces macOS shared-selection scrollback E2E passed for session $session_id"
+echo "Spaces macOS per-client selection scrollback E2E passed for session $session_id"

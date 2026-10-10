@@ -1,31 +1,29 @@
 import Foundation
 
-/// Projects a screen-space selection (row 0 = oldest retained scrollback row, matching what
-/// `spaces_ghostty_vt_session_set_selection`/`_selection_state` accept and report) into one
-/// viewport's coordinates. The Linux headless core owns the selection in screen space (it can span
-/// scrollback the current viewport does not show) and rebases it into the viewport it exports every
-/// frame, the same way `GhosttyTerminalSnapshotViewport` rebases a snapshot when cropping it for
-/// follow-cursor display.
+/// Projects a selection held in rows of any one numbering (screen rows, where row 0 is the oldest
+/// retained scrollback row, or a client's absolute rows) into one viewport's coordinates. A client
+/// projects its absolute-row selection (`TerminalAbsoluteSelection`) onto each frame it paints, the
+/// same way `GhosttyTerminalSnapshotViewport` rebases a snapshot when cropping it for follow-cursor
+/// display.
 ///
-/// Lives next to `GhosttyTerminalSelectionRange` so both the headless core and its tests share one
+/// Lives next to `GhosttyTerminalSelectionRange` so every projecting caller and its tests share one
 /// implementation. Unlike `GhosttyTerminalSnapshotViewport.crop`, this only crops vertically: the
-/// headless core's viewport always shows every column the session has, so there is no horizontal
+/// viewport always shows every column of the grid it projects onto, so there is no horizontal
 /// window to intersect.
 public enum GhosttyTerminalSelectionProjection {
-    /// `startRow`/`endRow` are screen-space and must already be ordered (`startRow <= endRow`, and
-    /// `startColumn <= endColumn` when they are equal), matching what
-    /// `spaces_ghostty_vt_session_selection_state` guarantees. A rectangle's columns are the one
-    /// exception: lexicographic ordering cannot order them, so they are normalized here. `viewportRowOffset` is the screen-space
-    /// row of the viewport's first visible row (the scrollbar offset); `columns`/`rows` are the
-    /// viewport's dimensions. Returns nil when the selection does not overlap the viewport at all.
+    /// `startRow`/`endRow` are in the same numbering as `viewportRowOffset` and must already be ordered
+    /// (`startRow <= endRow`, and `startColumn <= endColumn` when they are equal). A rectangle's
+    /// columns are the one exception: lexicographic ordering cannot order them, so they are normalized here.
+    /// `viewportRowOffset` is the row, in that numbering, of the viewport's first visible row;
+    /// `columns`/`rows` are the viewport's dimensions. Returns nil when the selection does not overlap
+    /// the viewport at all.
     public static func project(
-        startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, isRectangle: Bool, viewportRowOffset: UInt32, columns: Int,
-        rows: Int
+        startColumn: UInt16, startRow: Int64, endColumn: UInt16, endRow: Int64, isRectangle: Bool, viewportRowOffset: Int64, columns: Int, rows: Int
     ) -> GhosttyTerminalSelectionRange? {
         guard columns > 0, rows > 0 else { return nil }
 
         let windowRowStart = viewportRowOffset
-        let windowRowEnd = viewportRowOffset + UInt32(rows) - 1
+        let windowRowEnd = viewportRowOffset + Int64(rows) - 1
 
         let overlapRowStart = max(startRow, windowRowStart)
         let overlapRowEnd = min(endRow, windowRowEnd)

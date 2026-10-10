@@ -18,10 +18,6 @@ public enum TerminalRemoteSessionStateReason: String, Sendable, CaseIterable {
     case stateChange = "state_change"
     case scroll = "scroll"
     case clearScreen = "clear_screen"
-    /// The shared selection changed (set or cleared), by any viewer or by the daemon auto-clearing
-    /// a garbage-pinned selection. Selection is host-anchored, not owner-gated, so this reason
-    /// carries no owner-specific gating of its own.
-    case selection = "selection"
     case runtimeState = "runtime_state"
     case resize = "resize"
     case terminated = "terminated"

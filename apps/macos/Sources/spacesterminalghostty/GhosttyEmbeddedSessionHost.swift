@@ -35,11 +35,11 @@
         func snapshotText() -> String?
         func sessionSnapshot() -> GhosttyTerminalSnapshot?
         func sessionSnapshotText() -> String?
-        func copySelectionToPasteboard() -> Bool
-        /// Reads the terminal's current shared selection via the daemon's `readSelectionText` and
-        /// writes it to the pasteboard on success. See `RemoteGhosttySessionHost`'s implementation for
-        /// why this is distinct from `copySelectionToPasteboard`.
-        func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void)
+        /// Copies this pane's own selection to the pasteboard, reading its text from the pane's
+        /// transcript replay. Does nothing when the pane has no selection. May complete after reads.
+        func copySelectionToPasteboard()
+        /// Selects everything this pane can replay. Copies nothing.
+        func selectAll()
         func pasteClipboardContents() -> Bool
         /// Renders this session at the app-wide terminal text size. A client-side display setting, so
         /// it applies whatever this host's attachment mode is and whether or not the session is live.
@@ -52,15 +52,13 @@
         var debugSearchState: GhosttyTerminalSearchDebugState { get }
         var debugSurfaceRefreshRequestCount: Int { get }
         func debugVisibleSurfaceText() -> String?
-        /// The live surface's shared-selection text, so a test can observe the daemon-projected
-        /// selection painted from streamed frames (see `GhosttyMirrorTerminalView.debugSurfaceSelectionText`).
-        /// Nil with no surface or no selection.
+        /// The text under the pane's own painted selection, so a test can observe what the pane
+        /// highlights (see `GhosttyMirrorTerminalView.debugSurfaceSelectionText`). Nil with no surface or
+        /// no selection. A host that owns a daemon-side session paints no selection of its own.
         func debugSurfaceSelectionText() -> String?
         /// Whether the pane is painting its own local replay of scrollback rather than the session's
-        /// frames (`RemoteGhosttySessionHost`'s `isShowingLocalScrollbackFrame`). While true, the pane
-        /// paints no selection: the shared selection is anchored in the session's own screen, which a
-        /// replay frame is not looking at (see `debugSurfaceSelectionText`). A host with no local replay
-        /// concept is never showing one, so this defaults to `false` below.
+        /// frames (`RemoteGhosttySessionHost`'s `isShowingLocalScrollbackFrame`). A host with no local
+        /// replay concept is never showing one, so this defaults to `false` below.
         var debugIsShowingLocalScrollbackFrame: Bool { get }
     }
 
@@ -76,11 +74,6 @@
         @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
             sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: nil)
         }
-
-        /// Default: no shared selection to read, so callers fall back to `copySelectionToPasteboard()`
-        /// immediately. Only `RemoteGhosttySessionHost` overrides this with the real `readSelectionText`
-        /// round trip; every other conformer (test fakes included) reports nothing shared to find.
-        public func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) { completion(false) }
     }
 
     /// The daemon-side embedded renderer host, run on the terminal engine actor. It deliberately does
@@ -214,7 +207,9 @@
 
         public func sessionSnapshotText() -> String? { sessionDriver.snapshotText() }
 
-        public func copySelectionToPasteboard() -> Bool { false }
+        public func copySelectionToPasteboard() {}
+
+        public func selectAll() {}
 
         public func pasteClipboardContents() -> Bool {
             guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
@@ -234,21 +229,14 @@
             sessionDriver.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
         }
 
+        @discardableResult public func sendMouseMotion(pointerPosition: TerminalScrollPointerPosition) -> Bool {
+            sessionDriver.sendMouseMotion(pointerPosition: pointerPosition)
+        }
+
         @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
         /// `scroll_to_bottom` is Ghostty's own binding action (`Surface.zig`), the same mechanism `clear_screen` already rides.
         @discardableResult public func scrollViewportToBottom() -> Bool { sessionDriver.performBindingAction("scroll_to_bottom") }
-
-        @discardableResult public func setSelectionAbsolute(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, rectangle: Bool)
-            -> Bool
-        {
-            sessionDriver.setSelectionAbsolute(
-                startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, rectangle: rectangle)
-        }
-
-        public func clearSelection() { sessionDriver.clearSelection() }
-
-        public func readSelectionText() -> String? { sessionDriver.readSelectionText() }
 
         public var debugSearchState: GhosttyTerminalSearchDebugState { .init(isVisible: false, query: "", total: nil, selected: nil) }
 
@@ -256,7 +244,7 @@
 
         public func debugVisibleSurfaceText() -> String? { sessionDriver.snapshotText() }
 
-        public func debugSurfaceSelectionText() -> String? { sessionDriver.readSelectionText() }
+        public func debugSurfaceSelectionText() -> String? { nil }
     }
 
     @TerminalEngineActor public final class GhosttyEmbeddedSessionCore {
@@ -377,14 +365,42 @@
             // The committed end offset is discarded: this core re-derives the transcript's end from the
             // handle on every append (`seekToEnd`) rather than tracking a byte count, so the adopted
             // handle's position is the only state that has to change.
-            adoptTrimmedTranscript: { [weak self] handle, _ in
+            adoptTrimmedTranscript: { [weak self] handle, _, offsetShift in
                 guard let self else { return }
                 // The trim replaced output.log with a fresh inode; adopt its handle before closing the old
                 // one so the stored property always holds a valid handle even if the close fails.
                 let previousHandle = outputHandle
                 outputHandle = handle
+                transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(handle)) ?? 0
+                transcriptOffsetDelta += offsetShift
                 try? previousHandle?.close()
             })
+        /// The identity of the `output.log` file `outputHandle` refers to, stamped on every frame; 0 until
+        /// a handle exists (see `TerminalTranscriptFileIdentity`). Captured when a handle is adopted so a
+        /// frame costs no syscall.
+        private var transcriptFileIdentity: UInt64 = 0
+        /// Maps Ghostty's `bytes_processed` to an `output.log` offset: `offset = bytes_processed + delta`.
+        ///
+        /// Invariant: every PTY byte reaches Ghostty's parser (`ghostty_session_process_output` on the PTY
+        /// reader thread) and, through the data callback that fires on the same bytes before parsing,
+        /// `output.log` in the same order, so replaying the first `n` bytes of the file leaves a terminal
+        /// that has consumed `n` PTY bytes. Three things break the one-to-one count, and `delta` absorbs
+        /// each:
+        ///  - A clear (`clearScreenAndScrollback`) mutates Ghostty directly and appends a marker sequence
+        ///    to the file that Ghostty never parses, so the file runs ahead by the marker's length.
+        ///  - A head trim replaces the file with a preamble plus the retained tail, so every later offset
+        ///    shifts by `TrimResult.offsetShift`.
+        ///  - A core resumed from an exec handoff replays the whole file through the parser before it
+        ///    adopts the PTY, so its `bytes_processed` already counts every file byte and the delta
+        ///    starts at 0 (a failed-exec resume in place replays only the bytes the file gained, which
+        ///    keeps the count aligned the same way).
+        /// The file is appended on a later engine-actor turn than the parse (the data callback only
+        /// buffers), and a capture flushes that buffer first, so a chunk parsed after the flush can sit
+        /// past the file's current end: the offset then names bytes that are about to land, in order, in
+        /// the same file. A clear that lands while PTY bytes are still in flight can likewise leave one
+        /// frame's offset off by the marker's length until the parser catches up (the next frame is
+        /// exact).
+        private var transcriptOffsetDelta: Int64 = 0
         private var started = false
         private var didTerminateCurrentRun = false
         private var currentTitle: String?
@@ -410,7 +426,7 @@
         /// Ghostty's state revision as of the most recent live capture. See `captureLiveSessionScreenState`.
         private var lastCapturedSessionStateRevision: UInt64?
         /// The shared full-vs-delta policy, the stream's delta baseline, the pending subscriber-baseline
-        /// promise, and the scroll-rect carry. Identical to what the Linux headless core runs.
+        /// promise. Identical to what the Linux headless core runs.
         private var renderUpdateProducer = GhosttyRenderUpdateProducer()
         private var renderUpdateRevision: UInt64 = 0
         /// Live in-memory runtime state — the AUTHORITATIVE source broadcasts serve, advanced the moment a
@@ -1368,10 +1384,8 @@
                 case .scroll: controlResponseForScrollRequest(request)
                 case .scrollToBottom: controlResponseForScrollToBottomRequest(request)
                 case .mouseButton: controlResponseForMouseButtonRequest(request)
+                case .mouseMotion: controlResponseForMouseMotionRequest(request)
                 case .setAppearance: controlResponseForSetAppearanceRequest(request)
-                case .setSelection: controlResponseForSetSelectionRequest(request)
-                case .clearSelection: controlResponseForClearSelectionRequest(request)
-                case .readSelectionText: controlResponseForReadSelectionTextRequest(request)
                 case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
                 }
             return TerminalControlHandling(response: response)
@@ -1536,64 +1550,6 @@
             return TerminalControlResponse(
                 ok: true,
                 message: appearanceChanged ? "Applied \(appearance.rawValue) appearance." : "Terminal already matches the requested appearance.")
-        }
-
-        private func controlResponseForSetSelectionRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else {
-                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
-            }
-            touchClientLease(request.clientID)
-            // Selection is deliberately shared state, not owner-gated (see
-            // `TerminalControlCommand.requiresOwnerClientID`): any attached viewer may set it, and the
-            // result is broadcast to every other viewer.
-            guard let startColumn = request.selectionStartColumn, let startRow = request.selectionStartRow,
-                let endColumn = request.selectionEndColumn, let endRow = request.selectionEndRow
-            else {
-                TerminalPerformance.logMetric(
-                    "terminal_control_set_selection", target: "session=\(launchConfiguration.sessionID)",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                return TerminalControlResponse(ok: false, message: "Missing selection endpoints.", errorCode: .invalidArgument)
-            }
-            let didSet = rendererHostStorage.setSelectionAbsolute(
-                startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, rectangle: request.selectionRectangle ?? false)
-            let selectionText = didSet ? rendererHostStorage.readSelectionText() : nil
-            if didSet { broadcastCurrentState(reason: .selection) }
-            TerminalPerformance.logMetric(
-                "terminal_control_set_selection", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: didSet)
-            return TerminalControlResponse(
-                ok: didSet, message: didSet ? "Set terminal selection." : "Unable to set terminal selection.", selectionText: selectionText)
-        }
-
-        private func controlResponseForClearSelectionRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else {
-                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
-            }
-            touchClientLease(request.clientID)
-            // Not owner-gated for the same reason as `controlResponseForSetSelectionRequest` above.
-            rendererHostStorage.clearSelection()
-            broadcastCurrentState(reason: .selection)
-            TerminalPerformance.logMetric(
-                "terminal_control_clear_selection", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
-            return TerminalControlResponse(ok: true, message: "Cleared terminal selection.")
-        }
-
-        private func controlResponseForReadSelectionTextRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else {
-                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
-            }
-            touchClientLease(request.clientID)
-            // A pure read: never broadcasts, and not owner-gated so any viewer can read what the shared
-            // selection currently says (e.g. before deciding whether to extend or replace it).
-            let selectionText = rendererHostStorage.readSelectionText()
-            TerminalPerformance.logMetric(
-                "terminal_control_read_selection_text", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
-            return TerminalControlResponse(ok: true, message: "Read terminal selection.", selectionText: selectionText)
         }
 
         private func controlResponseForDetachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1875,9 +1831,6 @@
             let beforeScreenState = captureLiveSessionScreenState()
             let scrolled = rendererHostStorage.sendScroll(
                 horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
-            // The pre-scroll capture drained ghostty's pending rects, so its movement rides forward on the
-            // carry rather than being lost between the two reads.
-            renderUpdateProducer.foldScrollRects(beforeScreenState.scrollRects, overflowed: beforeScreenState.scrollRectsOverflowed)
             let response = scrollControlResponse(scrolled: scrolled, beforeScreenState: beforeScreenState)
             TerminalPerformance.logMetric(
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
@@ -1902,7 +1855,6 @@
             // own return value.
             let beforeScreenState = captureLiveSessionScreenState()
             let scrolled = rendererHostStorage.scrollViewportToBottom()
-            renderUpdateProducer.foldScrollRects(beforeScreenState.scrollRects, overflowed: beforeScreenState.scrollRectsOverflowed)
             let response = scrollControlResponse(scrolled: scrolled, beforeScreenState: beforeScreenState)
             TerminalPerformance.logMetric(
                 "terminal_control_scroll_to_bottom", target: "session=\(launchConfiguration.sessionID)",
@@ -1919,7 +1871,6 @@
             guard let beforeOffset = beforeScreenState.snapshot?.scrollbarOffset, let afterOffset = afterScreenState.snapshot?.scrollbarOffset,
                 beforeOffset != afterOffset
             else {
-                renderUpdateProducer.foldScrollRects(afterScreenState.scrollRects, overflowed: afterScreenState.scrollRectsOverflowed)
                 return TerminalControlResponse(ok: true, message: "Already at scroll boundary.")
             }
             broadcastCurrentState(reason: .scroll, preCapturedScreenState: afterScreenState)
@@ -1987,6 +1938,28 @@
                 "terminal_control_mouse_button", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: delivered)
             return TerminalControlResponse(ok: delivered, message: delivered ? "Delivered mouse button." : "Unable to deliver mouse button.")
+        }
+
+        private func controlResponseForMouseMotionRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            touchClientLease(request.clientID)
+            if let rejection = ownerRequestRejection(for: request, commandName: "mouseMotion", startedAt: Date()) { return rejection }
+            let pointerPosition: TerminalScrollPointerPosition?
+            switch resolvedPointerPosition(
+                x: request.mousePointerX, y: request.mousePointerY, mods: request.mousePointerMods, command: "mouse motion")
+            {
+            case .resolved(let position): pointerPosition = position
+            case .rejected(let response): return response
+            }
+            guard let pointerPosition else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument)
+            }
+            // No state broadcast and no metric: motion arrives per cell change, and what the application
+            // draws in response is broadcast with its output.
+            let delivered = rendererHostStorage.sendMouseMotion(pointerPosition: pointerPosition)
+            return TerminalControlResponse(ok: delivered, message: delivered ? "Delivered mouse motion." : "Unable to deliver mouse motion.")
         }
 
         private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -2425,7 +2398,11 @@
             guard sessionDriver.clearScreenAndScrollback() else { return false }
             _ = incomingOutputBuffer.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback, interactive: false)
             let outputThroughClear = incomingOutputBuffer.drain()
-            return appendOutput(outputThroughClear.data, interactiveResync: outputThroughClear.isInteractive, shouldBroadcastState: false)
+            let appended = appendOutput(outputThroughClear.data, interactiveResync: outputThroughClear.isInteractive, shouldBroadcastState: false)
+            // Ghostty cleared directly and never parsed the marker, so the file is now longer than the
+            // parser's count by the marker's length (see `transcriptOffsetDelta`).
+            if appended { transcriptOffsetDelta += Int64(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback.count) }
+            return appended
         }
 
         @discardableResult private func ensureOutputHandle() throws -> FileHandle {
@@ -2435,6 +2412,7 @@
             let createdHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             try createdHandle.seekToEnd()
             outputHandle = createdHandle
+            transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(createdHandle)) ?? 0
             return createdHandle
         }
 
@@ -2454,6 +2432,7 @@
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             try handle.seekToEnd()
             outputHandle = handle
+            transcriptFileIdentity = (try? TerminalTranscriptFileIdentity.of(handle)) ?? 0
         }
 
         private func transcriptByteCount() throws -> UInt64 {
@@ -2717,14 +2696,13 @@
         /// therefore re-ships the screen the reader is already showing, once per keystroke on a busy host.
         ///
         /// The screen itself is the truth the counter only approximates. Capture once, and when the
-        /// picture the capture read (cells, cursor, selection, scrollbar, mouse mode — everything a frame
-        /// conveys) matches the stream's delta baseline under the same owner epoch, with nothing left in
-        /// Ghostty's scroll-rect ring, claim the captured revision and publish nothing. Otherwise the same
-        /// capture rides into the broadcast, so the frame that goes out is the one this gate inspected
-        /// rather than a second read racing it. The baseline only speaks for a subscriber that has applied
-        /// every frame the stream sent it, so the gate stands down while a subscriber is owed a full frame,
-        /// while a one-shot read has handed one a different screen (`didExportScreenOutsideTheStream`), and
-        /// while the producer still carries scroll rects no frame has shipped.
+        /// picture the capture read (cells, cursor, scrollbar, mouse mode — everything a frame conveys)
+        /// matches the stream's delta baseline under the same owner epoch, with nothing left in Ghostty's
+        /// scroll-rect ring, claim the captured revision and publish nothing. Otherwise the same capture
+        /// rides into the broadcast, so the frame that goes out is the one this gate inspected rather than a
+        /// second read racing it. The baseline only speaks for a subscriber that has applied every frame the
+        /// stream sent it, so the gate stands down while a subscriber is owed a full frame and while a
+        /// one-shot read has handed one a different screen (`didExportScreenOutsideTheStream`).
         private func broadcastScreenStateChangeUnlessSubscribersHoldTheScreen() {
             let ownerKind = activeOwnerClient()?.kind
             // A `state_change` this owner receives without screen state carries no frame to compare
@@ -2735,15 +2713,11 @@
             }
             let capturedScreenState = captureLiveSessionScreenState()
             if let snapshot = capturedScreenState.snapshot, let baseline = renderUpdateProducer.baseline, baseline.ownerEpoch == ownerEpoch,
-                baseline.snapshot == snapshot, capturedScreenState.scrollRects.isEmpty, !capturedScreenState.scrollRectsOverflowed,
+                baseline.snapshot == snapshot, capturedScreenState.scrollRects.isEmpty,
                 // A subscriber owed a full frame holds no baseline at all, so a match against the stream's
                 // baseline says nothing about what it is showing: keep that promise instead of suppressing.
                 renderUpdateProducer.forcedFullReason(for: .stateChange, exportMode: .streamDeltaAllowed) == nil,
-                // Rects an earlier export drained out of Ghostty but did not ship sit in the producer's
-                // carry, and only a frame that actually goes out drains them. An identical screen still
-                // owes a mirror that movement — repeated or blank rows scroll without changing a cell —
-                // and a drag-selection anchor cannot rebase until it arrives, so publish instead.
-                !renderUpdateProducer.hasPendingScrollCarry, !didExportScreenOutsideTheStream
+                !didExportScreenOutsideTheStream
             {
                 // The stream's baseline deliberately stays where it is, revision included. It names the
                 // frame every subscriber actually received, and the next delta is diffed against it; moving
@@ -3253,21 +3227,16 @@
                     runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind, preCapturedScreenState: preCapturedScreenState)
                 let snapshot = resolvedScreenState.snapshot
                 let frame = snapshot.map {
-                    GhosttyRenderFrame(sessionRevision: exportedFrameRevision(for: $0, exportMode: exportMode), ownerEpoch: ownerEpoch, snapshot: $0)
+                    GhosttyRenderFrame(
+                        sessionRevision: exportedFrameRevision(for: $0, exportMode: exportMode), ownerEpoch: ownerEpoch, snapshot: $0,
+                        transcriptByteOffset: resolvedScreenState.transcriptByteOffset,
+                        transcriptFileIdentity: resolvedScreenState.transcriptFileIdentity)
                 }
                 // The reader already displays this exact frame, so exporting it would spend a full-grid
                 // encode on bytes the reader drops. Skipping `makeRenderUpdate` leaves the stream's delta
                 // baseline exactly where it was, which is correct: the reader's picture and the baseline
                 // still agree, so the next broadcast's delta applies as it would have.
                 let readerHoldsCurrentFrame = frame.map { oneShotRead?.heldFrame?.matches($0) == true } ?? false
-                if readerHoldsCurrentFrame {
-                    // The omission still owes the stream the rects this capture just drained out of ghostty,
-                    // exactly as the self-contained `makeRenderUpdate` below would have folded them into the
-                    // carry (a held frame only ever reaches here on a one-shot `.selfContained` read).
-                    // Dropping them would leave the next stream frame under-reporting how far content moved,
-                    // and a mirror rebasing a drag against that lands on the wrong rows.
-                    renderUpdateProducer.foldScrollRects(resolvedScreenState.scrollRects, overflowed: resolvedScreenState.scrollRectsOverflowed)
-                }
                 let renderUpdateConstructionStartedAt = Date()
                 let renderUpdateValue =
                     readerHoldsCurrentFrame
@@ -3275,7 +3244,7 @@
                     : frame.map {
                         makeRenderUpdate(
                             for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects,
-                            nativeScrollRectsOverflowed: resolvedScreenState.scrollRectsOverflowed, exportMode: exportMode)
+                            exportMode: exportMode)
                     }
                 if renderUpdateValue != nil, markNextBroadcastFull { renderUpdateProducer.armSubscriberBaselineReset() }
                 // Deliberately not armed when the omission was the held-frame match above: that arm exists
@@ -3381,11 +3350,11 @@
         /// is parsed once here; an unrecognized reason parses to nil and forces nothing on its own.
         private func makeRenderUpdate(
             for frame: GhosttyRenderFrame, reason: String, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [],
-            nativeScrollRectsOverflowed: Bool = false, exportMode: RenderStateExportMode = .selfContained
+            exportMode: RenderStateExportMode = .selfContained
         ) -> GhosttyRenderUpdate {
             renderUpdateProducer.makeUpdate(
                 for: frame, reason: TerminalRemoteSessionStateReason(rawValue: reason), nativeScrollRects: nativeScrollRects,
-                nativeScrollRectsOverflowed: nativeScrollRectsOverflowed, exportMode: exportMode)
+                exportMode: exportMode)
         }
 
         /// The session revision this export stamps on a frame carrying `snapshot`.
@@ -3432,40 +3401,31 @@
         /// had pending when it was taken. Passing one of these back into the export path is what lets a
         /// caller emit the exact frame it already inspected instead of racing a second capture against it.
         private typealias LiveSessionScreenState = (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], scrollRectsOverflowed: Bool
+            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation],
+            transcriptByteOffset: UInt64, transcriptFileIdentity: UInt64
         )
 
         private func resolveRemoteScreenState(
             runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?,
             preCapturedScreenState: LiveSessionScreenState? = nil
         ) -> (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], scrollRectsOverflowed: Bool,
-            source: String
+            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation],
+            transcriptByteOffset: UInt64, transcriptFileIdentity: UInt64, source: String
         ) {
             let liveSessionScreenState = preCapturedScreenState ?? captureLiveSessionScreenState()
             let sessionSnapshot = liveSessionScreenState.snapshot
             let sessionSnapshotText = liveSessionScreenState.snapshotText
-            // A selection broadcast exists precisely to move selection state in both directions, so the
-            // clear on an otherwise blank screen must still carry the frame so viewers un-paint the
-            // highlight: the visible-content gate below exists to avoid exporting meaningless blank
-            // frames for output-driven reasons, and does not apply to a selection change.
-            if TerminalRemoteSessionStateReason(rawValue: reason) == .selection
-                || Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText)
-            {
+            if Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText) {
                 return (
                     snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, scrollRects: liveSessionScreenState.scrollRects,
-                    scrollRectsOverflowed: liveSessionScreenState.scrollRectsOverflowed, source: "session"
+                    transcriptByteOffset: liveSessionScreenState.transcriptByteOffset,
+                    transcriptFileIdentity: liveSessionScreenState.transcriptFileIdentity, source: "session"
                 )
             }
 
             let isLiveRuntime = runtimeState?.state == .running || runtimeState?.state == .starting
-            // The rects `captureLiveSessionScreenState()` just drained are dropped here rather than folded
-            // into the producer's scroll-rect carry: they describe movement on a screen this export found empty,
-            // and a mirror's drag carry only ever needs to track movement over visible content it can select
-            // against. Movement on an empty screen cannot mislead a drag over visible content later, so
-            // carrying it forward would only cost carry capacity for no product benefit.
             return (
-                snapshot: nil, snapshotText: nil, scrollRects: [], scrollRectsOverflowed: false,
+                snapshot: nil, snapshotText: nil, scrollRects: [], transcriptByteOffset: 0, transcriptFileIdentity: 0,
                 source: isLiveRuntime ? "session_empty" : "session_unavailable"
             )
         }
@@ -3483,11 +3443,17 @@
             // while the phone is still missing it.
             lastCapturedSessionStateRevision = rendererHostStorage.sessionStateRevision()
             let capturedRenderState = rendererHostStorage.sessionRenderStateSnapshot()
-            let sessionSnapshot = capturedRenderState?.snapshot
+            let sessionSnapshot = capturedRenderState.map { captured in
+                captured.snapshot.withHistoryEpoch(sessionDriver.terminalIncarnation &+ captured.snapshot.historyEpoch)
+            }
+            let transcriptByteOffset = capturedRenderState.map {
+                UInt64(truncatingIfNeeded: Int64(truncatingIfNeeded: $0.bytesProcessed) &+ transcriptOffsetDelta)
+            }
             let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
             return (
                 snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, scrollRects: capturedRenderState?.scrollRects ?? [],
-                scrollRectsOverflowed: capturedRenderState?.scrollRectsOverflowed ?? false
+                transcriptByteOffset: transcriptByteOffset ?? 0,
+                transcriptFileIdentity: transcriptFileIdentity
             )
         }
 
@@ -3654,7 +3620,9 @@
 
         public func sessionSnapshotText() -> String? { return core.rendererHost.sessionSnapshotText() }
 
-        public func copySelectionToPasteboard() -> Bool { core.rendererHost.copySelectionToPasteboard() }
+        public func copySelectionToPasteboard() { core.rendererHost.copySelectionToPasteboard() }
+
+        public func selectAll() { core.rendererHost.selectAll() }
 
         public func pasteClipboardContents() -> Bool { core.rendererHost.pasteClipboardContents() }
 

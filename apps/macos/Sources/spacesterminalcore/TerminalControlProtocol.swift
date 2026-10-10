@@ -30,13 +30,6 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     /// The attaching client's OS appearance (light/dark). Carried on `attach` so a remote daemon can
     /// render its headless terminal session with the matching Spaces theme variant.
     public let appearance: ThemeAppearance?
-    /// `setSelection` endpoints: absolute screen-space coordinates (row 0 = oldest retained
-    /// scrollback row), matching what the embedded and headless session cores accept natively.
-    public let selectionStartColumn: UInt16?
-    public let selectionStartRow: UInt32?
-    public let selectionEndColumn: UInt16?
-    public let selectionEndRow: UInt32?
-    public let selectionRectangle: Bool?
 
     public init(
         command: String, authToken: String? = nil, text: String? = nil, bytes: Data? = nil, key: String? = nil, clientID: String? = nil,
@@ -44,9 +37,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
         scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
         mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
-        mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil,
-        selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil, selectionEndRow: UInt32? = nil,
-        selectionRectangle: Bool? = nil
+        mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -75,11 +66,6 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.appendNewline = appendNewline
         self.asPaste = asPaste
         self.appearance = appearance
-        self.selectionStartColumn = selectionStartColumn
-        self.selectionStartRow = selectionStartRow
-        self.selectionEndColumn = selectionEndColumn
-        self.selectionEndRow = selectionEndRow
-        self.selectionRectangle = selectionRectangle
     }
 
     public init(command: TerminalControlCommand, authToken: String? = nil) {
@@ -114,15 +100,12 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
                 command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch, mouseButton: payload.button,
                 mousePressed: payload.pressed, mousePointerX: payload.pointerX, mousePointerY: payload.pointerY, mousePointerMods: payload.pointerMods
             )
+        case .mouseMotion(let payload):
+            self.init(
+                command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch,
+                mousePointerX: payload.pointerX, mousePointerY: payload.pointerY, mousePointerMods: payload.pointerMods)
         case .setAppearance(let payload):
             self.init(command: command.name, authToken: authToken, clientID: payload.clientID, appearance: payload.appearance)
-        case .setSelection(let payload):
-            self.init(
-                command: command.name, authToken: authToken, clientID: payload.clientID, selectionStartColumn: payload.startColumn,
-                selectionStartRow: payload.startRow, selectionEndColumn: payload.endColumn, selectionEndRow: payload.endRow,
-                selectionRectangle: payload.rectangle)
-        case .clearSelection(let payload), .readSelectionText(let payload):
-            self.init(command: command.name, authToken: authToken, clientID: payload.clientID)
         case .unsupported(let name): self.init(command: name, authToken: authToken)
         }
     }
@@ -155,11 +138,6 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case appendNewline
         case asPaste
         case appearance
-        case selectionStartColumn
-        case selectionStartRow
-        case selectionEndColumn
-        case selectionEndRow
-        case selectionRectangle
     }
 
     public init(from decoder: any Decoder) throws {
@@ -191,11 +169,6 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
         asPaste = try container.decodeIfPresent(Bool.self, forKey: .asPaste) ?? false
         appearance = try container.decodeIfPresent(ThemeAppearance.self, forKey: .appearance)
-        selectionStartColumn = try container.decodeIfPresent(UInt16.self, forKey: .selectionStartColumn)
-        selectionStartRow = try container.decodeIfPresent(UInt32.self, forKey: .selectionStartRow)
-        selectionEndColumn = try container.decodeIfPresent(UInt16.self, forKey: .selectionEndColumn)
-        selectionEndRow = try container.decodeIfPresent(UInt32.self, forKey: .selectionEndRow)
-        selectionRectangle = try container.decodeIfPresent(Bool.self, forKey: .selectionRectangle)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -227,11 +200,6 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         try container.encode(appendNewline, forKey: .appendNewline)
         try container.encode(asPaste, forKey: .asPaste)
         try container.encodeIfPresent(appearance, forKey: .appearance)
-        try container.encodeIfPresent(selectionStartColumn, forKey: .selectionStartColumn)
-        try container.encodeIfPresent(selectionStartRow, forKey: .selectionStartRow)
-        try container.encodeIfPresent(selectionEndColumn, forKey: .selectionEndColumn)
-        try container.encodeIfPresent(selectionEndRow, forKey: .selectionEndRow)
-        try container.encodeIfPresent(selectionRectangle, forKey: .selectionRectangle)
     }
 }
 
@@ -327,28 +295,6 @@ public struct TerminalControlSetAppearancePayload: Sendable, Equatable {
     }
 }
 
-/// `setSelection`'s endpoints, in absolute screen-space coordinates (row 0 = oldest retained
-/// scrollback row). Unlike scroll and mouse input, selection is not owner-gated: any attached
-/// viewer may set or clear it and the result is visible to every viewer (see the session core's
-/// handler for the full rationale).
-public struct TerminalControlSetSelectionPayload: Sendable, Equatable {
-    public let clientID: String?
-    public let startColumn: UInt16?
-    public let startRow: UInt32?
-    public let endColumn: UInt16?
-    public let endRow: UInt32?
-    public let rectangle: Bool?
-
-    public init(clientID: String?, startColumn: UInt16?, startRow: UInt32?, endColumn: UInt16?, endRow: UInt32?, rectangle: Bool?) {
-        self.clientID = clientID
-        self.startColumn = startColumn
-        self.startRow = startRow
-        self.endColumn = endColumn
-        self.endRow = endRow
-        self.rectangle = rectangle
-    }
-}
-
 public struct TerminalControlScrollPayload: Sendable, Equatable {
     public let clientID: String?
     public let ownerEpoch: UInt64?
@@ -415,6 +361,29 @@ public struct TerminalControlMouseButtonPayload: Sendable, Equatable {
     }
 }
 
+/// Pointer movement for a program that tracks the mouse. The pointer names a cell center exactly as
+/// ``TerminalControlMouseButtonPayload`` does, and the wire reuses its pointer fields. The command carries
+/// no button: the host tracks which buttons the owner has pressed and released through `mouseButton` and
+/// reports the motion with the one held (mode 1002 reports motion only while one is held, mode 1003
+/// always). It is ordered with key input and button presses, and a motion still waiting to be sent is
+/// replaced by a newer one, since an intermediate position means nothing to the program once a newer one
+/// exists.
+public struct TerminalControlMouseMotionPayload: Sendable, Equatable {
+    public let clientID: String?
+    public let ownerEpoch: UInt64?
+    public let pointerX: Double?
+    public let pointerY: Double?
+    public let pointerMods: UInt32?
+
+    public init(clientID: String?, ownerEpoch: UInt64?, pointerX: Double?, pointerY: Double?, pointerMods: UInt32?) {
+        self.clientID = clientID
+        self.ownerEpoch = ownerEpoch
+        self.pointerX = pointerX
+        self.pointerY = pointerY
+        self.pointerMods = pointerMods
+    }
+}
+
 public enum TerminalControlCommand: Sendable, Equatable {
     case attach(TerminalControlAttachPayload)
     case detach(TerminalControlClientPayload)
@@ -427,10 +396,8 @@ public enum TerminalControlCommand: Sendable, Equatable {
     case scroll(TerminalControlScrollPayload)
     case scrollToBottom(TerminalControlOwnerPayload)
     case mouseButton(TerminalControlMouseButtonPayload)
+    case mouseMotion(TerminalControlMouseMotionPayload)
     case setAppearance(TerminalControlSetAppearancePayload)
-    case setSelection(TerminalControlSetSelectionPayload)
-    case clearSelection(TerminalControlClientPayload)
-    case readSelectionText(TerminalControlClientPayload)
     case unsupported(String)
 
     public init(request: TerminalControlRequest) {
@@ -465,14 +432,12 @@ public enum TerminalControlCommand: Sendable, Equatable {
                 TerminalControlMouseButtonPayload(
                     clientID: request.clientID, ownerEpoch: request.ownerEpoch, button: request.mouseButton, pressed: request.mousePressed,
                     pointerX: request.mousePointerX, pointerY: request.mousePointerY, pointerMods: request.mousePointerMods))
+        case "mouseMotion":
+            self = .mouseMotion(
+                TerminalControlMouseMotionPayload(
+                    clientID: request.clientID, ownerEpoch: request.ownerEpoch, pointerX: request.mousePointerX, pointerY: request.mousePointerY,
+                    pointerMods: request.mousePointerMods))
         case "setAppearance": self = .setAppearance(TerminalControlSetAppearancePayload(clientID: request.clientID, appearance: request.appearance))
-        case "setSelection":
-            self = .setSelection(
-                TerminalControlSetSelectionPayload(
-                    clientID: request.clientID, startColumn: request.selectionStartColumn, startRow: request.selectionStartRow,
-                    endColumn: request.selectionEndColumn, endRow: request.selectionEndRow, rectangle: request.selectionRectangle))
-        case "clearSelection": self = .clearSelection(TerminalControlClientPayload(clientID: request.clientID))
-        case "readSelectionText": self = .readSelectionText(TerminalControlClientPayload(clientID: request.clientID))
         default: self = .unsupported(request.command)
         }
     }
@@ -490,23 +455,17 @@ public enum TerminalControlCommand: Sendable, Equatable {
         case .scroll: "scroll"
         case .scrollToBottom: "scrollToBottom"
         case .mouseButton: "mouseButton"
+        case .mouseMotion: "mouseMotion"
         case .setAppearance: "setAppearance"
-        case .setSelection: "setSelection"
-        case .clearSelection: "clearSelection"
-        case .readSelectionText: "readSelectionText"
         case .unsupported(let name): name
         }
     }
 
     public var requiresOwnerClientID: Bool {
         switch self {
-        case .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton: true
-        // setAppearance is a per-client view preference, not an ownership-gated mutation. Selection
-        // is not gated either, but for a different reason: scroll and mouse input are exclusive
-        // because two viewers driving them at once would fight (each frame reflects only the last
-        // writer), while selection is deliberately shared state. Any attached viewer may set or
-        // clear it, and the result is broadcast to every viewer, host-anchored terminal or not.
-        case .attach, .detach, .heartbeat, .takeover, .setAppearance, .setSelection, .clearSelection, .readSelectionText, .unsupported: false
+        case .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton, .mouseMotion: true
+        // setAppearance is a per-client view preference, not an ownership-gated mutation.
+        case .attach, .detach, .heartbeat, .takeover, .setAppearance, .unsupported: false
         }
     }
 
@@ -518,8 +477,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
     public var includesSessionStateOnSuccess: Bool {
         switch self {
         case .attach, .detach, .takeover: true
-        case .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton, .setAppearance, .setSelection, .clearSelection,
-            .readSelectionText, .unsupported:
+        case .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .scrollToBottom, .mouseButton, .mouseMotion, .setAppearance, .unsupported:
             false
         }
     }
@@ -541,20 +499,15 @@ public enum TerminalControlCommand: Sendable, Equatable {
             } else {
                 nil
             }
-        case .setSelection(let payload):
-            if payload.startColumn == nil || payload.startRow == nil || payload.endColumn == nil || payload.endRow == nil {
-                "Missing selection endpoints."
-            } else {
-                nil
-            }
-        case .clearScreen, .scroll, .scrollToBottom, .clearSelection, .readSelectionText, .unsupported: nil
+        case .mouseMotion(let payload): payload.pointerX == nil || payload.pointerY == nil ? "Missing mouse pointer position." : nil
+        case .clearScreen, .scroll, .scrollToBottom, .unsupported: nil
         }
     }
 
     public static func isMobileTerminalControlName(_ name: String) -> Bool {
         switch name {
         case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll", "scrollToBottom", "mouseButton",
-            "setAppearance", "setSelection", "clearSelection", "readSelectionText":
+            "mouseMotion", "setAppearance":
             true
         default: false
         }
@@ -566,16 +519,11 @@ public struct TerminalControlResponse: Codable, Sendable, Equatable {
     public let message: String
     /// Nil on success and omitted from the wire when nil.
     public let errorCode: SpacesDeviceErrorCode?
-    /// The selection's plain text, set on a successful `setSelection` (so the requesting client can
-    /// copy-on-select) and `readSelectionText`. Nil for every other command and when there is no
-    /// active selection.
-    public let selectionText: String?
 
-    public init(ok: Bool, message: String, errorCode: SpacesDeviceErrorCode? = nil, selectionText: String? = nil) {
+    public init(ok: Bool, message: String, errorCode: SpacesDeviceErrorCode? = nil) {
         self.ok = ok
         self.message = message
         self.errorCode = errorCode
-        self.selectionText = selectionText
     }
 }
 

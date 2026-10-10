@@ -10749,12 +10749,12 @@
         }
 
         /// A full frame that carries no output signal is not new output either, even though (unlike the
-        /// metadata-only payload above) it does carry a render update: another viewer changing the shared
-        /// selection broadcasts a fresh full frame under reason `.selection`, and only `.output` payloads
+        /// metadata-only payload above) it does carry a render update: a repaint-only full frame
+        /// broadcast under reason `.stateChange` is one, and only `.output` payloads
         /// stamp `outputEndByteOffset` (see `outputCarriesNewLocalScrollbackOutput`). Repainting the
         /// highlight must not mark the jump control or make the next gesture pay for a continuation read
         /// that would append zero bytes. A payload that does carry new output still does both.
-        func testSelectionBroadcastFullFrameDoesNotMarkNewOutputOrReadAContinuation() async throws {
+        func testRepaintOnlyFullFrameDoesNotMarkNewOutputOrReadAContinuation() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
             let model = try await Self.ownerModelShowingALiveScreen(
@@ -10768,9 +10768,9 @@
             XCTAssertFalse(model.hasNewOutputBelowScrollback, "a quiet session has printed nothing to mark")
 
             _ = await model.applyLatestState(
-                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, reason: .selection), isOutOfBand: false)
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, reason: .stateChange), isOutOfBand: false)
             XCTAssertTrue(model.isShowingLocalScrollFrame, "a repaint-only full frame must not disturb the replay on screen")
-            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a selection broadcast carries no offset and is not new output")
+            XCTAssertFalse(model.hasNewOutputBelowScrollback, "a repaint-only broadcast carries no offset and is not new output")
 
             let requestsBeforeGesture = await Self.transcriptRequests(in: recorder.snapshot()).count
             model.noteScrollGestureBegan()
@@ -11328,6 +11328,36 @@
             await waitUntilAsync("the next gesture to retry the read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 3 }
         }
 
+        /// A selection drag held at an edge ticks every 15 ms through the same replay read a pan uses, so a
+        /// failed read cancels the drag's scrolling too: the ticks after it start no read, and the next
+        /// selection drag retries.
+        func testAFailedReadStopsAnEdgeHeldSelectionDragFromReadingOnEveryTick() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = Self.transcriptRefusingClient(settings: settings(), recorder: recorder, errorCode: .internalError)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            await waitUntilAsync("the first frame's prefetch to be refused") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            await model.awaitLocalScrollbackLoadForTesting()
+
+            model.beginWordSelection(wordSelection())
+            model.autoscrollSelection(towardOlderRows: true)
+            await waitUntilAsync("the drag to start a read of its own") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            await model.awaitLocalScrollbackLoadForTesting()
+            for _ in 0..<5 { model.autoscrollSelection(towardOlderRows: true) }
+            await model.awaitLocalScrollbackLoadForTesting()
+            let readsAfterTheTicks = await Self.transcriptRequests(in: recorder.snapshot()).count
+            XCTAssertEqual(readsAfterTheTicks, 2, "the ticks after the failure start no read")
+
+            model.endSelectionDrag()
+            model.beginWordSelection(wordSelection())
+            model.autoscrollSelection(towardOlderRows: true)
+            await waitUntilAsync("the next selection drag to retry the read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 3 }
+        }
+
         /// A transcript read a gesture started can fail fast: a refused connection, a rejected token, a
         /// daemon erroring out. The gesture that asked for it is still delivering deltas (the finger is
         /// down, or its momentum is running), and each one would start another read that fails the same
@@ -11488,6 +11518,85 @@
             XCTAssertTrue(model.isShowingLocalScrollFrame, "the reader stays in the history they scrolled into")
         }
 
+        /// A selection drag held past the top edge while the session has printed since the replay was read:
+        /// its first tick catches the replay up, and the ticks while that read is on the wire wait rather
+        /// than scroll the stale replay, which would jump the screen back by all the output it is missing.
+        /// Once the replay is caught up they scroll it, one row each from its bottom.
+        func testAutoscrollWaitsForTheReplayToCatchUpBeforeScrolling() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let heldContinuation = TranscriptReadGate()
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, pageReadGate: heldContinuation)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame to read a page of history") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+
+            // The session prints enough that the stale replay's rows are far from the live ones.
+            await transcript.append(Self.numberedTranscript(lineCount: 20, startingAt: 400))
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            let tickCount = 3
+            model.beginWordSelection(wordSelection())
+            for _ in 0..<tickCount { model.autoscrollSelection(towardOlderRows: true) }
+            await waitUntilAsync("the first tick to start the continuation read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the stale replay must not be shown while its continuation is on the wire")
+
+            await heldContinuation.release()
+            let grownTranscript = UInt64(await transcript.byteCount())
+            await waitUntil("the continuation to install") { model.localScrollbackTranscriptEndForTesting == grownTranscript }
+            await waitUntil("the caught-up replay to paint the ticks") { model.isShowingLocalScrollFrame }
+            let lineAfterTheTicks = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+
+            // One row above the live bottom, read from the same caught-up replay the ticks scrolled.
+            await model.scrollToBottom()
+            model.endSelectionDrag()
+            model.beginWordSelection(wordSelection())
+            model.autoscrollSelection(towardOlderRows: true)
+            let lineOneRowUp = try XCTUnwrap(
+                Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
+            XCTAssertEqual(
+                lineAfterTheTicks, lineOneRowUp - (tickCount - 1), "the ticks scroll the caught-up replay one row each, from the rows above the live screen")
+        }
+
+        /// Typing ends the gesture the queued autoscroll rows belong to, so the continuation read failing
+        /// afterwards must not scroll the replay back over the live screen the keystroke returned to.
+        func testAKeystrokeDropsTheAutoscrollRowsWaitingOnAContinuationThatThenFails() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let heldContinuation = TranscriptReadGate()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalTranscript(let payload) = request.command {
+                    guard payload.fromByteOffset != nil else { return await transcript.response(for: payload) }
+                    await heldContinuation.wait()
+                    return SpacesDeviceAPIResponse(ok: false, message: "refused", errorCode: .internalError)
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            _ = await model.applyLatestState(try Self.liveScreenState(emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            await waitUntil("the page to be replayed") { model.hasReadyLocalScrollbackForTesting }
+            await transcript.append(Self.numberedTranscript(lineCount: 20, startingAt: 400))
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:32Z", sessionRevision: 2, outputEndByteOffset: 1), isOutOfBand: false)
+
+            model.beginWordSelection(wordSelection())
+            for _ in 0..<3 { model.autoscrollSelection(towardOlderRows: true) }
+            await waitUntilAsync("the first tick to start the continuation read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            await model.sendKey("a")
+
+            await heldContinuation.release()
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertFalse(model.isShowingLocalScrollFrame, "the failed read must not scroll the replay over the screen the keystroke returned to")
+        }
+
         /// A session's process exiting writes no transcript and truncates none, so the replay a reader is
         /// scrolling survives it. Only a relaunch invalidates the bytes a replay holds.
         func testTheProcessExitingKeepsTheReplay() async throws {
@@ -11557,6 +11666,236 @@
             let topRow = Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))
             let line = try XCTUnwrap(Self.transcriptLineNumber(of: topRow), "the replayed row must come from the inflated transcript: \(topRow)")
             XCTAssertLessThan(line, 400, "the row on screen is one of the transcript's own numbered lines")
+        }
+
+        // MARK: Client selection
+
+        private func wordSelection(epoch: UInt64 = 0) -> TerminalAbsoluteSelection {
+            TerminalAbsoluteSelection(
+                from: TerminalAbsoluteCell(column: 2, row: 3), to: TerminalAbsoluteCell(column: 5, row: 3), isRectangle: false, historyEpoch: epoch)
+        }
+
+        /// A long press selects a word and the finger still down extends it by cell; the selection is the
+        /// client's own and stays when the finger lifts.
+        func testALongPressSelectsAWordAndTheDragExtendsItThenStays() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+
+            model.beginWordSelection(wordSelection())
+            XCTAssertEqual(model.clientSelection, wordSelection())
+            model.extendSelectionDrag(to: TerminalAbsoluteCell(column: 9, row: 4))
+            model.endSelectionDrag()
+
+            XCTAssertEqual(
+                model.clientSelection,
+                TerminalAbsoluteSelection(
+                    from: TerminalAbsoluteCell(column: 2, row: 3), to: TerminalAbsoluteCell(column: 9, row: 4), isRectangle: false, historyEpoch: 0))
+        }
+
+        func testDraggingEachHandleAdjustsThatEnd() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            model.beginWordSelection(wordSelection())
+            model.endSelectionDrag()
+
+            model.beginSelectionHandleDrag(.start)
+            model.extendSelectionDrag(to: TerminalAbsoluteCell(column: 0, row: 2))
+            model.endSelectionDrag()
+            model.beginSelectionHandleDrag(.end)
+            model.extendSelectionDrag(to: TerminalAbsoluteCell(column: 7, row: 6))
+            model.endSelectionDrag()
+
+            XCTAssertEqual(
+                model.clientSelection,
+                TerminalAbsoluteSelection(
+                    from: TerminalAbsoluteCell(column: 0, row: 2), to: TerminalAbsoluteCell(column: 7, row: 6), isRectangle: false, historyEpoch: 0))
+        }
+
+        /// Typing ends the selection, whichever way it is typed; a paste into the terminal is not typing.
+        func testTypingEndsTheSelectionButAPasteDoesNot() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+
+            model.beginWordSelection(wordSelection())
+            model.endSelectionDrag()
+            await model.sendText("pasted", asPaste: true)
+            XCTAssertNotNil(model.clientSelection, "a paste leaves the selection")
+
+            await model.sendText("a")
+            XCTAssertNil(model.clientSelection, "typing ends the selection")
+
+            model.beginWordSelection(wordSelection())
+            model.endSelectionDrag()
+            await model.sendKey("enter")
+            XCTAssertNil(model.clientSelection, "a key ends the selection")
+        }
+
+        func testATapEndsTheSelection() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            model.beginWordSelection(wordSelection())
+            model.endSelectionDrag()
+
+            model.clearClientSelection()
+
+            XCTAssertNil(model.clientSelection)
+        }
+
+        /// A reset, clear, screen switch or column resize renumbers the rows the selection names, so the
+        /// selection ends with the live frame that renumbered them.
+        func testAHistoryEpochChangeEndsTheSelection() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            model.beginWordSelection(wordSelection(epoch: 0))
+            model.endSelectionDrag()
+
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(emittedAt: "2026-06-04T14:23:40Z", sessionRevision: 2, outputEndByteOffset: 1, historyEpoch: 5),
+                isOutOfBand: false)
+
+            XCTAssertNil(model.clientSelection)
+        }
+
+        /// Select All takes everything the client can replay, by Ghostty's select-all rule, and Copy writes
+        /// that text from the client's replay (never the daemon) and leaves the selection in place.
+        func testSelectAllThenCopyWritesTheReplaysTextAndKeepsTheSelection() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            let pasteboard = UIPasteboard.withUniqueName()
+            defer { UIPasteboard.remove(withName: pasteboard.name) }
+            model.pasteboardOverrideForTesting = pasteboard
+
+            model.selectAll()
+            await waitUntil("the replay to answer select all") { model.clientSelection != nil }
+
+            model.copyClientSelection()
+            await waitUntil("the copy to write the pasteboard") { pasteboard.string != nil }
+
+            let copied = try XCTUnwrap(pasteboard.string)
+            XCTAssertTrue(copied.contains("L00000000"), "the copy reaches the first row of the replay")
+            XCTAssertTrue(copied.contains("L00000399"), "and the last")
+            XCTAssertNotNil(model.clientSelection, "copying keeps the selection")
+        }
+
+        /// A tap while Select All is still reading ends it, though nothing is painted yet to clear: the
+        /// read must not install its selection after the user tapped.
+        func testATapWhileSelectAllIsReadingCancelsTheSelectAll() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let heldRead = TranscriptReadGate()
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, pageReadGate: heldRead,
+                holdInitialPageRead: true)
+            defer { model.stop() }
+            await waitUntilAsync("the first frame's prefetch read to be issued") { await Self.transcriptRequests(in: recorder.snapshot()).count == 1 }
+
+            model.selectAll()
+            XCTAssertNil(model.clientSelection, "setup: the read is still held")
+            model.clearClientSelection()
+            await heldRead.release()
+            await model.awaitLocalScrollbackLoadForTesting()
+            try await Task.sleep(for: .milliseconds(300))
+
+            XCTAssertNil(model.clientSelection)
+        }
+
+        func testCopyWithNoSelectionWritesNothing() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript)
+            defer { model.stop() }
+            let pasteboard = UIPasteboard.withUniqueName()
+            defer { UIPasteboard.remove(withName: pasteboard.name) }
+            model.pasteboardOverrideForTesting = pasteboard
+
+            model.copyClientSelection()
+            try await Task.sleep(for: .milliseconds(100))
+
+            XCTAssertNil(pasteboard.string)
+        }
+
+        /// A quiet session delivers its one frame before the surface reports its viewport and sends no
+        /// frame after, so the frame's stamp is all the replay will ever be aligned by: a word selected on
+        /// the live rows must still copy.
+        func testCopyOfALiveRowWordWorksWhenTheOnlyFrameArrivedBeforeTheViewportReport() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcriptData = Self.numberedTranscript(lineCount: 3)
+            let transcript = GrowingTranscript(transcriptData)
+            let bridgeClient = Self.transcriptServingClient(settings: settings(), recorder: recorder, transcript: transcript)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            let pasteboard = UIPasteboard.withUniqueName()
+            defer { UIPasteboard.remove(withName: pasteboard.name) }
+            model.pasteboardOverrideForTesting = pasteboard
+            model.start()
+            _ = await model.applyLatestState(
+                try Self.liveScreenState(
+                    emittedAt: "2026-06-04T14:23:31Z", reason: .attachmentState, transcriptByteOffset: UInt64(transcriptData.count),
+                    transcriptFileIdentity: 91, owner: model.remoteClientForTesting), isOutOfBand: false)
+            XCTAssertTrue(model.isHoldingOpenScreenUpdatesForTesting, "the open hold has deferred the frame's paint")
+            XCTAssertNil(model.ownerRenderEpoch)
+            model.updateViewportSize(columns: 20, rows: 8)
+            await waitUntil("the held screen to paint") { model.ownerRenderEpoch != nil }
+
+            model.beginWordSelection(
+                TerminalAbsoluteSelection(
+                    from: TerminalAbsoluteCell(column: 0, row: 0), to: TerminalAbsoluteCell(column: 8, row: 0), isRectangle: false, historyEpoch: 0))
+            model.endSelectionDrag()
+            model.copyClientSelection()
+            await waitUntil("the copy to write the pasteboard") { pasteboard.string != nil }
+
+            XCTAssertEqual(pasteboard.string, "L00000000")
+        }
+
+        /// A long-press drag in a program that tracks the mouse reaches it as a press, motion, then a
+        /// release, in that order; the motion collapses to the newest position when the wire is behind.
+        func testAMouseDragSendsPressMotionThenRelease() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let transcript = GrowingTranscript(Self.numberedTranscript(lineCount: 400))
+            let model = try await Self.ownerModelShowingALiveScreen(
+                settings: settings(), session: session(), recorder: recorder, transcript: transcript, mouseReportingActive: true)
+            defer { model.stop() }
+
+            XCTAssertTrue(model.sendMouseButton(button: 1, pressed: true, at: TerminalScrollPointerPosition(x: 0.1, y: 0.1)))
+            XCTAssertTrue(model.sendMouseMotion(at: TerminalScrollPointerPosition(x: 0.2, y: 0.2)))
+            XCTAssertTrue(model.sendMouseMotion(at: TerminalScrollPointerPosition(x: 0.3, y: 0.3)))
+            XCTAssertTrue(model.sendMouseButton(button: 1, pressed: false, at: TerminalScrollPointerPosition(x: 0.3, y: 0.3)))
+
+            _ = try await waitForTerminalControlAction(.mouseButton, count: 2, recorder: recorder)
+            let controls = await recorder.snapshot().compactMap { request -> SpacesDeviceTerminalControlRequest? in
+                guard case .terminalControl(let payload) = request.command, payload.action == .mouseButton || payload.action == .mouseMotion else {
+                    return nil
+                }
+                return payload
+            }
+            XCTAssertEqual(controls.first?.action, .mouseButton)
+            XCTAssertEqual(controls.first?.mousePressed, true)
+            XCTAssertEqual(controls.last?.action, .mouseButton)
+            XCTAssertEqual(controls.last?.mousePressed, false)
+            let motions = controls.filter { $0.action == .mouseMotion }
+            XCTAssertFalse(motions.isEmpty)
+            XCTAssertEqual(motions.last?.mousePointerX, 0.3, "the newest position is never dropped")
         }
 
         // MARK: Client-local scrollback fixtures
@@ -11647,23 +11986,32 @@
         private nonisolated static func liveScreenState(
             emittedAt: String, sessionRevision: UInt64 = 1, columns: Int = 20, rows: Int = 8, ownerEpoch: UInt64 = 1,
             alternateScreenActive: Bool = false, mouseReportingActive: Bool = false, childPID: Int32 = 200, state: TerminalSessionState = .running,
-            exitedAt: String? = nil, reason: TerminalRemoteSessionStateReason = .initial, outputEndByteOffset: Int? = nil
+            exitedAt: String? = nil, reason: TerminalRemoteSessionStateReason = .initial, outputEndByteOffset: Int? = nil, historyEpoch: UInt64 = 0,
+            transcriptByteOffset: UInt64 = 0, transcriptFileIdentity: UInt64 = 0, owner: TerminalClient? = nil
         ) throws -> GhosttyRemoteSessionStatePayload {
             let cells = (0..<(columns * rows)).map { _ in
                 GhosttyTerminalSnapshot.Cell(codepoint: 0x20, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0)
             }
             let snapshot = GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
-                defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, alternateScreenActive: alternateScreenActive
-            )
-            let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
+                defaultBackgroundRGB: 0x000000, cells: cells, mouseTrackingLevel: mouseReportingActive ? .clicks : .none,
+                alternateScreenActive: alternateScreenActive, scrollbarTotal: transcriptFileIdentity == 0 ? 0 : UInt32(rows),
+                historyEpoch: historyEpoch)
+            let frame = GhosttyRenderFrame(
+                sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot, transcriptByteOffset: transcriptByteOffset,
+                transcriptFileIdentity: transcriptFileIdentity)
             return GhosttyRemoteSessionStatePayload(
                 sessionID: "terminal-session", reason: reason.rawValue, emittedAt: emittedAt, sessionStateRevision: sessionRevision,
                 sessionStateFlags: 1, screenStateRevision: sessionRevision,
                 runtimeState: TerminalSessionRuntimeState(
                     sessionID: "terminal-session", servicePID: 100, childPID: childPID, state: state, updatedAt: emittedAt, exitedAt: exitedAt,
-                    columns: columns, rows: rows), attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
-                outputEndByteOffset: outputEndByteOffset, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+                    columns: columns, rows: rows),
+                attachmentSnapshot: owner.map { client in
+                    TerminalSessionAttachmentSnapshot(
+                        clients: [client],
+                        attachments: [TerminalAttachment(sessionID: "terminal-session", clientID: client.id, mode: .owner, attachedAt: emittedAt)])
+                }, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0, outputEndByteOffset: outputEndByteOffset,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
         }
 
         /// Numbered lines, so a replay's rows say which part of the history they came from. CRLF because a

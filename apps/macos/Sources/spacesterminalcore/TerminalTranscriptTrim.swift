@@ -98,6 +98,8 @@ enum TerminalTranscriptTrim {
         /// Bytes of preamble+tail already written to the temp file.
         let byteCount: UInt64
         let snapshotEndOffset: UInt64
+        /// See `TrimResult.offsetShift`.
+        let offsetShift: Int64
 
         /// Drops an uncommitted staged trim: closes the temp handle and unlinks the temp file. The
         /// original `output.log` was never touched, so this restores the pre-trim world exactly.
@@ -116,6 +118,12 @@ enum TerminalTranscriptTrim {
     struct TrimResult {
         let endOffset: UInt64
         let writeHandle: FileHandle
+        /// What to add to a pre-trim `output.log` offset at or past the cut to get the offset of the same
+        /// byte in the trimmed file: the trimmed file is the preamble followed by the old bytes from the
+        /// cut on, so the shift is the preamble's length minus the cut offset (negative whenever the trim
+        /// dropped more than the preamble adds). A host that measures frames in transcript offsets applies
+        /// it to the offset mapping it holds when it adopts the trimmed file.
+        let offsetShift: Int64
     }
 
     private static let replayChunkBytes = 256 * 1024
@@ -184,7 +192,8 @@ enum TerminalTranscriptTrim {
             throw error
         }
         return StagedTrim(
-            tempPath: tempPath, handle: handle, byteCount: UInt64(preamble.count + tail.count), snapshotEndOffset: plan.snapshotEndOffset)
+            tempPath: tempPath, handle: handle, byteCount: UInt64(preamble.count + tail.count), snapshotEndOffset: plan.snapshotEndOffset,
+            offsetShift: Int64(preamble.count) - Int64(plan.cutOffset))
     }
 
     /// Stage 3, back on the engine actor. Copies the bytes appended since the staging snapshot onto the
@@ -257,6 +266,6 @@ enum TerminalTranscriptTrim {
 
         // The rename committed: the staged handle now references the renamed inode (output.log), its
         // offset at the end of preamble+tail+delta.
-        return TrimResult(endOffset: committedByteCount, writeHandle: staged.handle)
+        return TrimResult(endOffset: committedByteCount, writeHandle: staged.handle, offsetShift: staged.offsetShift)
     }
 }

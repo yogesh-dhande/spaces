@@ -1,8 +1,7 @@
 import Foundation
 
 /// The one full-vs-delta render-update policy every session host runs, and the state that policy
-/// needs: the stream's delta baseline, the pending subscriber-baseline-reset promise, and the
-/// scroll-rect carry a self-contained export folds movement into.
+/// needs: the stream's delta baseline and the pending subscriber-baseline-reset promise.
 ///
 /// Both hosts (the macOS embedded-Ghostty host and the Linux libghostty-vt headless core) drive the
 /// same stream of reasons at the same subscribers, and a client applies whatever arrives identically
@@ -19,8 +18,8 @@ import Foundation
 /// - a delta this producer could not apply to its own baseline: see `makeUpdate`.
 ///
 /// Everything else ships as a delta, including a frame identical to the baseline. An empty delta is a
-/// valid, cheap update (see `GhosttyRenderUpdateFactory.makeUpdate`), and the selection and scrollbar
-/// values it carries are current whether or not a cell moved.
+/// valid, cheap update (see `GhosttyRenderUpdateFactory.makeUpdate`), and the scrollbar values it
+/// carries are current whether or not a cell moved.
 public struct GhosttyRenderUpdateProducer: Sendable {
     /// Whether the export being built may ship a delta against the stream baseline, or must stand on
     /// its own. Only a broadcast to the state stream advances the baseline; a one-shot read must not,
@@ -34,7 +33,6 @@ public struct GhosttyRenderUpdateProducer: Sendable {
     /// against. Hosts read it to decide whether a broadcast would carry anything new.
     public private(set) var baseline: GhosttyRenderUpdateBaseline?
     private var pendingSubscriberBaselineReset = false
-    private var scrollRectCarry = TerminalStreamScrollRectCarry()
 
     public init() {}
 
@@ -60,18 +58,6 @@ public struct GhosttyRenderUpdateProducer: Sendable {
         pendingSubscriberBaselineReset = true
     }
 
-    /// Whether an export has drained scroll rects out of the terminal that no stream frame has carried
-    /// yet (or has poisoned the carry by overflowing it). Read by a host that would otherwise publish
-    /// nothing: the movement those rects describe reaches a mirror's drag-selection anchor only on a
-    /// stream frame, and only `makeUpdate` drains the carry, so a suppressed frame strands it.
-    public var hasPendingScrollCarry: Bool { !scrollRectCarry.rects.isEmpty || scrollRectCarry.overflowed }
-
-    /// Folds scroll rects an export drained out of Ghostty but did not ship into the carry, so the
-    /// next stream delta still reports how far content moved. See `TerminalStreamScrollRectCarry`.
-    public mutating func foldScrollRects(_ rects: [GhosttyRenderScrollRectOperation], overflowed: Bool) {
-        scrollRectCarry.fold(rects: rects, overflowed: overflowed)
-    }
-
     /// The forced-full reason for a frame exported under `reason` and `exportMode`, or nil when the
     /// frame may ship as a delta. Exposed so a test can pin the whole table in one place.
     public func forcedFullReason(for reason: TerminalRemoteSessionStateReason?, exportMode: ExportMode) -> String? {
@@ -91,33 +77,19 @@ public struct GhosttyRenderUpdateProducer: Sendable {
     ///   nothing on its own.
     public mutating func makeUpdate(
         for frame: GhosttyRenderFrame, reason: TerminalRemoteSessionStateReason?,
-        nativeScrollRects capturedScrollRects: [GhosttyRenderScrollRectOperation] = [],
-        nativeScrollRectsOverflowed capturedScrollRectsOverflowed: Bool = false, exportMode: ExportMode
+        nativeScrollRects capturedScrollRects: [GhosttyRenderScrollRectOperation] = [], exportMode: ExportMode
     ) -> GhosttyRenderUpdate {
         // Ghostty drains its pending scroll rects on every snapshot export, self-contained or not. A
-        // `.selfContained` export always forces a full frame below, and a full frame never carries scroll
-        // rects, so the rects this export drained would otherwise vanish: carry them for the next stream
-        // export instead. A `.streamDeltaAllowed` export that itself ends up emitting a full frame
-        // (baseline reset, delta-apply failure) is still correct to drain here: a client poisons its own
-        // carry on any full frame it receives, so the rects this drain hands it are moot the moment the
-        // full frame lands.
-        let nativeScrollRects: [GhosttyRenderScrollRectOperation]
-        let nativeScrollRectsOverflowed: Bool
-        switch exportMode {
-        case .selfContained:
-            scrollRectCarry.fold(rects: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
-            nativeScrollRects = []
-            nativeScrollRectsOverflowed = false
-        case .streamDeltaAllowed:
-            (nativeScrollRects, nativeScrollRectsOverflowed) = scrollRectCarry.drain(
-                mergingWith: capturedScrollRects, overflowed: capturedScrollRectsOverflowed)
-        }
+        // `.selfContained` export always forces a full frame below and a full frame carries no scroll
+        // rects, so the rects it drained are simply dropped: a later delta then diffs the cells those
+        // rects would have moved, which only makes that delta larger, never wrong.
+        let nativeScrollRects = exportMode == .streamDeltaAllowed ? capturedScrollRects : []
 
         let hasPendingSubscriberBaselineReset = exportMode == .streamDeltaAllowed && pendingSubscriberBaselineReset
         let forcedFullReason = forcedFullReason(for: reason, exportMode: exportMode)
         let update = GhosttyRenderUpdateFactory.makeUpdate(
             target: frame, baseline: baseline, forceFull: forcedFullReason != nil, forceFullReason: forcedFullReason ?? "",
-            nativeScrollRects: nativeScrollRects, nativeScrollRectsOverflowed: nativeScrollRectsOverflowed)
+            nativeScrollRects: nativeScrollRects)
         let advancesBaseline = exportMode == .streamDeltaAllowed
         // What actually goes out, which is `update` except where a delta that could not be applied
         // locally is replaced below. The pending-baseline promise is answered against this rather than

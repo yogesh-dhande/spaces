@@ -205,7 +205,15 @@
             case ready(TerminalLocalScrollbackModel)
             case unavailable
         }
-        private var localScrollbackState: LocalScrollbackState = .idle
+        private var localScrollbackState: LocalScrollbackState = .idle {
+            // Every load exit moves the state, so this is where a waiting copy or select-all learns the
+            // replay changed. The hop lets the exit finish its own bookkeeping before the request
+            // re-plans, and keeps a step it starts from nesting inside this observer.
+            didSet {
+                guard pendingSelectionReplay != nil else { return }
+                scheduleSelectionRequestAdvance()
+            }
+        }
         /// Invalidates in-flight transcript reads across a discard. A read started for one run can still
         /// be resolving when the session relaunches (or the user types, or the grid moves) and a fresh
         /// read starts in the same enum case, so an enum-only guard would install the first read's bytes
@@ -260,6 +268,11 @@
         /// replay's own end offset at a gesture's start, so a gesture pays for a continuation read only
         /// when the session has actually written something since the replay was last brought up to date.
         private var latestTranscriptEndByteOffset: UInt64?
+        /// The recent live frame stamps, which line a replay's absolute rows up with the host's. Handed to
+        /// every replay build and append, and to the alignment a copy or select-all does before it reads.
+        private var liveFrameStamps = TerminalLiveFrameStampRing()
+        /// The copy or select-all waiting on the replay, if any. At most one: a newer request replaces it.
+        private var pendingSelectionReplay: TerminalPendingSelectionReplay?
         /// Where one wheel gesture's events go, decided at its first event and held for the rest of it.
         /// Latching is what keeps a frame landing mid-gesture (a program entering the alternate screen,
         /// say) from splitting one flick between the local replay and the daemon.
@@ -365,12 +378,14 @@
             terminalView.onSendMouseButton = { [weak self] button, pressed, pointerPosition in
                 self?.sendRemoteMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
             }
-            terminalView.onClearSelection = { [weak self] in self?.sendRemoteClearSelection() }
-            terminalView.onSetSelection = { [weak self] startColumn, startRow, endColumn, endRow, isRectangle in
-                self?.sendRemoteSetSelection(
-                    startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow, isRectangle: isRectangle)
-            }
+            terminalView.onSendMouseMotion = { [weak self] pointerPosition in self?.sendRemoteMouseMotion(pointerPosition: pointerPosition) }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
+            terminalView.onSelectionAutoscroll = { [weak self] towardOlderRows in self?.autoscrollSelection(towardOlderRows: towardOlderRows) }
+            terminalView.onUserChangedSelection = { [weak self] in self?.cancelPendingSelectAll() }
+            // Only the press that starts a selection lifts a cancelled autoscroll (see
+            // `autoscrollSelection`). Typing and selection clears must not: they cancel a flick in flight
+            // and its momentum has to stay cancelled.
+            terminalView.onSelectionPressed = { [weak self] in self?.isScrollGestureCancelled = false }
             terminalView.onAppearanceChanged = { [weak self] in self?.discardLocalScrollbackIfAppearanceChanged() }
 
             if let container, terminalView.superview !== container {
@@ -494,52 +509,26 @@
         /// through `onViewportSizeChanged` like any other resize, so there is nothing to send from here.
         public func applyTerminalTextSize(_ size: TerminalTextSize) { terminalView.applyTerminalTextSize(size) }
 
-        public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
-
-        /// Reads the terminal's current shared selection via `readSelectionText` and writes it to the
-        /// pasteboard on success. Not owner-gated, matching the daemon's command. Distinct from
-        /// `copySelectionToPasteboard` (this pane's own painted mirror surface), which shows nothing
-        /// once the shared selection scrolls out of this viewport: the daemon always has the full text
-        /// regardless of what any one viewer can currently see.
-        public func copySharedSelectionToPasteboard(completion: @escaping @MainActor (Bool) -> Void) {
-            guard isInteractiveRuntimeStateForControl(), let client = attachedClient else {
-                completion(false)
+        /// Copies this pane's selection and leaves the highlight; with no selection it does nothing.
+        /// The text is read from the pane's replay (never the daemon), so it includes rows above the
+        /// viewport. See `startSelectionReplayRequest`.
+        public func copySelectionToPasteboard() {
+            // Select-all then copy in quick succession: the selection does not exist until the replay
+            // answers, so the copy waits on it and copies what it selects.
+            if pendingSelectionReplay?.request == .selectAll {
+                pendingSelectionReplay?.copyPasteboardChangeCount = copyPasteboard.changeCount
                 return
             }
-            // The daemon-owned selection is anchored in the session's own screen, which the pane is not
-            // showing while its replay is on screen; copying it would hand back text the user cannot see.
-            guard !isShowingLocalScrollbackFrame else {
-                completion(false)
-                return
-            }
-            let socketPath = paths.controlSocketPath
-            let clientID = client.id
-            let sessionID = launchConfiguration.sessionID
-            let requestSender = terminalServiceRequestSender
-            let pasteboardChangeCountAtCopy = terminalView.selectionPasteboardChangeCount
-            // `self` is only captured where this closure is already main-actor isolated (the outer
-            // `Task`'s own capture list), never carried through the nested detached closure: passing a
-            // main-actor class reference through a nonisolated closure into a later main-actor closure is
-            // what the compiler flags as a potential data race, even though nothing here is actually
-            // concurrent.
-            Task { @MainActor [weak self] in
-                let selectionText = await Task.detached(priority: .userInitiated) {
-                    let response = try? Self.sendControlRequest(
-                        TerminalControlRequest(command: .readSelectionText(.init(clientID: clientID))), sessionID: sessionID, socketPath: socketPath,
-                        requestSender: requestSender)
-                    return response?.selectionText
-                }.value
-                guard let self, let selectionText, !selectionText.isEmpty else {
-                    completion(false)
-                    return
-                }
-                // A copy the user made while the read was in flight wins: the guarded write yields to
-                // it, and the flow still completes as handled because the caller's fallback is another
-                // clipboard write that would clobber that newer copy all the same.
-                self.terminalView.writeSelectionTextToPasteboard(selectionText, ifPasteboardUnchangedSince: pasteboardChangeCountAtCopy)
-                completion(true)
-            }
+            guard let selection = terminalView.clientSelection else { return }
+            startSelectionReplayRequest(.copy(selection, pasteboardChangeCount: copyPasteboard.changeCount))
         }
+
+        /// Selects everything the pane can replay, by Ghostty's select-all rule, and copies nothing.
+        public func selectAll() { startSelectionReplayRequest(.selectAll) }
+
+        /// Where a copy lands. Tests inject a uniquely-named pasteboard through
+        /// `clipboardPasteboardOverrideForTesting`.
+        private var copyPasteboard: NSPasteboard { clipboardPasteboardOverrideForTesting ?? .general }
 
         public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
 
@@ -575,9 +564,11 @@
             return terminalView.snapshotText()
         }
 
-        /// Delegates to the mirror view's own selection readback: the mirror surface is what paints the
-        /// daemon-projected shared selection from streamed frames, so it is the source of truth here too.
+        /// Delegates to the mirror view's own selection readback: the mirror surface is what paints this
+        /// pane's selection, so it is the source of truth for what is highlighted.
         public func debugSurfaceSelectionText() -> String? { terminalView.debugSurfaceSelectionText }
+
+        var debugClientSelection: TerminalAbsoluteSelection? { terminalView.clientSelection }
 
         func debugSetBindingActionHandler(_ handler: (@MainActor (String) -> Bool)?) { terminalView.debugBindingActionHandler = handler }
 
@@ -587,6 +578,11 @@
         /// Where `output.log` ended as of the newest state payload this host has applied, which is what a
         /// gesture compares its replay against before reading a continuation.
         var debugLatestTranscriptEndByteOffset: UInt64? { latestTranscriptEndByteOffset }
+        /// The history epoch of the installed replay: equal to the live frames' epoch once it is aligned.
+        var debugLocalScrollbackReplayHistoryEpoch: UInt64? {
+            guard case .ready(let model) = localScrollbackState else { return nil }
+            return model.historyEpoch
+        }
         /// Whether a load is holding the pane's replay off the main actor, which is the window a gesture's
         /// rows buffer in rather than scrolling the replay.
         var debugLoadHoldsLocalScrollbackReplay: Bool {
@@ -908,7 +904,7 @@
 
         private static func isReadOnlyBindingAction(_ action: String) -> Bool {
             switch action {
-            case "copy_to_clipboard", "select_all", "end_search": return true
+            case "end_search": return true
             default: return false
             }
         }
@@ -969,7 +965,17 @@
             }
             // Kept whether or not it is painted: a pane showing its replay repaints this when the user
             // leaves the replay, which is what makes that jump cost no request (see `handleJumpToBottom`).
-            if let frameForUpdate { latestLiveRenderFrame = frameForUpdate }
+            if let frameForUpdate {
+                latestLiveRenderFrame = frameForUpdate
+                terminalView.noteLiveFrameEpoch(frameForUpdate.snapshot.historyEpoch)
+                if let stamp = TerminalLiveFrameStamp(frame: frameForUpdate) {
+                    liveFrameStamps.record(stamp)
+                    // A replay already at the file's end can only be lined up by a stamp that arrives after
+                    // its last write, so every frame gets the chance. Only a replay this host holds: one
+                    // a load is building belongs to that load until it installs.
+                    if case .ready(let model) = localScrollbackState { model.align(with: liveFrameStamps.stamps) }
+                }
+            }
             discardLocalScrollbackIfGridChanged(frame: frameForUpdate)
             // Covers a clear issued by any other client, whose only news of it is this payload: the daemon
             // records the clear in the transcript and broadcasts it under this reason, stamping no
@@ -987,8 +993,8 @@
             // again (the transcript file the read names is what turns it into a rebuild).
             //
             // Its moving is also what proves the session printed, which is what the jump control's
-            // new-output mark reports. A frame's mere arrival is not proof: a resize, an appearance
-            // repaint, and another viewer's shared-selection change all export a fresh full frame with
+            // new-output mark reports. A frame's mere arrival is not proof: a resize and an appearance
+            // repaint both export a fresh full frame with
             // nothing new in the transcript, and counting those would tell a reader scrolled into history
             // there is new output to come back to when there is none. Only `.output` payloads stamp the
             // offset, so a payload carrying none is read by its reason instead, which is the same rule
@@ -1232,84 +1238,32 @@
                 }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
-        /// Clears the terminal's shared selection. Not owner-gated (matches the daemon's
-        /// `clearSelection` command): any attached client's plain click can clear a selection any
-        /// other client set.
-        private func sendRemoteClearSelection() {
-            guard isInteractiveRuntimeStateForControl(), let client = attachedClient else { return }
-            guard !isShowingLocalScrollbackFrame else { return }
+        /// Rides the same input queue as keys and button presses so the application sees a press, the
+        /// motion after it and the release in the order the user produced them. Unlike them it is
+        /// `supersedable`: a pointer crossing cells quickly queues a motion per cell, and once a newer
+        /// position is queued behind a motion that has not been sent, the older one is worthless to the
+        /// program.
+        private func sendRemoteMouseMotion(pointerPosition: TerminalScrollPointerPosition) {
+            guard isInteractiveRuntimeStateForControl() else { return }
+            guard let client = attachedClient, attachedMode == .owner else { return }
+            scrollCoalescer.flush()
             let socketPath = paths.controlSocketPath
             let clientID = client.id
+            let ownerEpoch = latestState?.renderOwnerEpoch
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
             let inputFailureHandler = self.inputFailureHandler
             let queue = inputQueue
             queue.enqueue(
-                priority: .userInitiated,
+                priority: .userInitiated, supersedable: true,
                 operation: {
                     _ = try Self.sendControlRequest(
-                        TerminalControlRequest(command: .clearSelection(.init(clientID: clientID))), sessionID: sessionID, socketPath: socketPath,
-                        requestSender: requestSender)
-                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
-        }
-
-        /// Reports a completed local drag as the terminal's new shared selection, in absolute
-        /// screen-space coordinates. Not owner-gated, matching the daemon's `setSelection` command.
-        /// The response's `selectionText` is the single writer for this pasteboard write: see
-        /// `GhosttyMirrorAppService`'s suppressed `GHOSTTY_CLIPBOARD_SELECTION` write for why the
-        /// mirror's own local copy-on-select must not also write here. The write is therefore a round
-        /// trip behind the drag, which is inherent to writing the daemon's authoritative text: a paste
-        /// issued inside that window still sees the previous clipboard, and a copy the user makes
-        /// inside it wins over the response via the change-count guard below.
-        private func sendRemoteSetSelection(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, isRectangle: Bool) {
-            guard isInteractiveRuntimeStateForControl(), let client = attachedClient else { return }
-            // A drag over the replay selects rows out of the pane's own copy of the transcript, whose
-            // coordinates mean nothing to the session: the shared selection stays where the session put it,
-            // and the drag is the mirror surface's own local selection, copyable on its own.
-            guard !isShowingLocalScrollbackFrame else { return }
-            let socketPath = paths.controlSocketPath
-            let clientID = client.id
-            let sessionID = launchConfiguration.sessionID
-            let requestSender = terminalServiceRequestSender
-            let inputFailureHandler = self.inputFailureHandler
-            selectionCommitGeneration += 1
-            let commitGeneration = selectionCommitGeneration
-            let pasteboardChangeCountAtCommit = terminalView.selectionPasteboardChangeCount
-            let queue = inputQueue
-            queue.enqueue(
-                priority: .userInitiated,
-                operation: { [weak self] in
-                    let response = try Self.sendControlRequest(
                         TerminalControlRequest(
-                            command: .setSelection(
+                            command: .mouseMotion(
                                 .init(
-                                    clientID: clientID, startColumn: startColumn, startRow: startRow, endColumn: endColumn, endRow: endRow,
-                                    rectangle: isRectangle))), sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
-                    // A direct cross-actor call (`await self?.method(...)`), not a nested `Task` closure:
-                    // wrapping this in another closure would carry `self` through the same
-                    // nonisolated-into-main-actor capture the compiler flags as a data-race risk.
-                    if let selectionText = response.selectionText {
-                        await self?.writeSelectionTextToPasteboard(
-                            selectionText, forCommitGeneration: commitGeneration, ifPasteboardUnchangedSince: pasteboardChangeCountAtCommit)
-                    }
+                                    clientID: clientID, ownerEpoch: ownerEpoch, pointerX: pointerPosition.x, pointerY: pointerPosition.y,
+                                    pointerMods: pointerPosition.mods))), sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                 }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
-        }
-
-        /// Monotonic count of committed drags, so only the NEWEST commit's response may write the
-        /// pasteboard. Two drags can finish inside one round trip; without this gate the earlier
-        /// response's write would move the pasteboard change count and make the newer response's
-        /// unchanged-pasteboard guard reject the newer text.
-        private var selectionCommitGeneration = 0
-
-        /// Writes `setSelection`'s confirmed selection text to the pasteboard. Called from
-        /// `sendRemoteSetSelection`'s off-main input queue via a direct cross-actor call. Writes only
-        /// for the newest committed drag, and only while the pasteboard still holds what it held at
-        /// that commit, so a copy the user made during the round trip is never overwritten.
-        private func writeSelectionTextToPasteboard(
-            _ text: String, forCommitGeneration commitGeneration: Int, ifPasteboardUnchangedSince changeCount: Int
-        ) {
-            guard commitGeneration == selectionCommitGeneration else { return }
-            terminalView.writeSelectionTextToPasteboard(text, ifPasteboardUnchangedSince: changeCount)
         }
 
         private func sendRemoteClearScreenAndScrollback() {
@@ -1479,7 +1433,10 @@
             isScrollGestureCancelled = true
             // The rows this gesture put on a load that has not installed yet go with it, for the reason the
             // rest of its deltas do: the pane is leaving the replay, and applying them at the install would
-            // paint history back over the screen the user just returned to.
+            // paint history back over the screen the user just returned to. The autoscroll rows still
+            // waiting on a continuation read go too, or its failure would flush them over that screen.
+            // Autoscroll always latches a route, so the guard above cannot skip this while rows are queued.
+            pendingAutoscrollRows = 0
             guard case .loading(let pendingDeltaRows, let model, let grid) = localScrollbackState, pendingDeltaRows != 0 else { return }
             localScrollbackState = .loading(pendingDeltaRows: 0, model: model, grid: grid)
         }
@@ -1487,9 +1444,44 @@
         /// Scrolls the replay by one wheel event's worth of rows, reading the first page if this pane has
         /// none yet.
         private func scrollLocalReplay(vertical: CGFloat, scrollMods: Int32) {
+            scrollLocalReplay(deltaRows: localScrollDeltaNormalizer.terminalViewportDeltaRows(vertical: Double(vertical), scrollMods: scrollMods))
+        }
+
+        /// One row of a selection drag held past an edge. It scrolls the pane's replay whatever the wheel
+        /// route is, and never the program: Ghostty's selection scroll only moves a viewport, whereas a
+        /// wheel event on the alternate screen or under mouse tracking becomes arrow keys or mouse
+        /// reports. The alternate screen has no scrollback, so it does nothing there, as in Ghostty.
+        private func autoscrollSelection(towardOlderRows: Bool) {
+            if latestLiveRenderFrame?.snapshot.alternateScreenActive == true { return }
+            // The first tick of an autoscroll is a gesture start, as a wheel gesture's first event is:
+            // it brings the replay up to date before the pane enters it, so the rows scrolled onto sit
+            // directly above the live ones.
+            let now = scrollGestureClock()
+            // A failed or empty read cancels the gesture it served (`cancelActiveScrollGesture`), and a
+            // finger held at the edge ticks every 15 ms, so honoring the cancel is what stops each tick
+            // from starting another read that fails the same way. It lasts until the next selection
+            // gesture, so the clock is refreshed to keep the idle expiry from lifting it mid-drag.
+            if isScrollGestureCancelled {
+                lastScrollEventAt = now
+                return
+            }
+            expireLatchedScrollRouteIfIdle(now: now)
+            if latchedScrollRoute == nil {
+                latchedScrollRoute = .localReplay
+                loadLocalScrollbackContinuationIfBehind()
+            }
+            lastScrollEventAt = now
+            let deltaRows = towardOlderRows ? -1 : 1
+            if localScrollbackContinuationRead != nil, !isShowingLocalScrollbackFrame {
+                pendingAutoscrollRows += deltaRows
+                return
+            }
+            scrollLocalReplay(deltaRows: deltaRows)
+        }
+
+        private func scrollLocalReplay(deltaRows: Int) {
             guard attachedClient != nil else { return }
             discardLocalScrollbackIfAppearanceChanged()
-            let deltaRows = localScrollDeltaNormalizer.terminalViewportDeltaRows(vertical: Double(vertical), scrollMods: scrollMods)
             switch localScrollbackState {
             case .unavailable: return
             case .ready(let model):
@@ -1637,8 +1629,10 @@
             case prefetch
             case gesture
             case full
+            /// A copy or select-all waiting on the replay: no gesture is behind it.
+            case selection
 
-            var isGestureInitiated: Bool { self != .prefetch }
+            var isGestureInitiated: Bool { self == .gesture || self == .full }
         }
 
         /// Reads a page of transcript and installs it as this pane's replay: the prefetch after the first
@@ -1680,6 +1674,7 @@
             // control path.
             let generation = localScrollbackGeneration
             let startedAt = Date()
+            let stampsAtReadStart = liveFrameStamps.stamps
             Task { @MainActor [weak self] in
                 let transcript: RemoteGhosttyTranscript
                 do { transcript = try await transcriptProvider(maxBytes, nil, nil) } catch {
@@ -1725,7 +1720,7 @@
                 }
                 let model = await self.buildLocalScrollbackModel(
                     transcript: transcript, requestedByteCount: maxBytes, grid: grid, theme: theme, appearance: appearance,
-                    rowsFromBottom: rowsFromBottom)
+                    rowsFromBottom: rowsFromBottom, stamps: self.liveFrameStamps.stamps(including: stampsAtReadStart))
                 guard generation == self.localScrollbackGeneration, case .loading(let pendingRows, _, _) = self.localScrollbackState else { return }
                 guard let model else {
                     self.localScrollbackState = .unavailable
@@ -1749,10 +1744,37 @@
         /// Brings the replay up to date with what the session has written since it was built, once per
         /// gesture. Skipped entirely when the session has written nothing since: an ended pane never
         /// writes again, so it never asks twice.
-        private func loadLocalScrollbackContinuationIfBehind() {
-            guard case .ready(let model) = localScrollbackState, localScrollbackContinuationRead == nil else { return }
-            guard let latestTranscriptEndByteOffset, latestTranscriptEndByteOffset != model.transcriptEndByteOffset else { return }
-            guard let transcriptProvider else { return }
+        /// Whether the session has written bytes the replay does not hold. The single test for wheel
+        /// gestures, autoscroll and selection requests alike. Either signal says so: the end offset the
+        /// newest state payload reported, or the newest live frame's stamp (past the replay's end in the
+        /// same file, or in another file). The stamp is needed because after a reconnect or a full-state
+        /// refresh a frame can arrive with a stale or missing reported offset.
+        private func isReplayBehindSession(_ model: TerminalLocalScrollbackModel) -> Bool {
+            if let latestTranscriptEndByteOffset, latestTranscriptEndByteOffset != model.transcriptEndByteOffset { return true }
+            guard let stamp = liveFrameStamps.stamps.last else { return false }
+            return stamp.transcriptFileIdentity != model.transcriptFileIdentity || stamp.transcriptByteOffset > model.transcriptEndByteOffset
+        }
+
+        /// Rows an autoscroll tick asked for while a continuation read was in flight and the pane was not
+        /// yet in its replay. They are applied to the caught-up replay (carried through the `.loading`
+        /// state's pending rows like a wheel gesture's), so entering the replay does not skip rows.
+        private var pendingAutoscrollRows = 0
+
+        private func takePendingAutoscrollRows() -> Int {
+            defer { pendingAutoscrollRows = 0 }
+            return pendingAutoscrollRows
+        }
+
+        /// A continuation that installs nothing leaves the replay as it was; the rows waiting on it scroll that.
+        private func flushPendingAutoscrollRows() {
+            let rows = takePendingAutoscrollRows()
+            if rows != 0 { scrollLocalReplay(deltaRows: rows) }
+        }
+
+        @discardableResult private func loadLocalScrollbackContinuationIfBehind() -> Bool {
+            guard case .ready(let model) = localScrollbackState, localScrollbackContinuationRead == nil else { return false }
+            guard isReplayBehindSession(model) else { return false }
+            guard let transcriptProvider else { return false }
             let maxBytes = TerminalScrollbackBudget.initialLocalScrollbackPageBytes
             let fromByteOffset = model.transcriptEndByteOffset
             let fileIdentity = model.transcriptFileIdentity
@@ -1760,12 +1782,14 @@
             let generation = localScrollbackGeneration
             localScrollbackContinuationRead = LocalScrollbackContinuationRead(generation: generation, model: model)
             let startedAt = Date()
+            let stampsAtReadStart = liveFrameStamps.stamps
             Task { @MainActor [weak self] in
                 let transcript: RemoteGhosttyTranscript
                 do { transcript = try await transcriptProvider(maxBytes, fromByteOffset, fileIdentity) } catch {
                     // Transient, like any other read: the replay keeps the bytes it has and the next
                     // gesture asks again.
                     self?.finishLocalScrollbackContinuationRead(generation: generation, model: model)
+                    self?.flushPendingAutoscrollRows()
                     return
                 }
                 guard let self else { return }
@@ -1781,12 +1805,17 @@
                     self.repaintLiveFrameUnlessShowingReplay()
                     return
                 }
-                guard !transcript.data.isEmpty else { return }
+                guard !transcript.data.isEmpty else {
+                    self.flushPendingAutoscrollRows()
+                    return
+                }
                 // The daemon could not serve a continuation (a head-trim moved the bytes the offset named,
                 // or the session outran the page), so the payload is a fresh replayable suffix and the
                 // replay is rebuilt from it rather than appended to.
                 if transcript.isSuffixRebuild {
-                    await self.rebuildLocalScrollback(from: model, transcript: transcript, requestedByteCount: maxBytes, generation: generation)
+                    await self.rebuildLocalScrollback(
+                        from: model, transcript: transcript, requestedByteCount: maxBytes, generation: generation,
+                        stampsAtReadStart: stampsAtReadStart)
                     return
                 }
                 // Replaying a page of transcript through libghostty-vt is tens of milliseconds of work, so
@@ -1796,9 +1825,13 @@
                 // instead of scrolling a replay that is not here, and the install applies them.
                 let bytes = transcript.data
                 let endByteOffset = transcript.endByteOffset
-                self.localScrollbackState = .loading(pendingDeltaRows: 0, model: model, grid: (columns: model.columns, rows: model.rows))
+                let stamps = self.liveFrameStamps.stamps(including: stampsAtReadStart)
+                self.localScrollbackState = .loading(
+                    pendingDeltaRows: self.takePendingAutoscrollRows(), model: model, grid: (columns: model.columns, rows: model.rows))
                 self.debugOnLocalScrollbackReplayHandedToLoad?()
-                let appended = await Task.detached(priority: .userInitiated) { model.append(bytes, transcriptEndByteOffset: endByteOffset) }.value
+                let appended = await Task.detached(priority: .userInitiated) {
+                    model.append(bytes, transcriptEndByteOffset: endByteOffset, stamps: stamps)
+                }.value
                 // The same checks the build's install makes, for the same reason: a discard (a keystroke, a
                 // resize, a relaunch) can have landed while the append ran, and its bytes must not come back
                 // under the state that replaced it.
@@ -1819,6 +1852,7 @@
                 // was away have anything to paint.
                 if pendingRows != 0 { self.applyLocalScroll(deltaRows: pendingRows, model: model) }
             }
+            return true
         }
 
         /// Applies a rewind the pane owed a replay a load was holding (see `pendingLocalScrollbackRewind`),
@@ -1836,6 +1870,75 @@
         private func finishLocalScrollbackContinuationRead(generation: UInt64, model: TerminalLocalScrollbackModel) {
             guard let read = localScrollbackContinuationRead, read.generation == generation, read.model === model else { return }
             localScrollbackContinuationRead = nil
+            // A continuation that fails or serves nothing leaves the state where it was, so the request
+            // waiting on it hears about the read ending here.
+            if pendingSelectionReplay != nil { scheduleSelectionRequestAdvance() }
+        }
+
+        // MARK: - Copy and select-all from the replay
+
+        /// A press, drag, key or right-click word select by the user replaces whatever selection they
+        /// had, so a select-all still waiting on its read must not land over it. A pending copy stays:
+        /// it copies the selection the user pressed copy on.
+        private func cancelPendingSelectAll() { if pendingSelectionReplay?.request == .selectAll { pendingSelectionReplay = nil } }
+
+        /// Copy and select-all read their rows out of the pane's own replay, never from the daemon: the
+        /// selection is this client's, in absolute rows, and the replay is the only copy of the history
+        /// above the viewport this client holds. The replay may not exist yet, may trail the live frame, or
+        /// may not reach back to the selection's first row, so the request walks the planner's steps
+        /// (shared with the iPhone) one read at a time until the replay can answer.
+        private func startSelectionReplayRequest(_ request: TerminalSelectionReplayRequest) {
+            pendingSelectionReplay = TerminalPendingSelectionReplay(request: request, liveStamps: liveFrameStamps)
+            advanceSelectionRequest()
+        }
+
+        private func scheduleSelectionRequestAdvance() { Task { @MainActor [weak self] in self?.advanceSelectionRequest() } }
+
+        private func advanceSelectionRequest() {
+            guard var pending = pendingSelectionReplay else { return }
+            // A load or continuation in flight owns the replay; its exit moves the state and re-plans.
+            if case .loading = localScrollbackState { return }
+            if localScrollbackContinuationRead != nil { return }
+            var model: TerminalLocalScrollbackModel?
+            var isUnavailable = false
+            switch localScrollbackState {
+            case .ready(let readyModel): model = readyModel
+            case .idle, .loading: break
+            case .unavailable: isUnavailable = true
+            }
+            let step = pending.progress.nextStep(model: model, liveStamps: liveFrameStamps, replayIsUnavailable: isUnavailable)
+            pendingSelectionReplay = pending
+            switch step {
+            case .abandon: pendingSelectionReplay = nil
+            case .format:
+                pendingSelectionReplay = nil
+                if let model {
+                    formatSelectionRequest(pending.request, from: model)
+                    if let changeCount = pending.copyPasteboardChangeCount, let selection = terminalView.clientSelection {
+                        formatSelectionRequest(.copy(selection, pasteboardChangeCount: changeCount), from: model)
+                    }
+                }
+            case .readFirstPage:
+                loadLocalScrollbackPage(
+                    maxBytes: TerminalScrollbackBudget.initialLocalScrollbackPageBytes, deepening: nil, pendingDeltaRows: 0, kind: .selection)
+            case .readWholeBudget:
+                loadLocalScrollbackPage(maxBytes: TerminalScrollbackBudget.defaultMaxBytes, deepening: model, pendingDeltaRows: 0, kind: .selection)
+            case .readContinuation:
+                // The session reports no bytes beyond the replay's end (the stamp ran ahead of the file),
+                // so there is nothing to read and the planner formats on the next ask.
+                if !loadLocalScrollbackContinuationIfBehind() { advanceSelectionRequest() }
+            }
+        }
+
+        private func formatSelectionRequest(_ request: TerminalSelectionReplayRequest, from model: TerminalLocalScrollbackModel) {
+            switch request {
+            case .copy(let selection, let pasteboardChangeCount):
+                guard copyPasteboard.changeCount == pasteboardChangeCount,
+                    let text = TerminalSelectionReplayPlanner.copyText(for: selection, in: model)
+                else { return }
+                GhosttyClipboardBridge.writePlainText(text, to: copyPasteboard)
+            case .selectAll: terminalView.setClientSelection(TerminalSelectionReplayPlanner.selectAllSelection(in: model))
+            }
         }
 
         /// Replaces the replay with one built from a served suffix, at the rows the user is looking at.
@@ -1846,17 +1949,18 @@
         /// thrown away by the install. They buffer in `pendingDeltaRows` instead and are applied to the
         /// replay that comes back, and a jump or a keystroke meanwhile is the rewind the install pays.
         private func rebuildLocalScrollback(
-            from model: TerminalLocalScrollbackModel, transcript: RemoteGhosttyTranscript, requestedByteCount: Int, generation: UInt64
+            from model: TerminalLocalScrollbackModel, transcript: RemoteGhosttyTranscript, requestedByteCount: Int, generation: UInt64,
+            stampsAtReadStart: [TerminalLiveFrameStamp]
         ) async {
             let grid = localScrollbackGrid()
             let appearance = currentTerminalAppearance()
             let theme = ActiveTheme.descriptor.terminal(for: appearance)
             let rowsFromBottom = model.rowsFromBottom
-            localScrollbackState = .loading(pendingDeltaRows: 0, model: model, grid: grid)
+            localScrollbackState = .loading(pendingDeltaRows: takePendingAutoscrollRows(), model: model, grid: grid)
             debugOnLocalScrollbackReplayHandedToLoad?()
             let rebuilt = await buildLocalScrollbackModel(
                 transcript: transcript, requestedByteCount: requestedByteCount, grid: grid, theme: theme, appearance: appearance,
-                rowsFromBottom: rowsFromBottom)
+                rowsFromBottom: rowsFromBottom, stamps: liveFrameStamps.stamps(including: stampsAtReadStart))
             guard generation == localScrollbackGeneration, case .loading(let pendingRows, let held, _) = localScrollbackState, held === model else {
                 return
             }
@@ -1883,13 +1987,14 @@
         /// the newest row, which is what keeps the rows on screen still across a rebuild.
         private func buildLocalScrollbackModel(
             transcript: RemoteGhosttyTranscript, requestedByteCount: Int, grid: (columns: Int, rows: Int), theme: GhosttyThemeExport,
-            appearance: ThemeAppearance, rowsFromBottom: Int?
+            appearance: ThemeAppearance, rowsFromBottom: Int?, stamps: [TerminalLiveFrameStamp]
         ) async -> TerminalLocalScrollbackModel? {
             await Task.detached(priority: .userInitiated) {
                 let model = TerminalLocalScrollbackModel(
                     columns: grid.columns, rows: grid.rows, theme: theme, appearance: appearance, transcript: transcript.data,
                     transcriptStartByteOffset: transcript.startByteOffset, transcriptEndByteOffset: transcript.endByteOffset,
-                    requestedByteCount: requestedByteCount, transcriptFileIdentity: transcript.fileIdentity, runIdentity: transcript.runIdentity)
+                    requestedByteCount: requestedByteCount, transcriptFileIdentity: transcript.fileIdentity, runIdentity: transcript.runIdentity,
+                    stamps: stamps)
                 if let rowsFromBottom { model?.scrollToRowsFromBottom(rowsFromBottom) }
                 return model
             }.value
@@ -1978,6 +2083,10 @@
             localScrollbackContinuationRead = nil
             // The replay the rewind was owed to is gone with everything else armed for it.
             pendingLocalScrollbackRewind = false
+            // The replay a copy or select-all was waiting on is gone; the press is not replayed against a
+            // different one.
+            pendingSelectionReplay = nil
+            pendingAutoscrollRows = 0
             clearLocalScrollbackDisplay()
         }
 

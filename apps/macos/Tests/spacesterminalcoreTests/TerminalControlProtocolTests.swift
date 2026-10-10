@@ -133,6 +133,36 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(noPointer.commandValue.requiredPayloadFailureMessage, "Missing mouse pointer position.")
     }
 
+    func testMouseMotionRequestRoundTripsThroughCodec() throws {
+        let request = TerminalControlRequest(
+            command: .mouseMotion(
+                TerminalControlMouseMotionPayload(clientID: "owner-1", ownerEpoch: 11, pointerX: 0.25, pointerY: 0.75, pointerMods: 3)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "mouseMotion")
+        XCTAssertEqual(decoded.commandValue.name, "mouseMotion")
+        // Motion writes to the program like a click does, so it is owner-gated and does not echo state.
+        XCTAssertTrue(decoded.commandValue.requiresOwnerClientID)
+        XCTAssertFalse(decoded.commandValue.includesSessionStateOnSuccess)
+        XCTAssertTrue(TerminalControlCommand.isMobileTerminalControlName("mouseMotion"))
+        guard case .mouseMotion(let payload) = decoded.commandValue else {
+            return XCTFail("Expected a mouseMotion command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertEqual(payload.clientID, "owner-1")
+        XCTAssertEqual(payload.ownerEpoch, 11)
+        XCTAssertEqual(payload.pointerX, 0.25)
+        XCTAssertEqual(payload.pointerY, 0.75)
+        XCTAssertEqual(payload.pointerMods, 3)
+        // The command names no button: the host tracks the held ones.
+        XCTAssertNil(decoded.mouseButton)
+    }
+
+    func testMouseMotionWithoutPointerReportsMissingPayload() throws {
+        let request = try TerminalControlCodec.decodeRequest(#"{"command":"mouseMotion","clientID":"owner-1","asPaste":false}"#.data(using: .utf8)!)
+        XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing mouse pointer position.")
+    }
+
     func testSetAppearanceRequestRoundTripsThroughCodec() throws {
         let request = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "viewer-1", appearance: .dark)))
 
@@ -155,60 +185,6 @@ final class TerminalControlProtocolTests: XCTestCase {
         let request = try TerminalControlCodec.decodeRequest(
             #"{"command":"setAppearance","clientID":"viewer-1","asPaste":false}"#.data(using: .utf8)!)
         XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing appearance.")
-    }
-
-    func testSetSelectionRequestRoundTripsThroughCodec() throws {
-        let request = TerminalControlRequest(
-            command: .setSelection(
-                TerminalControlSetSelectionPayload(clientID: "viewer-1", startColumn: 4, startRow: 100, endColumn: 20, endRow: 102, rectangle: true)))
-
-        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
-
-        XCTAssertEqual(decoded.command, "setSelection")
-        XCTAssertEqual(decoded.commandValue.name, "setSelection")
-        // Selection is deliberately shared state: any attached viewer may set or clear it, unlike
-        // scroll/mouse input which are exclusive to whoever currently owns the session.
-        XCTAssertEqual(decoded.commandValue.requiresOwnerClientID, false)
-        XCTAssertEqual(decoded.selectionStartColumn, 4)
-        XCTAssertEqual(decoded.selectionStartRow, 100)
-        XCTAssertEqual(decoded.selectionEndColumn, 20)
-        XCTAssertEqual(decoded.selectionEndRow, 102)
-        XCTAssertEqual(decoded.selectionRectangle, true)
-        guard case .setSelection(let payload) = decoded.commandValue else {
-            return XCTFail("Expected a setSelection command, got '\(decoded.commandValue.name)'.")
-        }
-        XCTAssertEqual(payload.clientID, "viewer-1")
-        XCTAssertEqual(payload.startColumn, 4)
-        XCTAssertEqual(payload.startRow, 100)
-        XCTAssertEqual(payload.endColumn, 20)
-        XCTAssertEqual(payload.endRow, 102)
-        XCTAssertEqual(payload.rectangle, true)
-    }
-
-    func testSetSelectionWithoutEndpointsReportsMissingPayload() throws {
-        let request = try TerminalControlCodec.decodeRequest(#"{"command":"setSelection","clientID":"viewer-1","asPaste":false}"#.data(using: .utf8)!)
-        XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing selection endpoints.")
-    }
-
-    func testClearSelectionAndReadSelectionTextRoundTripThroughCodec() throws {
-        for command: TerminalControlCommand in [.clearSelection(.init(clientID: "viewer-1")), .readSelectionText(.init(clientID: "viewer-1"))] {
-            let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(TerminalControlRequest(command: command)))
-            XCTAssertEqual(decoded.command, command.name)
-            XCTAssertEqual(decoded.commandValue.requiresOwnerClientID, false)
-            XCTAssertNil(decoded.commandValue.requiredPayloadFailureMessage, "\(command.name) carries no required payload of its own")
-            XCTAssertEqual(decoded.clientID, "viewer-1")
-        }
-    }
-
-    /// `selectionText` is the one response field `setSelection`/`readSelectionText` add to the wire; it
-    /// must round-trip both present (a non-empty selection) and absent (no selection to report).
-    func testSelectionTextResponseFieldRoundTripsThroughCodec() throws {
-        let withText = TerminalControlResponse(ok: true, message: "Read terminal selection.", selectionText: "hello world")
-        let withoutText = TerminalControlResponse(ok: true, message: "Read terminal selection.")
-
-        XCTAssertEqual(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(withText)), withText)
-        XCTAssertEqual(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(withText)).selectionText, "hello world")
-        XCTAssertNil(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(withoutText)).selectionText)
     }
 
     func testTypedCommandWrapperReportsMissingPayloadFields() throws {

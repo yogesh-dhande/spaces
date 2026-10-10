@@ -25,6 +25,7 @@
         typealias SendKeyHandler = @MainActor (String) -> Void
         typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32, TerminalScrollPointerPosition?) -> Void
         typealias SendMouseButtonHandler = @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void
+        typealias SendMouseMotionHandler = @MainActor (TerminalScrollPointerPosition) -> Void
         typealias ViewportSizeHandler = @MainActor (Int, Int) -> Void
 
         private struct SurfaceGeometry: Equatable {
@@ -84,10 +85,6 @@
         private var textSize: TerminalTextSize = .default
         private var latestFrame: GhosttyRenderFrame?
         private var renderStateKey = ""
-        /// Scroll rects accumulated since the last frame this view successfully applied, so a local
-        /// drag anchor can be carried through frames that arrive faster than the mirror applies them.
-        /// See `GhosttyMirrorSelectionMarshalling.ScrollRectCarryBuffer` for the poisoning rules.
-        private var scrollRectCarryBuffer = GhosttyMirrorSelectionMarshalling.ScrollRectCarryBuffer()
         private var lastGeometry: SurfaceGeometry?
         private var lastPushedSurfaceOcclusion: Bool?
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
@@ -183,8 +180,22 @@
         }
         var onSendText: SendTextHandler?
         var onSendKey: SendKeyHandler?
+        /// The user started, cleared or replaced the selection (a press, typing, a right-click word
+        /// select), as opposed to the host setting it.
+        /// Asks the host to scroll one row for a selection drag held past the top (`true`) or bottom edge.
+        var onSelectionAutoscroll: (@MainActor (_ towardOlderRows: Bool) -> Void)?
+        var onUserChangedSelection: (@MainActor () -> Void)?
+        /// A selection press began, as opposed to any other change of the selection.
+        var onSelectionPressed: (@MainActor () -> Void)?
         var onSendScroll: SendScrollHandler?
         var onSendMouseButton: SendMouseButtonHandler?
+        var onSendMouseMotion: SendMouseMotionHandler?
+        /// The buttons this pane has forwarded a press for and not yet a release for. The session host
+        /// holds the same set, so this decides whether button-event tracking (1002) wants a motion.
+        private var forwardedHeldButtons = Set<UInt32>()
+        /// The cell the last forwarded press, release or motion named, so a move that stays inside it
+        /// sends nothing: one report per cell change, never per pixel.
+        private var lastForwardedPointerCell: (column: Int, row: Int)?
         var onViewportSizeChanged: ViewportSizeHandler?
         /// Called when the user activates the jump-to-bottom control. `RemoteGhosttySessionHost` wires
         /// this to a `scrollToBottom` control request.
@@ -192,13 +203,24 @@
         /// Called when this pane's effective appearance changes. `RemoteGhosttySessionHost` uses it to
         /// rebuild a scrollback replay whose rows were replayed in the other appearance's colors.
         var onAppearanceChanged: (@MainActor () -> Void)?
-        /// Clears the terminal's one shared selection. Not owner-gated: any attached client's plain
-        /// click clears it, matching the daemon's `clearSelection` command.
-        var onClearSelection: (@MainActor () -> Void)?
-        /// Reports this mirror's completed local drag as the terminal's new shared selection, in
-        /// absolute screen-space coordinates (start column/row, end column/row, rectangle). Not
-        /// owner-gated, matching the daemon's `setSelection` command.
-        var onSetSelection: (@MainActor (UInt16, UInt32, UInt16, UInt32, Bool) -> Void)?
+        /// This pane's own selection, in absolute rows. It belongs to this pane alone: no other pane or
+        /// client sees it and the daemon is never told. Every frame is painted with its projection in
+        /// place of the frame's own `selection`, so it follows its text as output scrolls it and as the
+        /// pane moves between live rows and its scrollback replay.
+        private(set) var clientSelection: TerminalAbsoluteSelection?
+        /// The left press the selection grows from. It outlives the drag (and a click that selected
+        /// nothing) so a later shift-click extends from the same anchor; the fork re-seats Ghostty's click
+        /// pin from it on every frame.
+        private var selectionDrag: TerminalSelectionDrag?
+        /// Whether the left button is down on a gesture that selects (not one the program owns).
+        private var isSelectionDragActive = false
+        /// Where the pointer last was during the drag, in window coordinates: the auto-scroll tick
+        /// re-resolves the drag against it.
+        private var selectionPointer: (location: NSPoint, modifierFlags: NSEvent.ModifierFlags)?
+        private var selectionAutoscrollTask: Task<Void, Never>?
+        /// The snapshot of the frame the mirror surface currently shows, which the gesture is resolved
+        /// against.
+        private var shownSnapshot: GhosttyTerminalSnapshot?
         /// Counts mirror surfaces built for this pane. A surface negotiates its own grid when it is
         /// created, so a consumer that told the daemon a viewport size against an earlier surface can tell
         /// from this whether that size still describes a surface that exists.
@@ -228,6 +250,7 @@
             pendingSearchQueryTask?.cancel()
             pendingSurfacePresentationTask?.cancel()
             pendingFrameApplyRetryTask?.cancel()
+            selectionAutoscrollTask?.cancel()
             if let windowOcclusionObserver { NotificationCenter.default.removeObserver(windowOcclusionObserver) }
             let actionHandlerToken = actionHandlerToken
             let mirror = mirror
@@ -377,25 +400,35 @@
 
         override func mouseDown(with event: NSEvent) {
             if suppressesFocusOnlyMousePress(for: event) { return }
-            clearSharedSelectionIfNeeded(for: event)
             focusWindow()
             sendMousePosition(event)
+            paintStandInAnchorForShiftExtend(event)
             _ = sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT, event: event)
+            selectionGesturePressed(event)
         }
 
         override func mouseUp(with event: NSEvent) {
             if suppressesFocusOnlyMouseRelease(for: event) { return }
             sendMousePosition(event)
             _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT, event: event)
-            commitLocalSelectionIfPresent()
+            selectionGestureReleased(event)
         }
 
         override func rightMouseDown(with event: NSEvent) {
             if suppressesFocusOnlyMousePress(for: event) { return }
             focusWindow()
             sendMousePosition(event)
-            if !sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT, event: event) { super.rightMouseDown(with: event) }
+            // Ghostty leaves the click unconsumed when it is for the context menu, and has by then
+            // selected the word under the pointer in the mirror if the click fell outside the selection.
+            guard !sendMouseButton(state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT, event: event) else { return }
+            adoptMirrorSelectionAfterRightClick()
+            // The superclass pops the menu up and tracks it modally, which a test cannot return from.
+            if presentsContextMenu { super.rightMouseDown(with: event) }
         }
+
+        var presentsContextMenu = true
+
+        override func menu(for event: NSEvent) -> NSMenu? { makeContextMenu() }
 
         override func rightMouseUp(with event: NSEvent) {
             if suppressesFocusOnlyMouseRelease(for: event) { return }
@@ -416,13 +449,26 @@
             _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: Self.ghosttyMouseButton(for: event.buttonNumber), event: event)
         }
 
-        override func mouseMoved(with event: NSEvent) { sendMousePosition(event) }
+        override func mouseMoved(with event: NSEvent) {
+            sendMousePosition(event)
+            forwardMouseMotionIfWanted(event)
+        }
 
-        override func mouseDragged(with event: NSEvent) { sendMousePosition(event) }
+        override func mouseDragged(with event: NSEvent) {
+            sendMousePosition(event)
+            forwardMouseMotionIfWanted(event)
+            selectionGestureMoved(event)
+        }
 
-        override func rightMouseDragged(with event: NSEvent) { sendMousePosition(event) }
+        override func rightMouseDragged(with event: NSEvent) {
+            sendMousePosition(event)
+            forwardMouseMotionIfWanted(event)
+        }
 
-        override func otherMouseDragged(with event: NSEvent) { sendMousePosition(event) }
+        override func otherMouseDragged(with event: NSEvent) {
+            sendMousePosition(event)
+            forwardMouseMotionIfWanted(event)
+        }
 
         override func mouseExited(with event: NSEvent) {
             hoveredLink = nil
@@ -461,13 +507,20 @@
                 TerminalPerformance.logLine("spaces: input_trace point=mirror_can_process2 keycode=\(event.keyCode) drop=1\n")
                 return false
             }
+            // Anything the session receives as typing (Escape included) clears the selection, as
+            // Ghostty's `selection-clear-on-typing` does for a key it encodes. A Command chord that is
+            // an app shortcut, and a modifier alone, never get here, so they leave it.
             if let keySpec = Self.remoteKeySpecifier(for: event) {
+                onUserChangedSelection?()
+                setClientSelection(nil)
                 onSendKey?(keySpec)
                 return true
             }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if flags.contains(.command) { return false }
             if let characters = GhosttyTerminalInputTranslator.ghosttyText(for: event), !characters.isEmpty {
+                onUserChangedSelection?()
+                setClientSelection(nil)
                 onSendText?(characters, false)
                 return true
             }
@@ -489,12 +542,9 @@
         }
 
         func update(frame: GhosttyRenderFrame?, renderStateKey: String) {
-            // Accumulate this frame's contribution to the drag-carry buffer before attempting to apply
-            // it, and only once per distinct frame: a repeat delivery of the same frame (the renderer
-            // reapplying state with nothing new to say) describes no additional movement.
-            if let frame, frame != latestFrame { scrollRectCarryBuffer.append(rects: frame.scrollRects, overflowed: frame.scrollRectsOverflowed) }
             self.renderStateKey = renderStateKey
             latestFrame = frame
+            if let frame { dropClientSelectionNotInEpoch(of: frame.snapshot) }
             // Read off the frame handed in here, not inside the surface-apply path below: the daemon
             // owns the viewport and the frame is what says where it sits, so a frame the surface goes on
             // to refuse must still move the control rather than leave it describing a stale position.
@@ -556,36 +606,9 @@
             return (max(Int(floor(bounds.width / metrics.width)), 1), max(Int(floor(bounds.height / metrics.height)), 1))
         }
 
-        func copySelectionToPasteboard() -> Bool { GhosttyClipboardBridge.copySelection(from: mirrorSurface()) }
-
         /// Unit tests inject a uniquely-named pasteboard here so paste tests never touch the user's
         /// real clipboard. Nil in the app, where paste keeps using `NSPasteboard.general`.
         var pasteboardOverrideForTesting: NSPasteboard?
-
-        /// Writes text to the pasteboard, using the same test-facing override as `pasteClipboardContents`.
-        /// The single writer for a shared-selection commit's response text: the mirror's local
-        /// copy-on-select write is suppressed (see `GhosttyMirrorAppService`'s `write_clipboard_cb`) so
-        /// this is never in a race with it.
-        func writeSelectionTextToPasteboard(_ text: String) {
-            let pasteboard = pasteboardOverrideForTesting ?? .general
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
-        }
-
-        /// The change count of the pasteboard `writeSelectionTextToPasteboard` writes to. Captured at
-        /// drag-commit time so a selection response that spent a round trip in flight can detect a copy
-        /// the user made in the meantime and yield to it.
-        var selectionPasteboardChangeCount: Int { (pasteboardOverrideForTesting ?? .general).changeCount }
-
-        /// Copy-on-select writer for a shared-selection commit: writes only while the pasteboard still
-        /// holds what it held when the drag committed. A copy the user made during the round trip moved
-        /// the change count, and their copy must win over the older drag's confirmed text.
-        func writeSelectionTextToPasteboard(_ text: String, ifPasteboardUnchangedSince changeCount: Int) {
-            let pasteboard = pasteboardOverrideForTesting ?? .general
-            guard pasteboard.changeCount == changeCount else { return }
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
-        }
 
         func pasteClipboardContents() -> Bool {
             guard acceptsTerminalInput else { return false }
@@ -698,6 +721,7 @@
             lastGeometry = nil
             lastPushedSurfaceOcclusion = nil
             lastAppliedRenderFrameIdentity = nil
+            shownSnapshot = nil
             frameApplyRetry = nil
         }
 
@@ -916,6 +940,12 @@
             // and resetting the click gesture while an application tracks the mouse) before the same
             // click is forwarded to the session that can actually deliver it.
             let consumed = deliverMouseButtonToMirror(state: state, button: button, event: event)
+            // Any release ends the hold. A release of a button whose press this pane forwarded is itself
+            // forwarded even when the ownership rule would now give it to selection (Shift went down, or
+            // tracking ended mid-click): the session host holds that button until it hears the release,
+            // and a held button turns later hover into a drag. The host applies its own Shift rule to
+            // the release, so the program still sees what Ghostty would natively send.
+            let releasesForwardedPress = state.rawValue != GHOSTTY_MOUSE_PRESS.rawValue && forwardedHeldButtons.remove(button.rawValue) != nil
             if state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue {
                 // Cmd+click is the local link-activation gesture, and Ghostty core requires the
                 // super modifier to activate a link and swallows a successful link click before it
@@ -938,7 +968,7 @@
                 // The matching release is withheld too, as a pair keyed off the press, so the
                 // session never sees a dangling release for a press it never received.
             } else {
-                forwardMouseButtonIfReported(state: state, button: button, event: event)
+                forwardMouseButtonIfReported(state: state, button: button, event: event, releasesForwardedPress: releasesForwardedPress)
             }
             return consumed
         }
@@ -961,11 +991,35 @@
         /// Sends the click on to the session's own terminal when a mouse-aware application there is
         /// tracking the mouse. This repeats the condition Ghostty's surface uses to decide it should
         /// emit a mouse report, which is the same decision the mirror just made locally.
-        private func forwardMouseButtonIfReported(state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent) {
-            guard let onSendMouseButton, mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else { return }
+        private func forwardMouseButtonIfReported(
+            state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent, releasesForwardedPress: Bool = false
+        ) {
+            guard let onSendMouseButton, releasesForwardedPress || mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else { return }
             let mods = Self.ghosttyMouseModifiers(for: event.modifierFlags)
             let pointerPosition = clickedCellPointerPosition(for: event.locationInWindow, mods: mods.rawValue)
-            onSendMouseButton(UInt8(clamping: button.rawValue), state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue, pointerPosition)
+            let pressed = state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue
+            if pressed { forwardedHeldButtons.insert(button.rawValue) } else { forwardedHeldButtons.remove(button.rawValue) }
+            lastForwardedPointerCell = gridCell(at: event.locationInWindow).map { (column: $0.column, row: $0.row) }
+            onSendMouseButton(UInt8(clamping: button.rawValue), pressed, pointerPosition)
+        }
+
+        /// Sends the pointer's move to the session when the program there asked for it: any-event
+        /// tracking (1003) always, button-event tracking (1002) only while a forwarded button is held,
+        /// and never under clicks-only tracking. It follows the same ownership rule as the button
+        /// presses, so a Shift drag (selection) and a session that does not permit mouse capture send
+        /// nothing, and sends once per cell change.
+        private func forwardMouseMotionIfWanted(_ event: NSEvent) {
+            guard let onSendMouseMotion, mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else { return }
+            guard let level = latestFrame?.snapshot.mouseTrackingLevel, level.reportsMotion(buttonHeld: !forwardedHeldButtons.isEmpty) else { return }
+            guard let cell = gridCell(at: event.locationInWindow) else { return }
+            // A drag past an edge keeps reporting at the edge cell, as a terminal's own mouse does.
+            let column = min(max(cell.column, 0), cell.columns - 1)
+            let row = min(max(cell.row, 0), cell.rows - 1)
+            if let last = lastForwardedPointerCell, last.column == column, last.row == row { return }
+            lastForwardedPointerCell = (column, row)
+            let center = TerminalPointerGrid.center(column: column, row: row, columns: cell.columns, rows: cell.rows)
+            onSendMouseMotion(
+                TerminalScrollPointerPosition(x: center.x, y: center.y, mods: Self.ghosttyMouseModifiers(for: event.modifierFlags).rawValue))
         }
 
         /// The cell the click landed on, named as that cell's center in this pane's grid, which is what a
@@ -977,6 +1031,15 @@
         /// therefore resolve to the neighbouring cell on the session host near a boundary, so the click is
         /// quantized here, against the geometry this pane actually rendered.
         private func clickedCellPointerPosition(for locationInWindow: NSPoint, mods: UInt32) -> TerminalScrollPointerPosition? {
+            guard let cell = gridCell(at: locationInWindow) else { return nil }
+            let center = TerminalPointerGrid.center(column: cell.column, row: cell.row, columns: cell.columns, rows: cell.rows)
+            return TerminalScrollPointerPosition(x: center.x, y: center.y, mods: mods)
+        }
+
+        /// The grid cell under a window-coordinate point, against the geometry this pane's surface laid
+        /// its grid out with. Not clamped: a point past an edge (a drag above the top row) names a row
+        /// outside the grid, which is how a drag says which way it is going.
+        private func gridCell(at locationInWindow: NSPoint) -> (column: Int, row: Int, columns: Int, rows: Int)? {
             guard let surface = mirrorSurface() else { return nil }
             let size = ghostty_surface_size(surface)
             guard size.columns > 0, size.rows > 0, size.cell_width_px > 0, size.cell_height_px > 0 else { return nil }
@@ -987,8 +1050,20 @@
             let padding = GhosttySurfaceGridPadding.perSidePixels(scale: scale)
             let column = ((Double(point.x - bounds.minX) * scale - padding) / Double(size.cell_width_px)).rounded(.down)
             let row = ((Double(bounds.maxY - point.y) * scale - padding) / Double(size.cell_height_px)).rounded(.down)
-            let center = TerminalPointerGrid.center(column: Int(column), row: Int(row), columns: Int(size.columns), rows: Int(size.rows))
-            return TerminalScrollPointerPosition(x: center.x, y: center.y, mods: mods)
+            return (Int(column), Int(row), Int(size.columns), Int(size.rows))
+        }
+
+        /// The window point at the centre of a grid cell: `gridCell(at:)` inverted, so a test can aim a
+        /// mouse event at a cell without duplicating the surface's padding and cell metrics.
+        func windowPointForTesting(column: Int, row: Int) -> NSPoint? {
+            guard let surface = mirrorSurface() else { return nil }
+            let size = ghostty_surface_size(surface)
+            guard size.cell_width_px > 0, size.cell_height_px > 0 else { return nil }
+            let scale = Double(window?.backingScaleFactor ?? 2.0)
+            let padding = GhosttySurfaceGridPadding.perSidePixels(scale: scale)
+            let x = (padding + (Double(column) + 0.5) * Double(size.cell_width_px)) / scale
+            let yFromTop = (padding + (Double(row) + 0.5) * Double(size.cell_height_px)) / scale
+            return convert(NSPoint(x: bounds.minX + x, y: bounds.maxY - yFromTop), to: nil)
         }
 
         /// True when the application on the other end owns this click. Shift is the local escape hatch:
@@ -1010,14 +1085,26 @@
         }
 
         private func sendMousePosition(_ event: NSEvent) {
+            sendMousePosition(locationInWindow: event.locationInWindow, modifierFlags: event.modifierFlags)
+        }
+
+        /// While a selection drag is down, the mirror is told the pointer is inside the view even when
+        /// it is past the top or bottom edge. Ghostty would otherwise start its own selection scroll
+        /// timer, whose ticks re-resolve the drag against the mirror's stand-in anchor and overwrite the
+        /// merged selection this pane paints; the pane's auto-scroll (`performSelectionAutoscrollTick`)
+        /// owns edge scrolling instead, and Ghostty still resolves the drag at the edge row.
+        private static let dragPointerEdgeInset: CGFloat = 3
+
+        private func sendMousePosition(locationInWindow: NSPoint, modifierFlags: NSEvent.ModifierFlags) {
             if let debugMouseEventHandler {
                 debugRecordedMouseEvents.append("position")
                 _ = debugMouseEventHandler("position")
                 return
             }
             guard let surface = mirrorSurface() else { return }
-            let position = Self.ghosttyMousePosition(for: event.locationInWindow, in: self)
-            ghostty_surface_mouse_pos(surface, position.x, position.y, Self.ghosttyMouseModifiers(for: event.modifierFlags))
+            var position = Self.ghosttyMousePosition(for: locationInWindow, in: self)
+            if isSelectionDragActive { position.y = min(max(position.y, Self.dragPointerEdgeInset), frame.height - Self.dragPointerEdgeInset) }
+            ghostty_surface_mouse_pos(surface, position.x, position.y, Self.ghosttyMouseModifiers(for: modifierFlags))
             ghostty_surface_refresh(surface)
         }
 
@@ -1032,42 +1119,283 @@
             suppressedFocusOnlyMouseButtonNumbers.remove(event.buttonNumber) != nil
         }
 
-        /// Clears the terminal's shared selection before a plain left click reaches the session, the
-        /// same way clicking away from a selection in any text view drops it. Shift is the local
-        /// escape hatch for extending a selection (matching `mouseButtonBelongsToSession`'s shift
-        /// carve-out), so a shift-click never clears here. Not gated on attachment ownership: any
-        /// client whose plain click would otherwise land on the shared selection may clear it.
-        ///
-        /// Reading the applied frame's viewport-projected selection means a selection scrolled
-        /// wholly off this viewport does not clear on click, deliberately. The export omits a
-        /// selection with no viewport overlap, and a click with no visible highlight means focus,
-        /// not deselect: the selection stays anchored (and copyable in full) until a viewer that
-        /// shows it clicks it away or a new selection replaces it. See the click-to-clear scope
-        /// note in docs/spec.md.
-        private func clearSharedSelectionIfNeeded(for event: NSEvent) {
-            guard !event.modifierFlags.contains(.shift) else { return }
-            let hasAppliedSelection = lastAppliedRenderFrameIdentity?.snapshot?.selection != nil
-            let hasPaintedSurfaceSelection = mirrorSurface().map { ghostty_surface_has_selection($0) } ?? false
-            guard hasAppliedSelection || hasPaintedSurfaceSelection else { return }
-            onClearSelection?()
+        // MARK: - Client selection
+        //
+        // The mirror surface runs Ghostty's gesture (cell, word or line by click count; Option for a
+        // rectangle; shift-click to extend; a click clears) on the frame it shows. This pane reads the
+        // result back after each local mouse event, folds it into absolute rows
+        // (`TerminalSelectionDrag`), and keeps that as the selection: every frame is then painted with
+        // its projection, and the mirror is repainted between frames when Ghostty's result differs (an
+        // anchor scrolled off the grid).
+
+        /// Replaces the selection from outside a gesture (select-all, or typing clearing it) and paints it.
+        /// Such a selection has no press behind it, so no anchor is kept.
+        func setClientSelection(_ selection: TerminalAbsoluteSelection?) {
+            guard selection != clientSelection || selectionDrag != nil else { return }
+            clientSelection = selection
+            selectionDrag = nil
+            endSelectionDrag()
+            paintClientSelection()
         }
 
-        /// Reports whatever local drag selection the mirror surface is now showing as the terminal's
-        /// new shared selection. `ghostty_mirror_selection_info` reports viewport-relative, signed
-        /// rows (an anchor scrolled above the visible grid still reads at its true row), which
-        /// `absoluteSelectionRow` rebases onto the scrollbar offset of the viewport this mirror last
-        /// painted. No-op when the mirror has no selection open: a click with no drag, or a release
-        /// this pane never captured because the session's application owns the mouse.
-        private func commitLocalSelectionIfPresent() {
-            guard let mirror else { return }
+        /// A frame of another history epoch renumbered its rows, which ends the selection and any drag
+        /// anchored in the old numbering. Nothing is painted here: the frame about to be applied carries
+        /// no selection.
+        ///
+        /// This is also what ends a selection when the session's run changes. A relaunch, a handoff
+        /// resume or any other rebuild of the host's terminal mints a new incarnation, which the host
+        /// folds into the `historyEpoch` of every frame it exports, so no separate run check is needed.
+        ///
+        /// A drag whose anchor column the grid no longer has (a program narrowed it) ends too, with its
+        /// selection: the cell it grows from is gone, and growing from a clamped column would select text
+        /// the user never started on. Rows have no such rule, since an anchor above or below the grid is
+        /// what scrolling a drag produces.
+        private func dropClientSelectionNotInEpoch(of snapshot: GhosttyTerminalSnapshot) {
+            if let selection = clientSelection, selection.historyEpoch != snapshot.historyEpoch { clientSelection = nil }
+            if let drag = selectionDrag, drag.historyEpoch != snapshot.historyEpoch || drag.anchor.column >= snapshot.columns {
+                selectionDrag = nil
+                clientSelection = nil
+                endSelectionDrag()
+            }
+        }
+
+        private var lastLiveHistoryEpoch: UInt64?
+
+        /// The host reports every live frame's epoch, painted or not: while the replay is on screen the
+        /// live frames are not handed to `update(frame:)`, so a clear, reset or screen switch would
+        /// otherwise leave a highlight in the old numbering. Only a selection or drag made in the
+        /// previous live epoch ends. A selection made on an unaligned replay is numbered in the replay's
+        /// own epoch and must survive live frames that merely differ from it.
+        func noteLiveFrameEpoch(_ epoch: UInt64) {
+            defer { lastLiveHistoryEpoch = epoch }
+            guard let previous = lastLiveHistoryEpoch, previous != epoch else { return }
+            if let selection = clientSelection, selection.historyEpoch == previous {
+                clientSelection = nil
+                paintClientSelection()
+            }
+            if let drag = selectionDrag, drag.historyEpoch == previous {
+                selectionDrag = nil
+                clientSelection = nil
+                endSelectionDrag()
+                paintClientSelection()
+            }
+        }
+
+        private func endSelectionDrag() {
+            isSelectionDragActive = false
+            selectionPointer = nil
+            selectionAutoscrollTask?.cancel()
+            selectionAutoscrollTask = nil
+        }
+
+        /// The snapshot as it is painted: the client's selection in place of any the frame carries.
+        private func paintedSnapshot(_ snapshot: GhosttyTerminalSnapshot) -> GhosttyTerminalSnapshot {
+            guard snapshot.selection != nil || clientSelection != nil else { return snapshot }
+            return snapshot.withClientSelection(clientSelection)
+        }
+
+        private func selectionGesturePressed(_ event: NSEvent) {
+            guard let snapshot = shownSnapshot, let cell = gridCell(at: event.locationInWindow) else { return }
+            onUserChangedSelection?()
+            onSelectionPressed?()
+            guard !mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else {
+                // The program owns this click, and Ghostty has already cleared the mirror's selection.
+                clientSelection = nil
+                selectionDrag = nil
+                endSelectionDrag()
+                return
+            }
+            let extendsSelection = event.modifierFlags.contains(.shift) && clientSelection != nil && selectionDrag != nil
+            if !extendsSelection {
+                let column = min(max(cell.column, 0), snapshot.columns - 1)
+                let row = min(max(cell.row, 0), snapshot.rows - 1)
+                selectionDrag = TerminalSelectionDrag(
+                    anchor: TerminalAbsoluteCell(column: column, row: Int64(clamping: snapshot.historyRowBase) + Int64(row)),
+                    historyEpoch: snapshot.historyEpoch)
+            }
+            isSelectionDragActive = true
+            selectionPointer = (event.locationInWindow, event.modifierFlags)
+            reconcileClientSelection()
+        }
+
+        private func selectionGestureMoved(_ event: NSEvent) {
+            guard isSelectionDragActive else {
+                // The model ended this drag but Ghostty's gesture runs on until the button is released,
+                // and would highlight what it resolves.
+                if clientSelection == nil { paintClientSelection() }
+                return
+            }
+            selectionPointer = (event.locationInWindow, event.modifierFlags)
+            reconcileClientSelection()
+            updateSelectionAutoscroll()
+        }
+
+        /// The release keeps the drag (its anchor is what a later shift-click extends from) and ends only
+        /// the gesture.
+        private func selectionGestureReleased(_ event: NSEvent) {
+            guard isSelectionDragActive else { return }
+            selectionPointer = (event.locationInWindow, event.modifierFlags)
+            reconcileClientSelection()
+            endSelectionDrag()
+        }
+
+        /// Reads what Ghostty's gesture resolved on the shown frame, merges it into the drag, keeps the
+        /// result as the selection, and repaints the mirror when it shows something else.
+        private func reconcileClientSelection() {
+            guard let mirror, let snapshot = shownSnapshot, let pointer = selectionPointer, let cell = gridCell(at: pointer.location) else { return }
             var info = ghostty_mirror_selection_info_s()
             ghostty_mirror_selection_info(mirror, &info)
-            guard info.present else { return }
-            let scrollbarOffset = lastAppliedRenderFrameIdentity?.snapshot?.scrollbarOffset ?? 0
-            let startRow = GhosttyMirrorSelectionMarshalling.absoluteSelectionRow(virtualRow: info.start_y, scrollbarOffset: scrollbarOffset)
-            let endRow = GhosttyMirrorSelectionMarshalling.absoluteSelectionRow(virtualRow: info.end_y, scrollbarOffset: scrollbarOffset)
-            onSetSelection?(info.start_x, startRow, info.end_x, endRow, info.rectangle)
+            guard var drag = selectionDrag else {
+                // A gesture the model dropped (the history epoch changed under it) must not leave Ghostty's
+                // result highlighted.
+                if info.present { paintMirrorSelection(nil) }
+                return
+            }
+            let resolution =
+                info.present
+                ? TerminalSelectionDragResolution(
+                    startColumn: Int(info.start_x), startRow: Int(info.start_y), endColumn: Int(info.end_x), endRow: Int(info.end_y),
+                    isRectangle: info.rectangle) : nil
+            let merged = drag.merge(
+                resolution, pointerColumn: min(max(cell.column, 0), snapshot.columns - 1), pointerRow: cell.row,
+                in: TerminalSelectionDragFrame(snapshot: snapshot))
+            selectionDrag = drag
+            clientSelection = merged
+            let projected = merged?.projection(onto: snapshot)
+            if !Self.range(projected, matches: info) { paintMirrorSelection(projected) }
         }
+
+        /// Gives Ghostty a selection to extend when a Shift-click comes after the selection scrolled wholly
+        /// off the grid.
+        ///
+        /// Ghostty extends on Shift-click only when its surface shows a selection, and a selection with no
+        /// rows on this frame projects to nothing, so the click would start a new selection instead. The
+        /// fork seats the click pin on the stand-in corner cell for an off-grid anchor (top-left above the
+        /// viewport, bottom-right below; a rectangle keeps the anchor's column), so painting that one cell
+        /// is enough for Ghostty to extend from it. The stand-in's anchor side is not the true one, which
+        /// is fine: the drag merge keeps the anchor side it knows and takes only the click's side from
+        /// Ghostty, then repaints the merged selection.
+        private func paintStandInAnchorForShiftExtend(_ event: NSEvent) {
+            guard event.modifierFlags.contains(.shift), clientSelection != nil, let drag = selectionDrag, let snapshot = shownSnapshot else { return }
+            guard !mouseButtonBelongsToSession(modifierFlags: event.modifierFlags), let mirror else { return }
+            var info = ghostty_mirror_selection_info_s()
+            ghostty_mirror_selection_info(mirror, &info)
+            guard !info.present else { return }
+            let frame = TerminalSelectionDragFrame(snapshot: snapshot)
+            let anchorRow = drag.anchorViewportRow(in: frame)
+            guard anchorRow < 0 || anchorRow >= snapshot.rows else { return }
+            let isRectangle = clientSelection?.isRectangle ?? false
+            let above = anchorRow < 0
+            let column = isRectangle ? min(max(drag.anchor.column, 0), snapshot.columns - 1) : (above ? 0 : snapshot.columns - 1)
+            let row = above ? 0 : snapshot.rows - 1
+            paintMirrorSelection(
+                GhosttyTerminalSelectionRange(
+                    startColumn: UInt16(column), startRow: UInt16(row), endColumn: UInt16(column), endRow: UInt16(row), isRectangle: isRectangle,
+                    extendsAbove: false, extendsBelow: false))
+        }
+
+        /// Right-click outside the selection makes Ghostty select the word under the pointer in the
+        /// mirror (`right-click-action = context-menu`); that word becomes this pane's selection. A click
+        /// inside the selection leaves the mirror showing what the pane already holds.
+        private func adoptMirrorSelectionAfterRightClick() {
+            guard let mirror, let snapshot = shownSnapshot else { return }
+            var info = ghostty_mirror_selection_info_s()
+            ghostty_mirror_selection_info(mirror, &info)
+            guard info.present, !Self.range(clientSelection?.projection(onto: snapshot), matches: info) else { return }
+            onUserChangedSelection?()
+            let base = Int64(clamping: snapshot.historyRowBase)
+            clientSelection = TerminalAbsoluteSelection(
+                from: TerminalAbsoluteCell(column: Int(info.start_x), row: base + Int64(info.start_y)),
+                to: TerminalAbsoluteCell(column: Int(info.end_x), row: base + Int64(info.end_y)), isRectangle: info.rectangle,
+                historyEpoch: snapshot.historyEpoch)
+            selectionDrag = nil
+        }
+
+        private func paintClientSelection() {
+            guard let snapshot = shownSnapshot else { return }
+            paintMirrorSelection(clientSelection?.projection(onto: snapshot))
+        }
+
+        /// Paints the mirror's selection without touching its gesture, its click pin or the pasteboard.
+        private func paintMirrorSelection(_ range: GhosttyTerminalSelectionRange?) {
+            guard let mirror else { return }
+            ghostty_mirror_set_selection(
+                mirror, range != nil, range?.isRectangle ?? false, range?.startColumn ?? 0, range?.startRow ?? 0, range?.endColumn ?? 0,
+                range?.endRow ?? 0)
+            scheduleSurfacePresentationRefresh()
+        }
+
+        private static func range(_ range: GhosttyTerminalSelectionRange?, matches info: ghostty_mirror_selection_info_s) -> Bool {
+            guard let range else { return !info.present }
+            return info.present && range.isRectangle == info.rectangle && range.startColumn == info.start_x && Int32(range.startRow) == info.start_y
+                && range.endColumn == info.end_x && Int32(range.endRow) == info.end_y
+        }
+
+        // MARK: Auto-scroll
+
+        /// Ghostty starts a selection scroll when the pointer is within a pixel of the top or bottom edge
+        /// or past it.
+        private func selectionAutoscrollDirection() -> TerminalSelectionAutoscroll.Direction? {
+            guard let pointer = selectionPointer else { return nil }
+            let y = convert(pointer.location, from: nil).y
+            if y >= bounds.maxY - 1 { return .towardOlderRows }
+            if y <= bounds.minY + 1 { return .towardNewerRows }
+            return nil
+        }
+
+        private func updateSelectionAutoscroll() {
+            guard isSelectionDragActive, selectionAutoscrollDirection() != nil else {
+                selectionAutoscrollTask?.cancel()
+                selectionAutoscrollTask = nil
+                return
+            }
+            guard selectionAutoscrollTask == nil else { return }
+            selectionAutoscrollTask = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: TerminalSelectionAutoscroll.interval)
+                    guard let self, !Task.isCancelled else { return }
+                    self.performSelectionAutoscrollTick()
+                }
+            }
+        }
+
+        /// Scrolls one row toward the edge the pointer is past, through the host's selection autoscroll
+        /// (the pane's replay only: like Ghostty's own selection scroll it moves a viewport and never
+        /// reaches the program, which a wheel event would), then re-resolves the drag at the unmoved
+        /// pointer against the content now under it.
+        func performSelectionAutoscrollTick() {
+            guard isSelectionDragActive, let direction = selectionAutoscrollDirection(), let pointer = selectionPointer else {
+                selectionAutoscrollTask?.cancel()
+                selectionAutoscrollTask = nil
+                return
+            }
+            onSelectionAutoscroll?(direction == .towardOlderRows)
+            sendMousePosition(locationInWindow: pointer.location, modifierFlags: pointer.modifierFlags)
+            reconcileClientSelection()
+        }
+
+        // MARK: Context menu
+
+        private func makeContextMenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            let copyItem = NSMenuItem(title: "Copy", action: #selector(contextMenuCopy(_:)), keyEquivalent: "")
+            copyItem.isEnabled = clientSelection != nil
+            let pasteItem = NSMenuItem(title: "Paste", action: #selector(contextMenuPaste(_:)), keyEquivalent: "")
+            pasteItem.isEnabled = acceptsTerminalInput
+            let selectAllItem = NSMenuItem(title: "Select All", action: #selector(contextMenuSelectAll(_:)), keyEquivalent: "")
+            for item in [copyItem, pasteItem, selectAllItem] {
+                item.target = self
+                menu.addItem(item)
+            }
+            return menu
+        }
+
+        // The menu's actions are the pane's own copy, paste and select-all, found on the responder chain
+        // above this view, so they run the same ownership checks and flows as the keyboard shortcuts.
+        @objc private func contextMenuCopy(_ sender: Any?) { _ = nextResponder?.tryToPerform(#selector(NSText.copy(_:)), with: sender) }
+        @objc private func contextMenuPaste(_ sender: Any?) { _ = nextResponder?.tryToPerform(#selector(NSText.paste(_:)), with: sender) }
+        @objc private func contextMenuSelectAll(_ sender: Any?) { _ = nextResponder?.tryToPerform(#selector(NSText.selectAll(_:)), with: sender) }
 
         @discardableResult private func updateSurfaceGeometry() -> Bool {
             guard let mirror, let surface = mirrorSurface(), let backingSize = backingPixelSize() else { return false }
@@ -1173,7 +1501,6 @@
                 }
                 lastAppliedRenderFrameIdentity = identity
                 frameApplyRetry = nil
-                scrollRectCarryBuffer.clear()
                 debugRenderFrameApplyCount += 1
                 return
             }
@@ -1208,8 +1535,8 @@
                 return
             }
             lastAppliedRenderFrameIdentity = identity
+            shownSnapshot = frame.snapshot
             frameApplyRetry = nil
-            scrollRectCarryBuffer.clear()
             GhosttyMirrorAppService.shared.tick()
             surfaceHostView.needsDisplay = true
             scheduleSurfacePresentationRefresh()
@@ -1281,8 +1608,24 @@
 
         private func withCFrame(_ frame: GhosttyRenderFrame, _ body: (UnsafePointer<ghostty_render_frame_s>) -> Bool) -> Bool {
             guard frame.version == GhosttyRenderFrame.currentVersion else { return false }
-            let snapshot = frame.snapshot
+            let snapshot = paintedSnapshot(frame.snapshot)
             guard snapshot.columns > 0, snapshot.rows > 0, snapshot.columns <= Int(UInt16.max), snapshot.rows <= Int(UInt16.max) else { return false }
+            // The press cell, projected onto this frame (negative or past the last row when its text is
+            // off screen). The fork seats Ghostty's click pin there, so a drag in progress resolves from
+            // the true anchor and a later shift-click extends from it.
+            //
+            // A rectangle's anchor row is clamped onto the grid, keeping its true column. The fork seats a
+            // rectangle's click pin on exactly that cell, but it only knows the shape from the frame's
+            // selection flags, and a rectangle wholly off screen projects to a frame without any. Left
+            // unclamped, the pin would fall back to the stream stand-in corner (column 0 or the last
+            // column) and a Shift+Option-click would extend from the wrong column band.
+            let isRectangle = clientSelection?.isRectangle ?? false
+            let dragAnchor = selectionDrag.flatMap { drag -> (column: Int32, row: Int32)? in
+                guard drag.historyEpoch == snapshot.historyEpoch else { return nil }
+                var row = drag.anchorViewportRow(in: TerminalSelectionDragFrame(snapshot: snapshot))
+                if isRectangle { row = min(max(row, 0), snapshot.rows - 1) }
+                return (Int32(clamping: drag.anchor.column), Int32(clamping: row))
+            }
             // The C cell's link fields are export-only — applying a snapshot ignores them — so they
             // stay zeroed here and a cell's OSC 8 target travels no further than the Swift snapshot.
             // Nothing consumes those targets for interaction yet: a mirrored link whose label is not
@@ -1297,15 +1640,6 @@
             var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
             let selectionFields = GhosttyMirrorSelectionMarshalling.cSnapshotSelectionFields(
                 selection: snapshot.selection, scrollbarTotal: snapshot.scrollbarTotal, scrollbarOffset: snapshot.scrollbarOffset)
-            // Read before the apply attempt below and cleared by the caller only once that attempt
-            // succeeds, so a refused frame leaves the gap it covers in the buffer for the next attempt.
-            var scrollRects = scrollRectCarryBuffer.rects.map { rect in
-                ghostty_render_scroll_rect_s(
-                    row_start: UInt16(clamping: rect.rowStart), row_count: UInt16(clamping: rect.rowCount),
-                    column_start: UInt16(clamping: rect.columnStart), column_count: UInt16(clamping: rect.columnCount),
-                    delta_rows: Int32(clamping: rect.deltaRows), delta_columns: Int32(clamping: rect.deltaColumns))
-            }
-            let scrollCarryValid = scrollRectCarryBuffer.isCarryValid
             return clusterExtras.codepoints.withUnsafeMutableBufferPointer { extras in
                 if let base = extras.baseAddress {
                     for placement in clusterExtras.placements {
@@ -1314,39 +1648,37 @@
                     }
                 }
                 return cells.withUnsafeMutableBufferPointer { buffer in
-                    scrollRects.withUnsafeMutableBufferPointer { scrollRectsBuffer in
-                        var cSnapshot = ghostty_terminal_snapshot_s()
-                        cSnapshot.columns = UInt16(snapshot.columns)
-                        cSnapshot.rows = UInt16(snapshot.rows)
-                        cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
-                        cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
-                        cSnapshot.cursor_visible = snapshot.cursorVisible
-                        cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
-                        cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
-                        cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
-                        cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
-                        cSnapshot.cell_count = buffer.count
-                        cSnapshot.cells = buffer.baseAddress
-                        cSnapshot.scroll_rect_count = scrollRectsBuffer.count
-                        cSnapshot.scroll_rects = scrollRectsBuffer.baseAddress
-                        cSnapshot.scroll_carry_valid = scrollCarryValid
-                        cSnapshot.selection_flags = selectionFields.selectionFlags
-                        cSnapshot.selection_start_x = selectionFields.selectionStartX
-                        cSnapshot.selection_start_y = selectionFields.selectionStartY
-                        cSnapshot.selection_end_x = selectionFields.selectionEndX
-                        cSnapshot.selection_end_y = selectionFields.selectionEndY
-                        cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
-                        cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
+                    var cSnapshot = ghostty_terminal_snapshot_s()
+                    cSnapshot.columns = UInt16(snapshot.columns)
+                    cSnapshot.rows = UInt16(snapshot.rows)
+                    cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
+                    cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
+                    cSnapshot.cursor_visible = snapshot.cursorVisible
+                    cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
+                    cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                    cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
+                    cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
+                    cSnapshot.cell_count = buffer.count
+                    cSnapshot.cells = buffer.baseAddress
+                    cSnapshot.selection_flags = selectionFields.selectionFlags
+                    cSnapshot.selection_start_x = selectionFields.selectionStartX
+                    cSnapshot.selection_start_y = selectionFields.selectionStartY
+                    cSnapshot.selection_end_x = selectionFields.selectionEndX
+                    cSnapshot.selection_end_y = selectionFields.selectionEndY
+                    cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
+                    cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
+                    cSnapshot.drag_anchor_valid = dragAnchor != nil
+                    cSnapshot.drag_anchor_x = dragAnchor?.column ?? 0
+                    cSnapshot.drag_anchor_y = dragAnchor?.row ?? 0
 
-                        var cFrame = ghostty_render_frame_s()
-                        cFrame.version = UInt32(frame.version)
-                        cFrame.session_revision = frame.sessionRevision ?? 0
-                        cFrame.owner_epoch = frame.ownerEpoch
-                        cFrame.columns = UInt16(snapshot.columns)
-                        cFrame.rows = UInt16(snapshot.rows)
-                        cFrame.snapshot = cSnapshot
-                        return withUnsafePointer(to: &cFrame, body)
-                    }
+                    var cFrame = ghostty_render_frame_s()
+                    cFrame.version = UInt32(frame.version)
+                    cFrame.session_revision = frame.sessionRevision ?? 0
+                    cFrame.owner_epoch = frame.ownerEpoch
+                    cFrame.columns = UInt16(snapshot.columns)
+                    cFrame.rows = UInt16(snapshot.rows)
+                    cFrame.snapshot = cSnapshot
+                    return withUnsafePointer(to: &cFrame, body)
                 }
             }
         }

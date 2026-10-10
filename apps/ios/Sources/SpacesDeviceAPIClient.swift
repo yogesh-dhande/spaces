@@ -378,8 +378,8 @@ struct SpacesDeviceAPIClient: Sendable {
 
     /// Reports that the user stayed on `sessionID` for `focusedForSeconds`, so the device clears what a
     /// visit clears, among the named `keys` whose dwell completed.
-    func visitTerminalSession(sessionID: String, focusedForSeconds: Double, keys: [String], commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
-        -> SpacesDeviceAPIResponse
+    func visitTerminalSession(sessionID: String, focusedForSeconds: Double, keys: [String], commandChannel: SpacesDeviceAPICommandChannel? = nil)
+        async throws -> SpacesDeviceAPIResponse
     {
         try await mutation(
             .init(
@@ -387,9 +387,9 @@ struct SpacesDeviceAPIClient: Sendable {
                 authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
-    func setComeBackLater(
-        rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String, isOn: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil
-    ) async throws -> SpacesDeviceAPIResponse {
+    func setComeBackLater(rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String, isOn: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil)
+        async throws -> SpacesDeviceAPIResponse
+    {
         try await mutation(
             .init(
                 command: .setComeBackLater(.init(rowKind: rowKind, rowID: rowID, isOn: isOn)), authToken: settings.trimmedAuthToken,
@@ -710,36 +710,6 @@ struct SpacesDeviceAPIClient: Sendable {
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
-    /// Clears the daemon's shared selection for every viewer of the session, not just this client. Not
-    /// owner-gated: iOS never creates a selection (#514), it only ever clears the one the daemon already
-    /// has, which any attached client may do regardless of who is driving the terminal.
-    func clearSelection(sessionID: String, clientID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)
-        async throws
-    {
-        let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .clearSelection, sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken,
-            clientApp: clientAppIdentity)
-        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
-    }
-
-    /// Reads the daemon's shared selection as plain text, including the parts scrolled out of the
-    /// viewport that painted highlight never carries. The Copy pill's only use of this: the highlight
-    /// itself is projected/clipped per frame, but the text this returns is always the full selection.
-    func readSelectionText(sessionID: String, clientID: String, timeout: Duration = .seconds(6), commandChannel: SpacesDeviceAPICommandChannel? = nil)
-        async throws -> String
-    {
-        let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .readSelectionText, sessionID: sessionID, clientID: clientID)),
-            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
-        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
-        guard let selectionText = response.terminalSelectionText else {
-            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return selection text.")
-        }
-        return selectionText
-    }
-
     /// Reads a range of the session's persisted output transcript, which the phone replays into its
     /// client-local scrollback model. `fromByteOffset` continues a replay the phone already holds (the
     /// daemon then returns exactly `[fromByteOffset, total)`); without it the daemon returns a `maxBytes`
@@ -831,6 +801,23 @@ struct SpacesDeviceAPIClient: Sendable {
                     action: .mouseButton, sessionID: context.sessionID, clientID: context.clientID, ownerEpoch: context.ownerEpoch,
                     mouseButton: button, mousePressed: pressed, mousePointerX: pointerPosition?.x, mousePointerY: pointerPosition?.y,
                     mousePointerMods: pointerPosition?.mods)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
+    /// Sends pointer motion to the session's terminal for a program that tracks the mouse (a drag in
+    /// vim or tmux, a hover in a mode 1003 program). The pointer is a cell center, like a mouse button's.
+    /// The host reports the motion with whichever button it was last sent a press for.
+    func mouseMotion(
+        context: TerminalCommandContext, pointerPosition: TerminalScrollPointerPosition, timeout: Duration = .seconds(3),
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalControl(
+                .init(
+                    action: .mouseMotion, sessionID: context.sessionID, clientID: context.clientID, ownerEpoch: context.ownerEpoch,
+                    mousePointerX: pointerPosition.x, mousePointerY: pointerPosition.y, mousePointerMods: pointerPosition.mods)),
+            authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }

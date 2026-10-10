@@ -1,16 +1,14 @@
 import Foundation
 import spacesterminalcore
 
-/// Pure, MainActor-free helper that maps the shared-selection/scrollbar wire model
+/// Pure, MainActor-free helper that maps the client-painted selection/scrollbar model
 /// (`GhosttyTerminalSelectionRange`) onto the GhosttyKit C frame fields the iOS mirror surface reads
 /// (`ghostty_terminal_snapshot_s`'s `selection_flags`/`selection_start_*`/`selection_end_*`/`scrollbar_*`).
 ///
 /// This duplicates `GhosttyMirrorSelectionMarshalling` from the macOS-only `spacesterminalghostty` target
 /// rather than importing it: `spacesterminalmobileghostty` depends only on `spacesterminalcore` and
 /// `GhosttyKit`, not on the AppKit mirror target, so the mapping is kept here instead as its own small,
-/// independently testable unit. iOS never drags a local selection, so unlike the macOS counterpart this
-/// has no scroll-rect carry buffer or absolute-row conversion: the mirrored selection is always the
-/// daemon's shared selection, applied read-only.
+/// independently testable unit.
 enum GhosttyRemoteTerminalSelectionMarshalling {
     /// Bit layout `ghostty_terminal_snapshot_s.selection_flags` expects: bit 0 present, bit 1 rectangle,
     /// bit 2 extends_above, bit 3 extends_below.

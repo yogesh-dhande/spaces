@@ -24,7 +24,7 @@ import ghosttyvtshim
         #expect(spaces_ghostty_vt_session_copy_snapshot(session, &raw))
         defer { spaces_ghostty_vt_snapshot_free(&raw) }
         return GhosttyVtSessionBridge.snapshot(
-            from: raw, mouseReportingActive: false, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session))
+            from: raw, mouseTrackingLevel: .none, alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: session))
     }
 
     /// A fresh session is on the primary screen, mode 1049 moves it to the alternate screen, and

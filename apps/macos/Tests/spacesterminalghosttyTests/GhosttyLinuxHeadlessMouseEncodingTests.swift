@@ -111,6 +111,15 @@
             }
         }
 
+        /// Moves the pointer to the last column of the top row: a cell center the report names as column
+        /// greater than 1, whatever the session's grid size is.
+        @discardableResult private func sendMotion(to core: Box<GhosttyEmbeddedSessionCore>) -> TerminalControlResponse {
+            TerminalEngineActor.runSynchronously {
+                core.value.handleControlRequest(
+                    TerminalControlRequest(command: "mouseMotion", mousePointerX: 0.99, mousePointerY: 0, mousePointerMods: 0))
+            }
+        }
+
         @discardableResult private func sendWheel(vertical: Double, horizontal: Double = 0, to core: Box<GhosttyEmbeddedSessionCore>)
             -> TerminalControlResponse
         {
@@ -160,6 +169,94 @@
             try? await Task.sleep(for: .milliseconds(300))
             let output = Self.transcript(at: outputPath)
             #expect(!output.contains("^[[<"), "no mouse report may reach a program that is not tracking: \(output)")
+
+            await shutDownAndDrain(core)
+        }
+
+        /// Any-event tracking (`CSI ? 1003 h`) wants motion with no button held: a hover. The SGR code for
+        /// motion with no button is 35.
+        @Test func hoverMotionReachesTheChildUnderAnyEventTracking() async throws {
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[?1003h\\033[?1006h")
+            defer {
+                terminate(core)
+                cleanup()
+            }
+
+            let motion = sendMotion(to: core)
+            #expect(motion.ok, "a motion must be accepted: \(motion.message)")
+            try await waitUntil("hover motion must arrive as an SGR motion report") { Self.transcript(at: outputPath).contains("^[[<35;") }
+
+            await shutDownAndDrain(core)
+        }
+
+        /// Button-event tracking (`CSI ? 1002 h`) wants motion only while a button the host was sent is
+        /// held: a drag. The SGR code for motion with the left button down is 32.
+        @Test func dragMotionReachesTheChildOnlyBetweenAPressAndItsRelease() async throws {
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[?1002h\\033[?1006h")
+            defer {
+                terminate(core)
+                cleanup()
+            }
+
+            sendMotion(to: core)
+            try? await Task.sleep(for: .milliseconds(300))
+            #expect(!Self.transcript(at: outputPath).contains("^[[<3"), "motion with no button held must not be reported")
+
+            sendTopLeftClick(pressed: true, to: core)
+            try await waitUntil("the press must arrive") { Self.transcript(at: outputPath).contains("^[[<0;1;1M") }
+            let motion = sendMotion(to: core)
+            #expect(motion.ok, "a motion must be accepted: \(motion.message)")
+            try await waitUntil("a drag motion must arrive as an SGR motion report with the button held") {
+                Self.transcript(at: outputPath).contains("^[[<32;")
+            }
+
+            sendTopLeftClick(pressed: false, to: core)
+            try await waitUntil("the release must arrive") { Self.transcript(at: outputPath).contains("^[[<0;1;1m") }
+            sendMotion(to: core)
+            try? await Task.sleep(for: .milliseconds(300))
+            let output = Self.transcript(at: outputPath)
+            #expect(Self.occurrences(of: "^[[<32;", in: output) == 1, "motion after the release must not be reported: \(output)")
+            #expect(!output.contains("^[[<35;"), "button-event tracking never reports hover: \(output)")
+
+            await shutDownAndDrain(core)
+        }
+
+        /// Ghostty tracks the latest tracking-mode request, not the widest: `1003h` then `1000h` leaves both
+        /// mode bits set but tracks clicks only, so no hover is reported and the frame level reads clicks.
+        @Test func laterClicksOnlyRequestOverridesAnyEventTracking() async throws {
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[?1003h\\033[?1000h\\033[?1006h")
+            defer {
+                terminate(core)
+                cleanup()
+            }
+
+            let level = TerminalEngineActor.runSynchronously { core.value.debugMouseTrackingLevel }
+            #expect(level == .clicks)
+            let motion = sendMotion(to: core)
+            #expect(motion.ok, "an unreported motion is still a successful no-op: \(motion.message)")
+            sendTopLeftClick(pressed: true, to: core)
+            try await waitUntil("the press must arrive") { Self.transcript(at: outputPath).contains("^[[<0;1;1M") }
+            let output = Self.transcript(at: outputPath)
+            #expect(!output.contains("^[[<35;") && !output.contains("^[[<32;"), "clicks-only tracking must not receive motion: \(output)")
+
+            await shutDownAndDrain(core)
+        }
+
+        /// Clicks-only tracking (`CSI ? 1000 h`) never receives motion, with or without a button.
+        @Test func motionIsNotReportedUnderClicksOnlyTracking() async throws {
+            let (core, outputPath, cleanup) = try await startEchoSession(programEnables: "\\033[?1000h\\033[?1006h")
+            defer {
+                terminate(core)
+                cleanup()
+            }
+
+            sendTopLeftClick(pressed: true, to: core)
+            try await waitUntil("the press must arrive") { Self.transcript(at: outputPath).contains("^[[<0;1;1M") }
+            let motion = sendMotion(to: core)
+            #expect(motion.ok, "an unreported motion is still a successful no-op: \(motion.message)")
+            try? await Task.sleep(for: .milliseconds(300))
+            let output = Self.transcript(at: outputPath)
+            #expect(!output.contains("^[[<32;") && !output.contains("^[[<35;"), "clicks-only tracking must not receive motion: \(output)")
 
             await shutDownAndDrain(core)
         }

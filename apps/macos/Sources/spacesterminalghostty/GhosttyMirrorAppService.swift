@@ -58,20 +58,20 @@
                 return true
             }
             runtimeConfig.read_clipboard_cb = { userdata, location, state, mimes, mimesCount, list in
-                GhosttyClipboardBridge.readClipboard(userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
+                GhosttyClipboardBridge.readClipboard(
+                    userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
             }
             runtimeConfig.confirm_read_clipboard_cb = { userdata, confirm, state, _ in
                 GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, confirm: confirm, state: state)
             }
             runtimeConfig.write_clipboard_cb = { _, kind, content, len, _ in
-                // A mirror's local drag selection must never reach the pasteboard from here: that write
-                // would be viewport-clipped (it only knows what this mirror can see) and would race with
-                // the daemon's setSelection response, which is the single, authoritative pasteboard
-                // writer for a shared-selection commit (see GhosttyMirrorTerminalView's mouse-up
-                // handling). Ghostty's own copy-on-select defaults to `none` on macOS and the generated
-                // config never enables it, so no such write is expected; any that does arrive is
-                // reported as GHOSTTY_CLIPBOARD_SELECTION (`supports_selection_clipboard` above) and
-                // dropped. Explicit copy (Cmd+C, OSC 52) reports GHOSTTY_CLIPBOARD_STANDARD and writes.
+                // A mirror's selection must never reach the pasteboard from here: it would be
+                // viewport-clipped (it only knows what this mirror can see), whereas a copy reads the
+                // pane's replay through `RemoteGhosttySessionHost.copySelectionToPasteboard`, which
+                // reaches rows above the viewport. Ghostty's own copy-on-select defaults to `none` on
+                // macOS and the generated config never enables it, so no such write is expected; any
+                // that does arrive is reported as GHOSTTY_CLIPBOARD_SELECTION
+                // (`supports_selection_clipboard` above) and dropped.
                 guard kind != GHOSTTY_CLIPBOARD_SELECTION else { return }
                 GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len))
             }

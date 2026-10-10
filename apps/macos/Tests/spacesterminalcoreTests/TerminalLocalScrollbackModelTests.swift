@@ -36,7 +36,8 @@ final class TerminalLocalScrollbackModelTests: XCTestCase {
             TerminalLocalScrollbackModel(
                 columns: columns, rows: rows, theme: theme ?? self.theme(), appearance: .dark, transcript: transcript,
                 transcriptStartByteOffset: startByteOffset, transcriptEndByteOffset: endByteOffset ?? (startByteOffset + UInt64(transcript.count)),
-                requestedByteCount: requestedByteCount ?? transcript.count, transcriptFileIdentity: fileIdentity, runIdentity: runIdentity))
+                requestedByteCount: requestedByteCount ?? transcript.count, transcriptFileIdentity: fileIdentity, runIdentity: runIdentity, stamps: []
+            ))
     }
 
     /// A page that is a capped suffix of a longer transcript: its bytes start well into the file, which is
@@ -98,7 +99,7 @@ final class TerminalLocalScrollbackModelTests: XCTestCase {
         let before = plainText(scrolled)
 
         let more = numberedTranscript(61...80)
-        XCTAssertTrue(model.append(more, transcriptEndByteOffset: UInt64(first.count + more.count)))
+        XCTAssertTrue(model.append(more, transcriptEndByteOffset: UInt64(first.count + more.count), stamps: []))
 
         XCTAssertEqual(plainText(model.currentSnapshot()), before)
         XCTAssertEqual(model.transcriptEndByteOffset, UInt64(first.count + more.count))
@@ -111,7 +112,7 @@ final class TerminalLocalScrollbackModelTests: XCTestCase {
         let rowsFromBottomBefore = model.rowsFromBottom
 
         let more = numberedTranscript(61...80)
-        XCTAssertTrue(model.append(more, transcriptEndByteOffset: UInt64(first.count + more.count)))
+        XCTAssertTrue(model.append(more, transcriptEndByteOffset: UInt64(first.count + more.count), stamps: []))
 
         XCTAssertEqual(model.rowsFromBottom, rowsFromBottomBefore + 20)
     }
@@ -216,7 +217,7 @@ final class TerminalLocalScrollbackModelTests: XCTestCase {
         XCTAssertEqual(model.transcriptFileIdentity, 4242)
 
         let short = Data("tail\r\n".utf8)
-        XCTAssertTrue(model.append(short, transcriptEndByteOffset: UInt64(first.count + short.count)))
+        XCTAssertTrue(model.append(short, transcriptEndByteOffset: UInt64(first.count + short.count), stamps: []))
 
         XCTAssertEqual(model.transcriptFileIdentity, 4242)
         XCTAssertEqual(model.transcriptEndByteOffset, UInt64(first.count + short.count))

@@ -638,8 +638,6 @@ import workspacecore
             scrollPointerMods: request.scrollPointerMods, mouseButton: request.mouseButton, mousePressed: request.mousePressed,
             mousePointerX: request.mousePointerX, mousePointerY: request.mousePointerY, mousePointerMods: request.mousePointerMods,
             appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance,
-            selectionStartColumn: request.selectionStartColumn, selectionStartRow: request.selectionStartRow,
-            selectionEndColumn: request.selectionEndColumn, selectionEndRow: request.selectionEndRow, selectionRectangle: request.selectionRectangle,
             // The Mac's paired-device pane always wants the screen on an acknowledgment that carries state.
             // `DeviceTerminalSessionStateModel.apply` orders every payload by `emittedAt`, so a frameless
             // acknowledgment that outran the transfer's own broadcast would make the pane discard that

@@ -45,9 +45,12 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     /// The OSC 8 hyperlink target of each cell that belongs to a link, keyed by the cell's index into
     /// `cells`. Empty for a frame with no links.
     public let linkURLs: [Int: String]
-    /// True when the exporting terminal has a mouse tracking mode enabled. Clients arbitrate a pane
-    /// click against this: while it is set the click belongs to the application, not to selection.
-    public let mouseReportingActive: Bool
+    /// Which pointer input the exporting terminal's mouse tracking mode asks for. Clients arbitrate a
+    /// pane click against this (while any mode is on the click belongs to the application, not to
+    /// selection) and decide which pointer motion to forward from it.
+    public let mouseTrackingLevel: TerminalMouseTrackingLevel
+    /// True when the exporting terminal has a mouse tracking mode enabled.
+    public var mouseReportingActive: Bool { mouseTrackingLevel.isActive }
     /// The exporting terminal's shift-capture request as 0 = unset, 1 = false, 2 = true.
     public let mouseShiftCapture: UInt8
     /// True when the exporting terminal has the alternate screen active (DEC modes 1047/1049, which
@@ -62,14 +65,25 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     public let scrollbarTotal: UInt32
     /// Index of this viewport's top row within `scrollbarTotal`, where 0 is the oldest row.
     public let scrollbarOffset: UInt32
+    /// The absolute row of this snapshot's viewport row 0: rows ever pruned off the top of the
+    /// exporting terminal's history plus `scrollbarOffset`. A row keeps its absolute number as output
+    /// scrolls and prunes, so a client that holds a selection in absolute rows projects it onto any
+    /// frame by subtracting this base. Only comparable between frames with the same `historyEpoch`.
+    public let historyRowBase: UInt64
+    /// Opaque; changes whenever the exporting host's absolute row numbering was reset (a clear, a
+    /// reset, a column-changing resize, a primary/alternate screen switch, or the host rebuilding its
+    /// terminal). Only a change of value is meaningful, and equal values mean `historyRowBase` numbers
+    /// the same text.
+    public let historyEpoch: UInt64
 
     public static let mouseShiftCaptureUnset: UInt8 = 0
     public static let mouseShiftCaptureEnabled: UInt8 = 2
 
     public init(
         columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32,
-        cells: [Cell], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = 0,
-        alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
+        cells: [Cell], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseTrackingLevel: TerminalMouseTrackingLevel = .none,
+        mouseShiftCapture: UInt8 = 0, alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil,
+        scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0, historyEpoch: UInt64 = 0
     ) {
         self.columns = columns
         self.rows = rows
@@ -81,12 +95,25 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
         self.cells = cells
         self.clusters = Self.normalizedClusters(clusters, cellCount: cells.count)
         self.linkURLs = Self.normalizedLinkURLs(linkURLs, cellCount: cells.count)
-        self.mouseReportingActive = mouseReportingActive
+        self.mouseTrackingLevel = mouseTrackingLevel
         self.mouseShiftCapture = mouseShiftCapture
         self.alternateScreenActive = alternateScreenActive
         self.selection = selection
         self.scrollbarTotal = scrollbarTotal
         self.scrollbarOffset = scrollbarOffset
+        self.historyRowBase = historyRowBase
+        self.historyEpoch = historyEpoch
+    }
+
+    /// This snapshot with the host's epoch. The terminal export knows only Ghostty's own epoch; the host
+    /// owns the incarnation that makes it unique across terminal rebuilds.
+    public func withHistoryEpoch(_ historyEpoch: UInt64) -> GhosttyTerminalSnapshot {
+        GhosttyTerminalSnapshot(
+            columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible,
+            defaultForegroundRGB: defaultForegroundRGB, defaultBackgroundRGB: defaultBackgroundRGB, cells: cells, clusters: clusters,
+            linkURLs: linkURLs, mouseTrackingLevel: mouseTrackingLevel, mouseShiftCapture: mouseShiftCapture,
+            alternateScreenActive: alternateScreenActive, selection: selection, scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset,
+            historyRowBase: historyRowBase, historyEpoch: historyEpoch)
     }
 
     /// Records `cluster` as cell `index`'s text, or clears the cell's entry when the cluster is one the
@@ -142,37 +169,32 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
 public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
     public static let currentVersion = 1
 
-    /// Upper bound any accumulator of `scrollRects` across frames applies before falling back to the
-    /// overflowed state: content that moved through this many rects has scrolled far past any local
-    /// anchor worth carrying, and an unbounded accumulation (a stalled main actor coalescing frames, a
-    /// view that cannot apply for a while) would otherwise grow without limit. Shared by the reduction
-    /// pipeline's coalesce merge and the mirror view's drag-carry buffer so the two bounds cannot drift.
-    public static let maxAccumulatedScrollRects = 512
-
     public let version: Int
     public let sessionRevision: UInt64?
     public let ownerEpoch: UInt64
     public let columns: Int
     public let rows: Int
+    /// The picture. `GhosttyTerminalSnapshot` equality is picture equality, so equal snapshots can be
+    /// applied or skipped as identical without looking at where in the transcript they came from.
     public let snapshot: GhosttyTerminalSnapshot
-    /// How the terminal's content moved to produce this frame from the previously materialized one, so a
-    /// mirror view can carry a local drag-selection anchor across the repaint. Empty for a frame that is
-    /// not a delta continuation (an initial baseline, a full re-baseline, or a resync) — see
-    /// `scrollRectsOverflowed` for why those still need a value here.
-    public let scrollRects: [GhosttyRenderScrollRectOperation]
-    /// True when `scrollRects` cannot be trusted to fully describe how content moved since the previous
-    /// frame: either the producing delta's own scroll-rect ring buffer overflowed, or this frame is not a
-    /// delta continuation at all (a full/re-baseline frame carries the whole grid, not a diff, so it has
-    /// no scroll rects to report). A consumer accumulating rects across skipped frames must poison its
-    /// buffer whenever this is true. Defaults to true so that only a construction site that positively
-    /// knows how content moved since the previous frame (the delta materializer) can claim a trustworthy
-    /// carry; every other frame (baselines, replay repaints, daemon-side frames whose carry fields are
-    /// never read) is untrusted by default.
-    public let scrollRectsOverflowed: Bool
+    /// The `output.log` byte offset, in the coordinates of the file named by `transcriptFileIdentity`,
+    /// such that replaying the file's bytes `[0, transcriptByteOffset)` reproduces this frame's grid.
+    /// Zero when the frame did not come from a host that tracks it (client replay frames).
+    ///
+    /// Stamped on the frame, not the snapshot, because it says where a picture came from rather than
+    /// what it is: a chunk of output that changes no cell advances it without changing the picture, and
+    /// must not count as a different snapshot. A client aligning a replay reads the stamp from any
+    /// received frame, including one whose mirror apply was skipped as identical. An identical picture
+    /// at a later offset leaves the earlier frame's (offset, `snapshot.historyRowBase`) pair valid.
+    public let transcriptByteOffset: UInt64
+    /// The identity (inode) of the `output.log` file `transcriptByteOffset` is measured in, computed
+    /// by `TerminalTranscriptFileIdentity`; equals the transcript response's `fileIdentity`. A head
+    /// trim swaps in a new file, so the identity changes with it.
+    public let transcriptFileIdentity: UInt64
 
     public init(
         version: Int = Self.currentVersion, sessionRevision: UInt64?, ownerEpoch: UInt64, snapshot: GhosttyTerminalSnapshot,
-        scrollRects: [GhosttyRenderScrollRectOperation] = [], scrollRectsOverflowed: Bool = true
+        transcriptByteOffset: UInt64 = 0, transcriptFileIdentity: UInt64 = 0
     ) {
         self.version = version
         self.sessionRevision = sessionRevision
@@ -180,8 +202,8 @@ public struct GhosttyRenderFrame: Codable, Sendable, Equatable {
         self.columns = snapshot.columns
         self.rows = snapshot.rows
         self.snapshot = snapshot
-        self.scrollRects = scrollRects
-        self.scrollRectsOverflowed = scrollRectsOverflowed
+        self.transcriptByteOffset = transcriptByteOffset
+        self.transcriptFileIdentity = transcriptFileIdentity
     }
 
     public static func encode(_ frame: GhosttyRenderFrame) throws -> Data { try JSONEncoder().encode(frame) }

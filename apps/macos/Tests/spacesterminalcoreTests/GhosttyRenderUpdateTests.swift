@@ -90,12 +90,10 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertEqual(scrollRectDelta.changedCellCount, columns)
         XCTAssertEqual(try GhosttyRenderUpdateApplier.apply(scrollRectUpdate, to: baseline).snapshot, target)
         // Body bytes, not blob bytes: the body is the layout this fixture pins, while the compressed blob's
-        // size depends on which platform's DEFLATE encoder wrote it. The delta header grew by 19 bytes (the
-        // 17-byte selection/scrollbar section, the 1-byte scroll-rects-overflowed flag, and the 1-byte
-        // alternate-screen flag) versus the pre-selection layout, on top of what each fixture already
-        // accounted for.
-        XCTAssertEqual(scrollRectBytes, 1_228)
-        XCTAssertEqual(cellRunOnlyBytes, 27_110)
+        // size depends on which platform's DEFLATE encoder wrote it. The delta header is 64 bytes (24 fixed
+        // fields plus the 40-byte scrollbar/history section), on top of what each fixture already accounted for.
+        XCTAssertEqual(scrollRectBytes, 1_250)
+        XCTAssertEqual(cellRunOnlyBytes, 27_132)
         XCTAssertLessThan(scrollRectBytes, cellRunOnlyBytes)
         // Compression does not reverse the ordering the fixture exists to show.
         XCTAssertLessThan(scrollRectEncoded.count, cellRunOnlyEncoded.count)
@@ -268,16 +266,16 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let update = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot))
 
         // 40-byte update body header (reserved 2, three revisions 24, owner epoch 8, columns 2, rows 2,
-        // empty fallback reason 2), 37-byte snapshot header (20 fixed fields plus the 17-byte
-        // selection/scrollbar section), 14 bytes a cell.
-        XCTAssertEqual(try body(of: GhosttyRenderUpdateBinaryCodec.encode(update)).count, 40 + 37 + snapshot.cells.count * 14)
+        // empty fallback reason 2), 60-byte snapshot header (20 fixed fields plus the 40-byte
+        // scrollbar/history section), 14 bytes a cell.
+        XCTAssertEqual(try body(of: GhosttyRenderUpdateBinaryCodec.encode(update)).count, 40 + 60 + snapshot.cells.count * 14)
 
         // One cluster cell adds exactly its sparse entry: 4-byte offset, 2-byte length, utf8 bytes.
         let clustered = makeSnapshot(lines: ["👋🏽ello", "world"])
         let clusteredUpdate = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: clustered))
         XCTAssertEqual(
             try body(of: GhosttyRenderUpdateBinaryCodec.encode(clusteredUpdate)).count,
-            40 + 37 + snapshot.cells.count * 14 + 6 + Array("👋🏽".utf8).count)
+            40 + 60 + snapshot.cells.count * 14 + 6 + Array("👋🏽".utf8).count)
     }
 
     /// A Linux daemon streaming to an iPhone means one platform's zlib writes what the other's Compression
@@ -619,7 +617,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     /// change that never forces a full frame.
     func testMouseReportingStateSurvivesFullAndDeltaFrames() throws {
         let previous = makeSnapshot(lines: ["hello"])
-        let target = makeSnapshot(lines: ["hullo"], mouseReportingActive: true, mouseShiftCapture: GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)
+        let target = makeSnapshot(lines: ["hullo"], mouseTrackingLevel: .clicks, mouseShiftCapture: GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
 
         let full = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
@@ -638,10 +636,32 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertTrue(applied.snapshot.mouseReportingActive)
     }
 
+    /// Which motion a program wants decides whether a client forwards pointer moves at all, so each of the
+    /// four levels has to reach the client exactly, in a full frame and in a delta between levels.
+    func testMouseTrackingLevelSurvivesFullAndDeltaFrames() throws {
+        let levels: [TerminalMouseTrackingLevel] = [.none, .clicks, .buttonMotion, .anyMotion]
+        for level in levels {
+            let target = makeSnapshot(lines: ["hullo"], mouseTrackingLevel: level)
+            let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
+            let full = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+            XCTAssertEqual(full.fullFrame?.snapshot.mouseTrackingLevel, level)
+            XCTAssertEqual(full.fullFrame?.snapshot.mouseReportingActive, level != .none)
+
+            for previousLevel in levels where previousLevel != level {
+                let baseline = GhosttyRenderUpdateBaseline(
+                    snapshot: makeSnapshot(lines: ["hello"], mouseTrackingLevel: previousLevel), sessionRevision: 1, ownerEpoch: 1)
+                let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
+                let decoded = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
+                XCTAssertEqual(decoded.delta?.mouseTrackingLevel, level)
+                XCTAssertEqual(try GhosttyRenderUpdateApplier.apply(decoded, to: baseline).snapshot.mouseTrackingLevel, level)
+            }
+        }
+    }
+
     /// The application turning mouse tracking back off has to reach the client the same way, or a pane
     /// would keep forwarding clicks to a program that stopped listening instead of selecting text.
     func testMouseReportingStateClearsThroughADelta() throws {
-        let previous = makeSnapshot(lines: ["hello"], mouseReportingActive: true)
+        let previous = makeSnapshot(lines: ["hello"], mouseTrackingLevel: .clicks)
         let target = makeSnapshot(lines: ["hullo"])
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
@@ -693,8 +713,8 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     /// for different decisions (a click versus a scroll gesture). A delta that only flips one must not
     /// disturb the other, which a codec that misordered the two flag bytes would break.
     func testAlternateScreenAndMouseReportingTravelIndependently() throws {
-        let previous = makeSnapshot(lines: ["hello"], mouseReportingActive: true)
-        let target = makeSnapshot(lines: ["hullo"], mouseReportingActive: true, alternateScreenActive: true)
+        let previous = makeSnapshot(lines: ["hello"], mouseTrackingLevel: .clicks)
+        let target = makeSnapshot(lines: ["hullo"], mouseTrackingLevel: .clicks, alternateScreenActive: true)
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
 
@@ -706,64 +726,86 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertTrue(applied.snapshot.alternateScreenActive)
     }
 
-    /// The shared selection and the scrollbar position have to survive a full frame exactly like every
-    /// other field: rectangle and stream shapes, both extends flags, and non-zero scrollbar counters.
-    func testSelectionAndScrollbarSurviveAFullFrame() throws {
-        let rectangle = GhosttyTerminalSelectionRange(
+    /// The scrollbar position has to survive a full frame exactly like every other field, and a
+    /// selection a client painted onto a snapshot must not travel with it: selection is each client's
+    /// own, so the wire has no field for it.
+    func testScrollbarSurvivesAFullFrameAndASelectionDoesNotTravel() throws {
+        let selection = GhosttyTerminalSelectionRange(
             startColumn: 1, startRow: 0, endColumn: 3, endRow: 2, isRectangle: true, extendsAbove: true, extendsBelow: true)
         let snapshot = makeSnapshot(lines: ["hello", "world"])
-        let withSelection = GhosttyTerminalSnapshot(
+        let painted = GhosttyTerminalSnapshot(
             columns: snapshot.columns, rows: snapshot.rows, cursorColumn: snapshot.cursorColumn, cursorRow: snapshot.cursorRow,
             cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
-            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: snapshot.cells, selection: rectangle, scrollbarTotal: 500,
+            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: snapshot.cells, selection: selection, scrollbarTotal: 500,
             scrollbarOffset: 120)
-        let update = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: withSelection))
+        let update = GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: painted))
 
         let decoded = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
 
-        XCTAssertEqual(decoded.fullFrame?.snapshot.selection, rectangle)
+        XCTAssertNil(decoded.fullFrame?.snapshot.selection)
         XCTAssertEqual(decoded.fullFrame?.snapshot.scrollbarTotal, 500)
         XCTAssertEqual(decoded.fullFrame?.snapshot.scrollbarOffset, 120)
     }
 
-    /// A non-rectangle (stream) selection round-trips the same way, and a nil selection still carries a
-    /// non-zero scrollbar position: the two fields are independent on the wire.
-    func testStreamSelectionAndNilSelectionBothSurviveAFullFrame() throws {
-        let stream = GhosttyTerminalSelectionRange(
-            startColumn: 4, startRow: 1, endColumn: 2, endRow: 3, isRectangle: false, extendsAbove: false, extendsBelow: true)
-        let snapshot = makeSnapshot(lines: ["hello", "world"])
-        let withSelection = GhosttyTerminalSnapshot(
-            columns: snapshot.columns, rows: snapshot.rows, cursorColumn: snapshot.cursorColumn, cursorRow: snapshot.cursorRow,
-            cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
-            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: snapshot.cells, selection: stream, scrollbarTotal: 10, scrollbarOffset: 0)
-        let decoded = try GhosttyRenderUpdateBinaryCodec.decode(
-            try GhosttyRenderUpdateBinaryCodec.encode(
-                GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: withSelection))))
-        XCTAssertEqual(decoded.fullFrame?.snapshot.selection, stream)
+    /// The row base and epoch ride the snapshot, the transcript stamp rides the frame, in both a full
+    /// frame and a delta, at values past 32 bits so a truncated field would show. Applying a delta
+    /// replaces the baseline's stamps wholesale, and the transcript stamp is not part of the picture:
+    /// the same snapshot at a different offset is still the same snapshot.
+    func testHistoryStampsSurviveAFullFrameAndADelta() throws {
+        func stamped(_ lines: [String], rowBase: UInt64) -> GhosttyTerminalSnapshot {
+            let base = makeSnapshot(lines: lines)
+            return GhosttyTerminalSnapshot(
+                columns: base.columns, rows: base.rows, cursorColumn: base.cursorColumn, cursorRow: base.cursorRow, cursorVisible: base.cursorVisible,
+                defaultForegroundRGB: base.defaultForegroundRGB, defaultBackgroundRGB: base.defaultBackgroundRGB, cells: base.cells,
+                historyRowBase: rowBase, historyEpoch: 0xFEED_0000_0000_0001)
+        }
+        let previous = stamped(["hello"], rowBase: 5_000_000_000)
+        let target = stamped(["hullo"], rowBase: 5_000_000_001)
+        let targetFrame = GhosttyRenderFrame(
+            sessionRevision: 2, ownerEpoch: 1, snapshot: target, transcriptByteOffset: 0x1_2345_6789, transcriptFileIdentity: 0x8000_0000_0000_00AB)
 
-        let noSelection = GhosttyTerminalSnapshot(
-            columns: snapshot.columns, rows: snapshot.rows, cursorColumn: snapshot.cursorColumn, cursorRow: snapshot.cursorRow,
-            cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
-            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: snapshot.cells, scrollbarTotal: 10, scrollbarOffset: 7)
-        let decodedNoSelection = try GhosttyRenderUpdateBinaryCodec.decode(
-            try GhosttyRenderUpdateBinaryCodec.encode(
-                GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: noSelection))))
-        XCTAssertNil(decodedNoSelection.fullFrame?.snapshot.selection)
-        XCTAssertEqual(decodedNoSelection.fullFrame?.snapshot.scrollbarOffset, 7)
+        let full = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(.full(targetFrame)))
+        XCTAssertEqual(full.fullFrame?.snapshot.historyRowBase, 5_000_000_001)
+        XCTAssertEqual(full.fullFrame?.snapshot.historyEpoch, 0xFEED_0000_0000_0001)
+        XCTAssertEqual(full.fullFrame?.transcriptByteOffset, 0x1_2345_6789)
+        XCTAssertEqual(full.fullFrame?.transcriptFileIdentity, 0x8000_0000_0000_00AB)
+
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
+        let delta = try GhosttyRenderUpdateBinaryCodec.decode(
+            try GhosttyRenderUpdateBinaryCodec.encode(GhosttyRenderUpdateFactory.makeUpdate(target: targetFrame, baseline: baseline)))
+        XCTAssertEqual(delta.delta?.historyRowBase, 5_000_000_001)
+        XCTAssertEqual(delta.delta?.historyEpoch, 0xFEED_0000_0000_0001)
+        XCTAssertEqual(delta.delta?.transcriptByteOffset, 0x1_2345_6789)
+        XCTAssertEqual(delta.delta?.transcriptFileIdentity, 0x8000_0000_0000_00AB)
+        let applied = try GhosttyRenderUpdateApplier.apply(delta, to: baseline)
+        XCTAssertEqual(applied.snapshot, target)
+        XCTAssertEqual(applied.transcriptByteOffset, 0x1_2345_6789)
+        XCTAssertEqual(applied.transcriptFileIdentity, 0x8000_0000_0000_00AB)
+        XCTAssertEqual(
+            GhosttyRenderFrame(
+                sessionRevision: 2, ownerEpoch: 1, snapshot: applied.snapshot, transcriptByteOffset: applied.transcriptByteOffset,
+                transcriptFileIdentity: applied.transcriptFileIdentity), targetFrame)
     }
 
-    /// A delta carries the selection and scrollbar exactly as the target frame had them, and applying it
-    /// replaces the baseline's values wholesale.
-    func testSelectionAndScrollbarSurviveADeltaAndReplaceTheBaseline() throws {
+    /// Output that changes no cell advances the transcript offset without changing the picture, so two
+    /// frames of the same snapshot at different offsets carry equal snapshots.
+    func testTranscriptOffsetIsNotPartOfThePicture() {
+        let snapshot = makeSnapshot(lines: ["same"])
+        let early = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot, transcriptByteOffset: 10, transcriptFileIdentity: 7)
+        let late = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot, transcriptByteOffset: 99, transcriptFileIdentity: 7)
+        XCTAssertEqual(early.snapshot, late.snapshot)
+        XCTAssertNotEqual(early, late)
+    }
+
+    /// A delta carries the scrollbar exactly as the target frame had it, and applying it replaces the
+    /// baseline's values wholesale, even when no cell changed.
+    func testScrollbarSurvivesADeltaAndReplacesTheBaseline() throws {
         let previous = makeSnapshot(lines: ["hello"])
-        let selection = GhosttyTerminalSelectionRange(
-            startColumn: 0, startRow: 0, endColumn: 4, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
         let targetBase = makeSnapshot(lines: ["hullo"])
         let target = GhosttyTerminalSnapshot(
             columns: targetBase.columns, rows: targetBase.rows, cursorColumn: targetBase.cursorColumn, cursorRow: targetBase.cursorRow,
             cursorVisible: targetBase.cursorVisible, defaultForegroundRGB: targetBase.defaultForegroundRGB,
-            defaultBackgroundRGB: targetBase.defaultBackgroundRGB, cells: targetBase.cells, selection: selection, scrollbarTotal: 42,
-            scrollbarOffset: 3)
+            defaultBackgroundRGB: targetBase.defaultBackgroundRGB, cells: targetBase.cells, scrollbarTotal: 42, scrollbarOffset: 3)
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
 
@@ -771,66 +813,42 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         let decoded = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
         let applied = try GhosttyRenderUpdateApplier.apply(decoded, to: baseline)
 
-        XCTAssertEqual(decoded.delta?.selection, selection)
         XCTAssertEqual(decoded.delta?.scrollbarTotal, 42)
         XCTAssertEqual(decoded.delta?.scrollbarOffset, 3)
         XCTAssertEqual(applied.snapshot, target)
-        XCTAssertEqual(applied.snapshot.selection, selection)
-        XCTAssertEqual(applied.snapshot.scrollbarTotal, 42)
-        XCTAssertEqual(applied.snapshot.scrollbarOffset, 3)
     }
 
-    /// A drag that only moves the selection (no cell, cursor, or scrollbar change) still has to reach a
-    /// client: the factory must not treat "no cell changes" as "no delta to send", and applying that
-    /// delta must update the baseline's selection.
-    func testSelectionOnlyChangeStillProducesADeltaThatUpdatesTheBaseline() throws {
-        let unchangedLines = ["hello", "world"]
-        let previousBase = makeSnapshot(lines: unchangedLines)
-        let selection = GhosttyTerminalSelectionRange(
-            startColumn: 0, startRow: 0, endColumn: 2, endRow: 1, isRectangle: false, extendsAbove: false, extendsBelow: false)
+    /// A scroll that only moves the scrollbar thumb (no cell, cursor, or mode change) still has to reach a
+    /// client: the factory must not treat "no cell changes" as "no delta to send".
+    func testScrollbarOnlyChangeStillProducesADeltaThatUpdatesTheBaseline() throws {
+        let previousBase = makeSnapshot(lines: ["hello", "world"])
         let target = GhosttyTerminalSnapshot(
             columns: previousBase.columns, rows: previousBase.rows, cursorColumn: previousBase.cursorColumn, cursorRow: previousBase.cursorRow,
             cursorVisible: previousBase.cursorVisible, defaultForegroundRGB: previousBase.defaultForegroundRGB,
-            defaultBackgroundRGB: previousBase.defaultBackgroundRGB, cells: previousBase.cells, selection: selection)
+            defaultBackgroundRGB: previousBase.defaultBackgroundRGB, cells: previousBase.cells, scrollbarTotal: 30, scrollbarOffset: 9)
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
         let baseline = GhosttyRenderUpdateBaseline(snapshot: previousBase, sessionRevision: 1, ownerEpoch: 1)
 
         let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
 
-        XCTAssertEqual(update.kind, .delta, "a selection-only change must still be expressible as a delta")
+        XCTAssertEqual(update.kind, .delta, "a scrollbar-only change must still be expressible as a delta")
         XCTAssertEqual(update.delta?.replaceCellRuns.count, 0)
         XCTAssertEqual(update.delta?.scrollRects.count, 0)
-        XCTAssertEqual(update.delta?.selection, selection)
 
         let applied = try GhosttyRenderUpdateApplier.apply(update, to: baseline)
-        XCTAssertEqual(applied.snapshot.selection, selection)
         XCTAssertEqual(applied.snapshot, target)
     }
 
-    /// The producer sets `scrollRectsOverflowed` when its scroll-rect buffer overflowed, so this delta's
-    /// scroll rects cannot be trusted to describe content movement. It is a delta-only flag (full frames
-    /// need no such signal) and the codec must carry it through untouched.
-    func testScrollRectsOverflowedRoundTripsThroughADelta() throws {
-        let delta = GhosttyRenderDeltaFrame(
-            baseRevision: 1, targetRevision: 2, ownerEpoch: 1, columns: 3, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false,
-            defaultForegroundRGB: 0xEEEEEE, defaultBackgroundRGB: 0x101010, changedCellCount: 0, scrollRectsOverflowed: true)
-        let update = GhosttyRenderUpdate.delta(delta)
-
-        let decoded = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
-
-        XCTAssertEqual(decoded.delta?.scrollRectsOverflowed, true)
-    }
-
     /// The version byte is the only guard for a persisted or peer payload built at a different layout:
-    /// the current version is 7, and a payload claiming version 6 (the layout without the alternate-screen
-    /// flag) is rejected exactly like any other unsupported version, never silently misread a field short.
-    func testVersionIsSevenAndVersionSixPayloadIsRejected() throws {
-        XCTAssertEqual(GhosttyRenderUpdate.currentVersion, 7)
+    /// the current version is 8, and a payload claiming version 7 (the layout without the history
+    /// stamps) is rejected exactly like any other unsupported version, never silently misread 32 bytes short.
+    func testVersionIsEightAndVersionSevenPayloadIsRejected() throws {
+        XCTAssertEqual(GhosttyRenderUpdate.currentVersion, 8)
 
         let snapshot = makeSnapshot(lines: ["hello"])
         var encoded = try GhosttyRenderUpdateBinaryCodec.encode(
             GhosttyRenderUpdate.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot)))
-        encoded[4] = 6
+        encoded[4] = 7
 
         XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(encoded)) { error in
             XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .unsupportedVersion)
@@ -865,7 +883,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
     /// entry — the fast path the wire format is built around. `clusters` and `linkURLs` add entries on
     /// top, keyed by cell index, for fixtures that need text no character can express.
     private func makeSnapshot(
-        lines: [String], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseReportingActive: Bool = false,
+        lines: [String], clusters: [Int: String] = [:], linkURLs: [Int: String] = [:], mouseTrackingLevel: TerminalMouseTrackingLevel = .none,
         mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset, alternateScreenActive: Bool = false
     ) -> GhosttyTerminalSnapshot {
         let columns = lines.map(\.count).max() ?? 1
@@ -882,7 +900,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         }
         return GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: 0, cursorRow: rows - 1, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE,
-            defaultBackgroundRGB: 0x101010, cells: cells, clusters: cellClusters, linkURLs: linkURLs, mouseReportingActive: mouseReportingActive,
+            defaultBackgroundRGB: 0x101010, cells: cells, clusters: cellClusters, linkURLs: linkURLs, mouseTrackingLevel: mouseTrackingLevel,
             mouseShiftCapture: mouseShiftCapture, alternateScreenActive: alternateScreenActive)
     }
 

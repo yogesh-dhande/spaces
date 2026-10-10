@@ -84,6 +84,13 @@
         /// `isolated deinit` requires macOS 15.4 while this targets macOS 14). Set true once a session is
         /// configured, cleared by `terminate()`/rollback.
         private var hasLiveResources = false
+        /// Random value minted whenever a Ghostty session is created, folded into every frame's
+        /// `historyEpoch`. Ghostty's own history epoch only says when absolute rows were renumbered
+        /// within one terminal; a session built later (a handoff resume re-parses `output.log` into a
+        /// fresh terminal whose row numbering differs) must read as a renumbering too, and it would
+        /// not if both terminals happened to report the same epoch value. A driver that keeps its
+        /// session (a failed-exec resume in place) keeps its incarnation.
+        private(set) var terminalIncarnation: UInt64 = 0
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
         private var lastDeliveredSessionStateRevision: UInt64 = 0
         /// Coalesces the engine-actor catch-up that PTY deliveries and Ghostty's session-state
@@ -265,6 +272,7 @@
             guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration(Self.headlessSessionCreationFailure) }
 
             session = createdSession
+            terminalIncarnation = UInt64.random(in: .min ... .max)
             self.hostPTY = hostPTY
             hasLiveResources = true
             outputPipe.setSession(createdSession)
@@ -631,6 +639,17 @@
             return true
         }
 
+        /// Moves the pointer onto a cell for a program that tracks it. Ghostty's own surface turns the move
+        /// into a motion report from its tracking mode and the buttons `sendMouseButton` has pressed on it
+        /// (mode 1002 only while one is held, 1003 always, and one report per cell change), so nothing here
+        /// has to know either.
+        @discardableResult func sendMouseMotion(pointerPosition: TerminalScrollPointerPosition) -> Bool {
+            guard let session, let surface else { return false }
+            guard movePointerToClickedCell(pointerPosition, session: session, surface: surface) else { return false }
+            requestSurfaceRefresh()
+            return true
+        }
+
         /// Puts the pointer on the cell a click named, rather than on a place proportional to the
         /// surface's pixels. A click's normalized position is a cell center in the sender's grid
         /// (`TerminalControlMouseButtonPayload`), so it is resolved against this surface's grid and
@@ -675,35 +694,6 @@
             let yPixels = min(pointerPosition.y * heightPixels, heightPixels - 1)
             ghostty_surface_mouse_pos(surface, xPixels / Self.contentScale, yPixels / Self.contentScale, ghostty_input_mods_e(pointerPosition.mods))
             return true
-        }
-
-        /// Sets the surface's selection from screen-space coordinates (row 0 is the oldest retained
-        /// scrollback row). Ghostty clamps out-of-range coordinates to the terminal's current extent
-        /// rather than rejecting them, so this only fails when the terminal has no rows at all.
-        @discardableResult func setSelectionAbsolute(startColumn: UInt16, startRow: UInt32, endColumn: UInt16, endRow: UInt32, rectangle: Bool)
-            -> Bool
-        {
-            guard let surface else { return false }
-            let didSet = ghostty_surface_set_selection_absolute(surface, startColumn, startRow, endColumn, endRow, rectangle)
-            requestSurfaceRefresh()
-            return didSet
-        }
-
-        /// Never triggers a clipboard write.
-        func clearSelection() {
-            guard let surface else { return }
-            ghostty_surface_clear_selection(surface)
-            requestSurfaceRefresh()
-        }
-
-        func readSelectionText() -> String? {
-            guard let surface, ghostty_surface_has_selection(surface) else { return nil }
-            var text = ghostty_text_s()
-            guard ghostty_surface_read_selection(surface, &text) else { return nil }
-            defer { ghostty_surface_free_text(surface, &text) }
-            guard let pointer = text.text, text.text_len > 0 else { return "" }
-            let buffer = UnsafeBufferPointer(start: UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self), count: Int(text.text_len))
-            return String(bytes: buffer, encoding: .utf8)
         }
 
         @discardableResult func performBindingAction(_ action: String) -> Bool {

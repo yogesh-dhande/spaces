@@ -107,7 +107,8 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
 
         XCTAssertEqual(
             cropped.selection,
-            GhosttyTerminalSelectionRange(startColumn: 1, startRow: 0, endColumn: 4, endRow: 1, isRectangle: false, extendsAbove: false, extendsBelow: false))
+            GhosttyTerminalSelectionRange(
+                startColumn: 1, startRow: 0, endColumn: 4, endRow: 1, isRectangle: false, extendsAbove: false, extendsBelow: false))
     }
 
     /// A selection whose start row is clipped off the top gets `extendsAbove` set and its cropped start
@@ -124,7 +125,8 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
 
         XCTAssertEqual(
             cropped.selection,
-            GhosttyTerminalSelectionRange(startColumn: 0, startRow: 0, endColumn: 5, endRow: 1, isRectangle: false, extendsAbove: true, extendsBelow: true))
+            GhosttyTerminalSelectionRange(
+                startColumn: 0, startRow: 0, endColumn: 5, endRow: 1, isRectangle: false, extendsAbove: true, extendsBelow: true))
     }
 
     /// A stream selection's start row can survive the row crop yet still lie entirely outside the column
@@ -143,7 +145,8 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
 
         XCTAssertEqual(
             cropped.selection,
-            GhosttyTerminalSelectionRange(startColumn: 0, startRow: 1, endColumn: 2, endRow: 1, isRectangle: false, extendsAbove: true, extendsBelow: false))
+            GhosttyTerminalSelectionRange(
+                startColumn: 0, startRow: 1, endColumn: 2, endRow: 1, isRectangle: false, extendsAbove: true, extendsBelow: false))
     }
 
     /// Mirrors `testCropTrimsAStreamSelectionsStartRowWhenItMissesTheColumnWindow` off the end row: its
@@ -161,7 +164,8 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
 
         XCTAssertEqual(
             cropped.selection,
-            GhosttyTerminalSelectionRange(startColumn: 1, startRow: 0, endColumn: 3, endRow: 1, isRectangle: false, extendsAbove: false, extendsBelow: true))
+            GhosttyTerminalSelectionRange(
+                startColumn: 1, startRow: 0, endColumn: 3, endRow: 1, isRectangle: false, extendsAbove: false, extendsBelow: true))
     }
 
     /// When trimming the start row leaves more than one row behind, the newly-topmost surviving row is an
@@ -178,7 +182,8 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
 
         XCTAssertEqual(
             cropped.selection,
-            GhosttyTerminalSelectionRange(startColumn: 0, startRow: 1, endColumn: 2, endRow: 2, isRectangle: false, extendsAbove: true, extendsBelow: false))
+            GhosttyTerminalSelectionRange(
+                startColumn: 0, startRow: 1, endColumn: 2, endRow: 2, isRectangle: false, extendsAbove: true, extendsBelow: false))
     }
 
     /// Both boundary rows can be trimmed at once: with none of the selection's occupied columns anywhere
@@ -210,7 +215,8 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
 
         XCTAssertEqual(
             cropped.selection,
-            GhosttyTerminalSelectionRange(startColumn: 1, startRow: 0, endColumn: 2, endRow: 2, isRectangle: false, extendsAbove: false, extendsBelow: false))
+            GhosttyTerminalSelectionRange(
+                startColumn: 1, startRow: 0, endColumn: 2, endRow: 2, isRectangle: false, extendsAbove: false, extendsBelow: false))
     }
 
     /// A selection whose rows never reach the window at all crops away to nil rather than a degenerate
@@ -240,21 +246,37 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
 
         XCTAssertEqual(
             cropped.selection,
-            GhosttyTerminalSelectionRange(startColumn: 0, startRow: 0, endColumn: 2, endRow: 1, isRectangle: true, extendsAbove: true, extendsBelow: true))
+            GhosttyTerminalSelectionRange(
+                startColumn: 0, startRow: 0, endColumn: 2, endRow: 1, isRectangle: true, extendsAbove: true, extendsBelow: true))
     }
 
     /// The cropped viewport's scrollbar offset rebases by the window's row offset; the total is unchanged
     /// since it describes the whole terminal, not the window.
     func testCropRebasesScrollbarOffsetByTheWindowsRowOffset() {
         let snapshot = makeSnapshot(
-            columns: 6, rows: 6, cursorColumn: 0, cursorRow: 0, glyphs: Array(repeating: "ABCDEF", count: 6), scrollbarTotal: 100,
-            scrollbarOffset: 5)
+            columns: 6, rows: 6, cursorColumn: 0, cursorRow: 0, glyphs: Array(repeating: "ABCDEF", count: 6), scrollbarTotal: 100, scrollbarOffset: 5)
 
         let cropped = GhosttyTerminalSnapshotViewport.crop(
             snapshot, window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 2, columns: 6, rows: 2))
 
         XCTAssertEqual(cropped.scrollbarTotal, 100)
         XCTAssertEqual(cropped.scrollbarOffset, 7)
+    }
+
+    /// A crop that starts `rowOffset` rows down the frame names a viewport whose row 0 is that many absolute
+    /// rows later, so the history row base rebases exactly as the scrollbar offset does; the epoch
+    /// describes the whole terminal and rides through unchanged.
+    func testCropRebasesHistoryRowBaseByTheWindowsRowOffset() {
+        let base = makeSnapshot(columns: 6, rows: 6, cursorColumn: 0, cursorRow: 0, glyphs: Array(repeating: "ABCDEF", count: 6))
+        let snapshot = GhosttyTerminalSnapshot(
+            columns: base.columns, rows: base.rows, cursorColumn: 0, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xFFFFFF,
+            defaultBackgroundRGB: 0x111111, cells: base.cells, historyRowBase: 9_000, historyEpoch: 77)
+
+        let cropped = GhosttyTerminalSnapshotViewport.crop(
+            snapshot, window: GhosttyTerminalSnapshotViewport.Window(columnOffset: 0, rowOffset: 2, columns: 6, rows: 2))
+
+        XCTAssertEqual(cropped.historyRowBase, 9_002)
+        XCTAssertEqual(cropped.historyEpoch, 77)
     }
 
     /// The row offset is the whole of the iOS keyboard's effect on the terminal: the session keeps its
@@ -309,8 +331,8 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
                     flags: GhosttyTerminalSnapshotGrid.invisibleFlag) : cell
         }
         let snapshot = GhosttyTerminalSnapshot(
-            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 3, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
-            defaultBackgroundRGB: 0x111111, cells: concealedCells)
+            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 3, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF, defaultBackgroundRGB: 0x111111,
+            cells: concealedCells)
 
         let window = GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: 4, rows: 4, horizontalAlignment: .leading)
         XCTAssertEqual(window.rowOffset, 0, "row 3 is the last row that shows anything, and it already fits in the first four rows")
@@ -374,8 +396,7 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
         let glyphs = glyphsWithContent(throughRow: 2)
 
         // Four of ten rows visible, cursor near the top: nothing to shift for.
-        let atBottom = makeSnapshot(
-            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 2, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
+        let atBottom = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 2, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
         let atBottomOffset = GhosttyTerminalSnapshotViewport.window(
             for: atBottom, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: 0
         ).rowOffset
@@ -416,35 +437,30 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
         let cursorAtBottom = makeSnapshot(
             columns: 4, rows: 10, cursorColumn: 0, cursorRow: 9, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
         XCTAssertEqual(
-            GhosttyTerminalSnapshotViewport.window(
-                for: cursorAtBottom, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: 0
-            ).rowOffset, 6, "a prompt on the last row is shifted onto the screen no matter where the last crop started")
+            GhosttyTerminalSnapshotViewport.window(for: cursorAtBottom, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: 0)
+                .rowOffset, 6, "a prompt on the last row is shifted onto the screen no matter where the last crop started")
 
         let cursorNearTop = makeSnapshot(
             columns: 4, rows: 10, cursorColumn: 0, cursorRow: 2, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 90)
         XCTAssertEqual(
-            GhosttyTerminalSnapshotViewport.window(
-                for: cursorNearTop, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: 6
-            ).rowOffset, 0, "a cursor already on screen pulls the crop back to the top of the grid")
+            GhosttyTerminalSnapshotViewport.window(for: cursorNearTop, columns: 4, rows: 4, horizontalAlignment: .leading, retainedRowOffset: 6)
+                .rowOffset, 0, "a cursor already on screen pulls the crop back to the top of the grid")
     }
 
     /// A retained offset from a taller crop cannot point past what this viewport can show: giving the
     /// keyboard more of the screen back leaves fewer rows below the offset than the crop needs.
     func testScrolledBackWindowClampsARetainedOffsetToWhatTheViewportCanShow() {
         let glyphs = (0..<10).map { index in "ROW\(index)" }
-        let scrolledBack = makeSnapshot(
-            columns: 4, rows: 10, cursorColumn: 0, cursorRow: 0, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 5)
+        let scrolledBack = makeSnapshot(columns: 4, rows: 10, cursorColumn: 0, cursorRow: 0, glyphs: glyphs, scrollbarTotal: 100, scrollbarOffset: 5)
 
         XCTAssertEqual(
-            GhosttyTerminalSnapshotViewport.window(
-                for: scrolledBack, columns: 4, rows: 8, horizontalAlignment: .leading, retainedRowOffset: 6
-            ).rowOffset, 2)
+            GhosttyTerminalSnapshotViewport.window(for: scrolledBack, columns: 4, rows: 8, horizontalAlignment: .leading, retainedRowOffset: 6)
+                .rowOffset, 2)
     }
 
     private func makeSnapshot(
-        columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, glyphs: [String], cursorVisible: Bool = true,
-        alternateScreenActive: Bool = false, selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0,
-        scrollbarOffset: UInt32 = 0
+        columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, glyphs: [String], cursorVisible: Bool = true, alternateScreenActive: Bool = false,
+        selection: GhosttyTerminalSelectionRange? = nil, scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0
     ) -> GhosttyTerminalSnapshot {
         let cells = glyphs.flatMap { row in
             row.unicodeScalars.map { scalar in
@@ -462,7 +478,5 @@ final class GhosttyTerminalSnapshotViewportTests: XCTestCase {
     /// blank row carries no visible content under ``GhosttyTerminalSnapshotViewport``'s bottom-content
     /// rule, so this models a program that has drawn nothing past `throughRow`, the fixture the plain
     /// cursor-follow tests need to keep that rule from contributing to their expectations.
-    private func glyphsWithContent(throughRow: Int) -> [String] {
-        (0..<10).map { index in index <= throughRow ? "ROW\(index)" : "    " }
-    }
+    private func glyphsWithContent(throughRow: Int) -> [String] { (0..<10).map { index in index <= throughRow ? "ROW\(index)" : "    " } }
 }

@@ -26,7 +26,6 @@ public enum TerminalRemoteSessionStatePolicy {
         case .stateChange: return ownerKind == .local || ownerKind == .remote
         case .scroll: return true
         case .clearScreen: return true
-        case .selection: return true
         case .terminated: return true
         case .input: return false
         case .inputOutput: return ownerKind == .local
@@ -40,13 +39,7 @@ public enum TerminalRemoteSessionStatePolicy {
     }
 
     public static func hasVisibleScreenContent(snapshot: GhosttyTerminalSnapshot?, snapshotText: String?) -> Bool {
-        if let snapshot {
-            // A selection is user-visible state of its own, independent of the grid it sits on: a
-            // selection-only frame must stay renderable so viewers paint (and later un-paint) the
-            // highlight even on an otherwise blank screen.
-            if snapshot.selection != nil { return true }
-            if GhosttyTerminalSnapshotGrid.containsVisibleContent(snapshot) { return true }
-        }
+        if let snapshot, GhosttyTerminalSnapshotGrid.containsVisibleContent(snapshot) { return true }
         guard let snapshotText else { return false }
         return snapshotText.contains(where: { !$0.isWhitespace && !$0.isNewline })
     }
@@ -324,23 +317,9 @@ public struct TerminalRemoteStateReducer: Sendable {
         do {
             let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
             renderUpdateBaseline = baseline
-            // A delta continuation carries the exact rects that produced this baseline from the previous
-            // one, so a mirror view can trust them for its scroll-rect carry. Any other kind (a full frame,
-            // which replaces the whole grid rather than diffing it) has no such rects, so `overflowed` is
-            // forced true: that is the mirror's poison signal, not a report of a real ring-buffer overflow.
-            let scrollRects: [GhosttyRenderScrollRectOperation]
-            let scrollRectsOverflowed: Bool
-            switch decodedUpdate.kind {
-            case .delta:
-                scrollRects = decodedUpdate.delta?.scrollRects ?? []
-                scrollRectsOverflowed = decodedUpdate.delta?.scrollRectsOverflowed ?? true
-            case .full, .resyncRequired:
-                scrollRects = []
-                scrollRectsOverflowed = true
-            }
             let frame = GhosttyRenderFrame(
-                sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot, scrollRects: scrollRects,
-                scrollRectsOverflowed: scrollRectsOverflowed)
+                sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot,
+                transcriptByteOffset: baseline.transcriptByteOffset, transcriptFileIdentity: baseline.transcriptFileIdentity)
             // The stored payload carries the materialized full frame as a value, not as a re-encoded
             // blob: the reads the client makes of it next (renderSnapshot, renderOwnerEpoch, the render
             // state key) all want the frame, and nothing on this path wants bytes. The payload still
@@ -351,15 +330,7 @@ public struct TerminalRemoteStateReducer: Sendable {
             // the chain's state lives in this reducer's baseline and in the stored payload's full frame,
             // both advanced exactly once per payload, in arrival order.
             //
-            // The stored frame deliberately does NOT carry this delta's scroll rects: a stored payload
-            // is what replays after a reconnect or a listener re-registration, and a replay repaint must
-            // poison a mirror's scroll-rect carry (the frames between the store and the replay are
-            // unknowable). The wire codec enforces the same thing structurally — a full frame encodes no
-            // rect fields, so the blob this payload yields round-trips to exactly this poisoned value.
-            // Only `frameToApply`, consumed once by the live apply that produced it, keeps the rects.
-            let storedFrame = GhosttyRenderFrame(
-                sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
-            return (payload.replacingRenderUpdate(materialized: .full(storedFrame)), decodedUpdate, frame, nil)
+            return (payload.replacingRenderUpdate(materialized: .full(frame)), decodedUpdate, frame, nil)
         } catch {
             renderUpdateBaseline = nil
             return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, Self.renderUpdateDropReason(for: error))

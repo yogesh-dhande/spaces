@@ -594,92 +594,389 @@
             XCTAssertEqual(probeCount, 1)
         }
 
-        private func filledSnapshot(columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange? = nil) -> GhosttyTerminalSnapshot {
+        private func filledSnapshot(
+            columns: Int, rows: Int, selection: GhosttyTerminalSelectionRange? = nil, mouseTrackingLevel: TerminalMouseTrackingLevel = .none,
+            historyRowBase: UInt64 = 0, historyEpoch: UInt64 = 0
+        ) -> GhosttyTerminalSnapshot {
             GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xF2F2F2,
                 defaultBackgroundRGB: 0x1A1E26,
                 cells: (0..<(columns * rows)).map { index in
                     GhosttyTerminalSnapshot.Cell(
                         codepoint: UnicodeScalar("a").value + UInt32(index % 26), foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
-                }, selection: selection)
+                }, mouseTrackingLevel: mouseTrackingLevel, selection: selection, historyRowBase: historyRowBase, historyEpoch: historyEpoch)
         }
 
-        /// While the daemon's shared selection is present, a plain tap is exclusively a clear gesture: it
-        /// neither probes for a link nor focuses the keyboard, matching `handleTapToActivateInput`'s
-        /// documented precedence. The highlight itself is left untouched here; only the daemon's next
-        /// frame (carrying no selection) or a fresh applied frame can make it disappear.
-        func testRemoteTerminalHostViewTapWithSelectionPresentClearsInsteadOfProbingOrFocusing() {
-            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+        private enum SelectionEvent: Equatable {
+            case beginWord(TerminalAbsoluteSelection)
+            case beginHandle(TerminalSelectionHandle)
+            case extend(TerminalAbsoluteCell)
+            case end
+            case clear
+            case autoscroll(towardOlderRows: Bool)
+            case copy
+            case selectAll
+        }
+
+        private final class SelectionEventLog {
+            var events: [SelectionEvent] = []
+
+            var actions: GhosttyRemoteTerminalSelectionActions {
+                GhosttyRemoteTerminalSelectionActions(
+                    beginWordSelection: { [self] in events.append(.beginWord($0)) }, beginHandleDrag: { [self] in events.append(.beginHandle($0)) },
+                    extendDrag: { [self] in events.append(.extend($0)) }, endDrag: { [self] in events.append(.end) },
+                    clear: { [self] in events.append(.clear) }, autoscroll: { [self] in events.append(.autoscroll(towardOlderRows: $0)) },
+                    copy: { [self] in events.append(.copy) }, selectAll: { [self] in events.append(.selectAll) })
+            }
+        }
+
+        private enum MouseEvent: Equatable {
+            case button(pressed: Bool, x: Double, y: Double)
+            case motion(x: Double, y: Double)
+        }
+
+        /// The point at the middle of the grid cell (`column`, `row`) of the rendered frame, in the host view.
+        private func pointInCell(column: Int, row: Int) -> CGPoint {
+            let scale = UIScreen.main.scale
+            let cell = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: .default, scale: scale)
+            let padding = CGFloat(GhosttyTerminalCellMetricsCache.paddingPerSidePx(scale: Double(scale))) / scale
+            return CGPoint(x: padding + cell.width * (CGFloat(column) + 0.5), y: padding + cell.height * (CGFloat(row) + 0.5))
+        }
+
+        private func selectionHostView(
+            log: SelectionEventLog, selection: TerminalAbsoluteSelection? = nil, mouseTrackingLevel: TerminalMouseTrackingLevel = .none,
+            historyRowBase: UInt64 = 100, historyEpoch: UInt64 = 7
+        ) -> GhosttyRemoteTerminalHostView {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
             hostView.setAcceptsTerminalInput(true)
             hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            hostView.setSurfaceViewportSizeForTesting(columns: 40, rows: 10)
+            hostView.selectionActions = log.actions
+            hostView.setClientSelection(selection)
+            hostView.update(
+                snapshot: filledSnapshot(
+                    columns: 40, rows: 10, mouseTrackingLevel: mouseTrackingLevel, historyRowBase: historyRowBase, historyEpoch: historyEpoch),
+                renderStateKey: "selection", fallbackText: "")
+            return hostView
+        }
+
+        private func absoluteSelection(from first: (Int, Int64), to second: (Int, Int64), epoch: UInt64 = 7) -> TerminalAbsoluteSelection {
+            TerminalAbsoluteSelection(
+                from: TerminalAbsoluteCell(column: first.0, row: first.1), to: TerminalAbsoluteCell(column: second.0, row: second.1),
+                isRectangle: false, historyEpoch: epoch)
+        }
+
+        /// The selection is the client's own: the frame on screen shows it, and shows nothing of a
+        /// selection the host's frame carried.
+        func testRemoteTerminalHostViewPaintsTheClientSelectionInsteadOfTheHostsSelection() throws {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log, selection: absoluteSelection(from: (2, 101), to: (6, 102)))
+            let hostSelection = GhosttyTerminalSelectionRange(
+                startColumn: 0, startRow: 5, endColumn: 3, endRow: 5, isRectangle: false, extendsAbove: false, extendsBelow: false)
+            hostView.update(
+                snapshot: filledSnapshot(columns: 40, rows: 10, selection: hostSelection, historyRowBase: 100, historyEpoch: 7),
+                renderStateKey: "host", fallbackText: "")
+
+            let painted = try XCTUnwrap(hostView.capturedSnapshotForTesting()?.selection)
+
+            XCTAssertEqual(painted.startRow, 1)
+            XCTAssertEqual(painted.startColumn, 2)
+            XCTAssertEqual(painted.endRow, 2)
+            XCTAssertEqual(painted.endColumn, 6)
+
+            hostView.setClientSelection(nil)
+            hostView.update(
+                snapshot: filledSnapshot(columns: 40, rows: 10, selection: hostSelection, historyRowBase: 100, historyEpoch: 7),
+                renderStateKey: "host-2", fallbackText: "")
+            XCTAssertNil(hostView.capturedSnapshotForTesting()?.selection, "a client with no selection shows none, whatever the host's frame carries")
+        }
+
+        /// A tap ends the selection and is then any other tap: the selection does not spend the tap.
+        func testRemoteTerminalHostViewTapEndsTheSelectionAndThenBehavesAsAnyTap() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log, selection: absoluteSelection(from: (2, 101), to: (6, 102)))
             var linkProbeCount = 0
             hostView.debugTapLinkHandlerForTesting = { _ in
                 linkProbeCount += 1
-                return true
+                return false
             }
-            var clearCount = 0
-            hostView.onClearSelectionTapped = { clearCount += 1 }
-            // The viewport fits the whole grid, so no crop can leave the selection off screen: only a
-            // visible selection turns a tap into a clear.
-            hostView.setSurfaceViewportSizeForTesting(columns: 40, rows: 10)
-            let selection = GhosttyTerminalSelectionRange(
-                startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
-            hostView.update(snapshot: filledSnapshot(columns: 40, rows: 10, selection: selection), renderStateKey: "selection", fallbackText: "")
 
-            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .clearedSelection)
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
 
-            XCTAssertEqual(clearCount, 1)
-            XCTAssertEqual(linkProbeCount, 0, "a selection-clearing tap must not also probe for a link")
+            XCTAssertEqual(log.events, [.clear])
+            XCTAssertEqual(linkProbeCount, 1, "the tap still probes for a link")
         }
 
-        /// On an ended session's frozen final frame the selection can never change again and the daemon
-        /// rejects a clear with `sessionNotRunning`, so a tap on a selection-bearing ended render falls
-        /// through to the normal link-probe/focus handling instead of clearing. The link probe itself
-        /// synthesizes a click that mutates the mirror surface (Ghostty clears a selection on left
-        /// press), so the fall-through must also re-apply the frozen frame afterward to keep the
-        /// surface canonical; `reappliedEndedRenderFrameCountForTesting` is the seam that lets this test
-        /// see that re-apply happened.
-        func testRemoteTerminalHostViewTapWithSelectionOnEndedRenderDoesNotClear() {
+        /// The link probe synthesizes a click that mutates the mirror surface (Ghostty clears a selection
+        /// on left press), and an ended session gets no further frames of its own to heal it, so a tap on
+        /// the frozen frame re-applies that frame afterward. `debugTapLinkHandlerForTesting` stands in for
+        /// the real probe, so the re-apply count is what shows the repair ran.
+        func testRemoteTerminalHostViewTapOnAnEndedRenderReappliesTheFrozenFrame() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             hostView.setAcceptsTerminalInput(true)
             hostView.debugAppliedFrameCoversHostColumnsForTesting = true
             hostView.debugTapLinkHandlerForTesting = { _ in false }
-            var clearCount = 0
-            hostView.onClearSelectionTapped = { clearCount += 1 }
             hostView.setSurfaceViewportSizeForTesting(columns: 40, rows: 10)
-            let selection = GhosttyTerminalSelectionRange(
-                startColumn: 0, startRow: 0, endColumn: 5, endRow: 0, isRectangle: false, extendsAbove: false, extendsBelow: false)
-            let endedRender = GhosttyRemoteTerminalEndedRender(id: "ended", snapshot: filledSnapshot(columns: 40, rows: 10, selection: selection))
+            let endedRender = GhosttyRemoteTerminalEndedRender(id: "ended", snapshot: filledSnapshot(columns: 40, rows: 10))
             hostView.update(ownerEpoch: nil, endedRender: endedRender, fallbackText: "")
             let reappliedCountBeforeTap = hostView.reappliedEndedRenderFrameCountForTesting
 
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
 
-            XCTAssertEqual(clearCount, 0)
-            // `debugTapLinkHandlerForTesting` stands in for the real link probe here, so this cannot
-            // observe the probe's synthesized click actually clearing the mirror surface's own
-            // selection; it instead confirms the fall-through unconditionally re-applies the frozen
-            // ended render's frame afterward, which is what heals the surface once the probe mutates it.
-            XCTAssertEqual(
-                hostView.reappliedEndedRenderFrameCountForTesting, reappliedCountBeforeTap + 1,
-                "a tap on an ended frame must re-apply the frozen frame after the link probe runs")
+            XCTAssertEqual(hostView.reappliedEndedRenderFrameCountForTesting, reappliedCountBeforeTap + 1)
         }
 
-        /// A frame that carries no selection leaves the pre-existing tap handling (link probe, then
-        /// focus) untouched, and never calls `onClearSelectionTapped`: the clear path only engages while
-        /// the daemon actually has a shared selection to clear.
-        func testRemoteTerminalHostViewTapWithoutSelectionPresentBehavesAsBeforeAndSendsNoClear() {
-            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
-            hostView.setAcceptsTerminalInput(true)
-            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
-            hostView.debugTapLinkHandlerForTesting = { _ in false }
-            var clearCount = 0
-            hostView.onClearSelectionTapped = { clearCount += 1 }
-            hostView.update(snapshot: filledSnapshot(columns: 40, rows: 10), renderStateKey: "no-selection", fallbackText: "")
+        /// The model is told of every tap, selection painted or not: a Select All still reading has no
+        /// selection to paint, and the tap has to cancel it.
+        func testRemoteTerminalHostViewTapWithoutASelectionStillTellsTheModel() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log)
 
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
 
-            XCTAssertEqual(clearCount, 0)
+            XCTAssertEqual(log.events, [.clear])
+        }
+
+        /// A long press selects the word under the finger, and keeping the finger down extends it by cell,
+        /// in the absolute rows of the frame on screen.
+        func testRemoteTerminalHostViewLongPressSelectsAWordAndDraggingExtendsItByCell() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log)
+            let word = absoluteSelection(from: (2, 101), to: (5, 101))
+            var pressedAt: [CGPoint] = []
+            hostView.setWordSelectionHandlerForTesting { point in
+                pressedAt.append(point)
+                return word
+            }
+
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 3, row: 1))
+            hostView.debugLongPressForTesting(.changed, at: pointInCell(column: 12, row: 3))
+            hostView.debugLongPressForTesting(.ended, at: pointInCell(column: 12, row: 3))
+
+            XCTAssertEqual(pressedAt, [pointInCell(column: 3, row: 1)])
+            XCTAssertEqual(log.events, [.beginWord(word), .extend(TerminalAbsoluteCell(column: 12, row: 103)), .end])
+        }
+
+        /// Holding the drag past the bottom edge scrolls one row per tick until the finger comes back or
+        /// lifts.
+        func testRemoteTerminalHostViewLongPressDraggedPastTheEdgeAutoscrollsUntilItLifts() async throws {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log)
+            hostView.setWordSelectionHandlerForTesting { _ in self.absoluteSelection(from: (2, 101), to: (5, 101)) }
+
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 3, row: 1))
+            hostView.debugLongPressForTesting(.changed, at: CGPoint(x: 40, y: 479.5))
+            try await Task.sleep(for: .milliseconds(120))
+            hostView.debugLongPressForTesting(.ended, at: CGPoint(x: 40, y: 479.5))
+            let scrolledByLift = log.events.filter { $0 == .autoscroll(towardOlderRows: false) }.count
+            try await Task.sleep(for: .milliseconds(80))
+
+            XCTAssertGreaterThanOrEqual(scrolledByLift, 2, "the held drag keeps scrolling toward newer rows")
+            XCTAssertEqual(log.events.filter { $0 == .autoscroll(towardOlderRows: false) }.count, scrolledByLift, "lifting stops the scroll")
+            XCTAssertEqual(log.events.filter { $0 == .autoscroll(towardOlderRows: true) }.count, 0)
+        }
+
+        /// Each handle moves its own end by cell and leaves the other where it was.
+        func testRemoteTerminalHostViewHandleDragsAdjustEachEndByCell() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log, selection: absoluteSelection(from: (2, 101), to: (6, 101)))
+            XCTAssertEqual(hostView.debugVisibleSelectionHandlesForTesting, [.start, .end])
+            let scale = UIScreen.main.scale
+            let cell = GhosttyRemoteTerminalViewport.cellMetrics(fontSize: .default, scale: scale)
+
+            let startGrab = hostView.debugSelectionHandleGrabPointForTesting(.start)
+            hostView.debugSelectionHandleDragForTesting(.start, from: startGrab, to: CGPoint(x: startGrab.x - cell.width * 2, y: startGrab.y))
+            let endGrab = hostView.debugSelectionHandleGrabPointForTesting(.end)
+            hostView.debugSelectionHandleDragForTesting(.end, from: endGrab, to: CGPoint(x: endGrab.x + cell.width * 3, y: endGrab.y + cell.height))
+
+            XCTAssertEqual(
+                log.events,
+                [
+                    .beginHandle(.start), .extend(TerminalAbsoluteCell(column: 0, row: 101)), .end, .beginHandle(.end),
+                    .extend(TerminalAbsoluteCell(column: 9, row: 102)), .end,
+                ])
+        }
+
+        /// A handle whose end is off screen is not drawn.
+        func testRemoteTerminalHostViewDrawsNoHandleForAnEndThatIsOffScreen() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log, selection: absoluteSelection(from: (2, 101), to: (6, 140)))
+
+            XCTAssertEqual(hostView.debugVisibleSelectionHandlesForTesting, [.start])
+        }
+
+        /// In a program that tracks the mouse a long-press drag is the program's drag: a press, motion with
+        /// the button held once per cell, then the release.
+        func testRemoteTerminalHostViewLongPressDragGoesToAProgramTrackingTheMouse() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log, mouseTrackingLevel: .buttonMotion)
+            hostView.debugMouseCapturedForTesting = true
+            var mouse: [MouseEvent] = []
+            hostView.onSendMouseButton = { _, pressed, position in
+                mouse.append(.button(pressed: pressed, x: position.x, y: position.y))
+                return true
+            }
+            hostView.onSendMouseMotion = { position in
+                mouse.append(.motion(x: position.x, y: position.y))
+                return true
+            }
+
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 3, row: 1))
+            hostView.debugLongPressForTesting(.changed, at: pointInCell(column: 3, row: 1))
+            hostView.debugLongPressForTesting(.changed, at: pointInCell(column: 4, row: 1))
+            hostView.debugLongPressForTesting(.changed, at: pointInCell(column: 4, row: 1))
+            hostView.debugLongPressForTesting(.changed, at: pointInCell(column: 4, row: 2))
+            hostView.debugLongPressForTesting(.ended, at: pointInCell(column: 4, row: 2))
+
+            XCTAssertEqual(mouse.count, 4, "press, motion into each new cell (not repeats of a cell), release")
+            guard mouse.count == 4 else { return }
+            guard case .button(pressed: true, _, _) = mouse[0], case .motion = mouse[1], case .motion(let lastX, let lastY) = mouse[2],
+                case .button(pressed: false, let releaseX, let releaseY) = mouse[3]
+            else { return XCTFail("unexpected sequence \(mouse)") }
+            XCTAssertEqual(releaseX, lastX)
+            XCTAssertEqual(releaseY, lastY, "the release is where the drag ended")
+            XCTAssertEqual(log.events, [], "the program's drag selects nothing")
+        }
+
+        /// Motion goes to the program only when the frame's tracking level wants it for a held button.
+        func testRemoteTerminalHostViewLongPressDragSendsNoMotionToAProgramThatOnlyWantsClicks() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log, mouseTrackingLevel: .clicks)
+            hostView.debugMouseCapturedForTesting = true
+            var motionCount = 0
+            var buttonCount = 0
+            hostView.onSendMouseButton = { _, _, _ in
+                buttonCount += 1
+                return true
+            }
+            hostView.onSendMouseMotion = { _ in
+                motionCount += 1
+                return true
+            }
+
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 3, row: 1))
+            hostView.debugLongPressForTesting(.changed, at: pointInCell(column: 9, row: 4))
+            hostView.debugLongPressForTesting(.ended, at: pointInCell(column: 9, row: 4))
+
+            XCTAssertEqual(motionCount, 0)
+            XCTAssertEqual(buttonCount, 2)
+        }
+
+        /// A press the app layer refuses (this client does not own input, or it is reading its replay)
+        /// leaves the long press to select text.
+        func testRemoteTerminalHostViewLongPressSelectsWhenTheProgramPressIsRefused() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log, mouseTrackingLevel: .anyMotion)
+            hostView.debugMouseCapturedForTesting = true
+            hostView.onSendMouseButton = { _, _, _ in false }
+            let word = absoluteSelection(from: (2, 101), to: (5, 101))
+            hostView.setWordSelectionHandlerForTesting { _ in word }
+
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 3, row: 1))
+            hostView.debugLongPressForTesting(.ended, at: pointInCell(column: 3, row: 1))
+
+            XCTAssertEqual(log.events, [.beginWord(word), .end])
+        }
+
+        /// The Select key makes the next long press a Spaces selection even in a program that tracks the
+        /// mouse, then turns itself off.
+        func testRemoteTerminalHostViewSelectKeyRoutesTheNextLongPressToSelectionThenTurnsOff() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log, mouseTrackingLevel: .anyMotion)
+            hostView.debugMouseCapturedForTesting = true
+            var programPresses = 0
+            hostView.onSendMouseButton = { _, pressed, _ in
+                if pressed { programPresses += 1 }
+                return true
+            }
+            let word = absoluteSelection(from: (2, 101), to: (5, 101))
+            hostView.setWordSelectionHandlerForTesting { _ in word }
+
+            hostView.debugToggleSelectKeyForTesting()
+            XCTAssertTrue(hostView.debugIsSelectKeyOnForTesting)
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 3, row: 1))
+            hostView.debugLongPressForTesting(.ended, at: pointInCell(column: 3, row: 1))
+
+            XCTAssertEqual(log.events, [.beginWord(word), .end])
+            XCTAssertEqual(programPresses, 0)
+            XCTAssertFalse(hostView.debugIsSelectKeyOnForTesting, "the key turns itself off once a selection is made")
+
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 3, row: 1))
+            XCTAssertEqual(programPresses, 1, "with the key off the next long press is the program's again")
+        }
+
+        /// A second word pressed through the Select key, while the first word's selection still stands in
+        /// a program that tracks the mouse, selects exactly that word: Ghostty must not read the shift press
+        /// as an extension of the old selection. Runs the mirror's real double click, so it waits out the
+        /// click-repeat interval the extension rule keys on.
+        func testRemoteTerminalHostViewSelectKeyOnASecondWordSelectsThatWordNotAnExtension() async throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let log = SelectionEventLog()
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+            viewController.view.frame = window.bounds
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            hostView.selectionActions = log.actions
+            viewController.view.addSubview(hostView)
+            viewController.view.layoutIfNeeded()
+            defer { hostView.removeFromSuperview() }
+            let line = Array("one two three four")
+            let cells = (0..<400).map { index -> GhosttyTerminalSnapshot.Cell in
+                let column = index % 40
+                let scalar = index / 40 == 1 && column < line.count ? line[column].unicodeScalars.first!.value : 0x20
+                return GhosttyTerminalSnapshot.Cell(codepoint: scalar, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
+            }
+            hostView.update(
+                snapshot: GhosttyTerminalSnapshot(
+                    columns: 40, rows: 10, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xF2F2F2,
+                    defaultBackgroundRGB: 0x1A1E26, cells: cells, mouseTrackingLevel: .clicks, historyRowBase: 100, historyEpoch: 7),
+                renderStateKey: "words", fallbackText: "")
+            let deadline = Date().addingTimeInterval(5)
+            // Slept rather than run-looped: the mirror is acquired by a main-actor task.
+            while !hostView.hasMirrorSurfaceForTesting && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
+            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
+            try await Task.sleep(for: .milliseconds(200))
+
+            hostView.debugToggleSelectKeyForTesting()
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 1, row: 1))
+            hostView.debugLongPressForTesting(.ended, at: pointInCell(column: 1, row: 1))
+            try await Task.sleep(for: .milliseconds(800))
+            hostView.debugToggleSelectKeyForTesting()
+            hostView.debugLongPressForTesting(.began, at: pointInCell(column: 9, row: 1))
+            hostView.debugLongPressForTesting(.ended, at: pointInCell(column: 9, row: 1))
+
+            XCTAssertEqual(
+                log.events,
+                [
+                    .beginWord(absoluteSelection(from: (0, 101), to: (2, 101))), .end, .beginWord(absoluteSelection(from: (8, 101), to: (12, 101))),
+                    .end,
+                ])
+        }
+
+        /// The Select key is offered only while the program tracks the mouse.
+        func testRemoteTerminalHostViewShowsTheSelectKeyOnlyWhileTheProgramTracksTheMouse() {
+            let log = SelectionEventLog()
+            let hostView = selectionHostView(log: log)
+            XCTAssertFalse(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.scrollable.contains("Select text"))
+
+            hostView.update(
+                snapshot: filledSnapshot(columns: 40, rows: 10, mouseTrackingLevel: .anyMotion), renderStateKey: "tracking", fallbackText: "")
+            let tracking = hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.scrollable
+            XCTAssertEqual(tracking.last, "Select text")
+            XCTAssertEqual(tracking.dropLast().last, "Option", "the key sits at the end of the scrolling keys, just after opt")
+            XCTAssertEqual(
+                hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Compose message", "Arrow key joystick", "Hide keyboard"])
+
+            hostView.debugToggleSelectKeyForTesting()
+            hostView.update(snapshot: filledSnapshot(columns: 40, rows: 10), renderStateKey: "not-tracking", fallbackText: "")
+            XCTAssertFalse(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.scrollable.contains("Select text"))
+            XCTAssertFalse(hostView.debugIsSelectKeyOnForTesting, "the key does not stay armed after the program stops tracking")
         }
 
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {
@@ -737,8 +1034,9 @@
 
             let scrollView = try XCTUnwrap(descendants(of: accessoryView, matching: UIScrollView.self).first)
             let buttons = descendants(of: accessoryView, matching: UIButton.self)
-            let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
-            let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
+            // The Select key exists only while a program tracks the mouse, so it is hidden here.
+            let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) && !$0.isHidden }
+            let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) && !$0.isHidden }
             XCTAssertEqual(
                 scrollableButtons.compactMap(\.accessibilityLabel),
                 ["Paste", "tab", "/", "~", "|", "-", "_", "esc", "Shift", "Control", "Command", "Option"])
@@ -1279,9 +1577,9 @@
                 "the cursor is on the last row, so the shift is the whole hidden height")
 
             // A row-offset-only change -- the keyboard geometry and grid untouched, only where the cursor
-            // sits -- must still produce a report: the Copy pill and the `keyboard_shift_applied`
-            // measurement have to see every window the surface actually renders, not only the ones a
-            // size-only dedupe would have let through.
+            // sits -- must still produce a report: the jump-to-bottom button and the
+            // `keyboard_shift_applied` measurement have to see every window the surface actually renders,
+            // not only the ones a size-only dedupe would have let through.
             let cursorNearTopOfWindowSnapshot = promptAtTopSnapshot(columns: 80, rows: keyboardUpReported.rows)
             hostView.update(
                 snapshot: cursorNearTopOfWindowSnapshot,
@@ -2654,9 +2952,7 @@
 
             let focusDeadline = Date().addingTimeInterval(2)
             while !hostView.isFirstResponder && Date() < focusDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-            XCTAssertTrue(
-                hostView.isFirstResponder,
-                "a sheet already on its way out must not block the request its dismissal signal makes")
+            XCTAssertTrue(hostView.isFirstResponder, "a sheet already on its way out must not block the request its dismissal signal makes")
             wait(for: [dismissedExpectation], timeout: 2)
         }
 

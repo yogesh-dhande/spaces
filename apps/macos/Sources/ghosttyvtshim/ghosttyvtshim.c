@@ -74,6 +74,7 @@ typedef GhosttyResult (*GhosttyTerminalPointFromGridRefFn)(GhosttyTerminal, cons
 typedef GhosttyResult (*GhosttyTerminalSelectionFormatAllocFn)(
     GhosttyTerminal, const GhosttyAllocator *, GhosttyTerminalSelectionFormatOptions, uint8_t **, size_t *
 );
+typedef GhosttyResult (*GhosttyTerminalSelectAllFn)(GhosttyTerminal, GhosttySelection *);
 typedef size_t (*GhosttyTerminalTakeRenderScrollRectsFn)(GhosttyTerminal, GhosttyTerminalScrollRect *, size_t, bool *);
 typedef GhosttyResult (*GhosttyTerminalSetActiveScreenFn)(GhosttyTerminal, GhosttyTerminalScreen);
 typedef GhosttyResult (*GhosttyTerminalTabstopFn)(GhosttyTerminal, uint16_t, bool *);
@@ -134,6 +135,7 @@ typedef GhosttyResult (*GhosttyTerminalTabstopFn)(GhosttyTerminal, uint16_t, boo
     X(terminal_grid_ref, GhosttyTerminalGridRefFn, ghostty_terminal_grid_ref)                                                  \
     X(terminal_point_from_grid_ref, GhosttyTerminalPointFromGridRefFn, ghostty_terminal_point_from_grid_ref)                   \
     X(terminal_selection_format_alloc, GhosttyTerminalSelectionFormatAllocFn, ghostty_terminal_selection_format_alloc)         \
+    X(terminal_select_all, GhosttyTerminalSelectAllFn, ghostty_terminal_select_all)                                            \
     X(terminal_take_render_scroll_rects, GhosttyTerminalTakeRenderScrollRectsFn, ghostty_terminal_take_render_scroll_rects) \
     X(terminal_set_active_screen, GhosttyTerminalSetActiveScreenFn, ghostty_terminal_set_active_screen)                        \
     X(terminal_tabstop, GhosttyTerminalTabstopFn, ghostty_terminal_tabstop)
@@ -1109,16 +1111,34 @@ bool spaces_ghostty_vt_session_encode_key(
     return true;
 }
 
-bool spaces_ghostty_vt_session_mouse_tracking_active(SpacesGhosttyVtSession *session, bool *out_active) {
-    if (out_active == NULL) return false;
-    *out_active = false;
+bool spaces_ghostty_vt_session_mouse_tracking_level(SpacesGhosttyVtSession *session, uint8_t *out_level) {
+    if (out_level == NULL) return false;
+    *out_level = SPACES_GHOSTTY_VT_MOUSE_TRACKING_NONE;
     if (session == NULL || session->terminal == NULL) return false;
 
-    bool active = false;
-    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &active) != GHOSTTY_SUCCESS) {
+    // The terminal's single tracking flag, not the tracking mode bits: the flag is what the mouse
+    // encoder reports against and what the macOS host exports. It follows the latest tracking-mode
+    // request and any tracking-mode reset clears it, so the mode bits can disagree (1003 then 1000
+    // sets both bits but tracks clicks only; 1000, 1003, then 1003 reset leaves the 1000 bit set but
+    // tracks nothing).
+    GhosttyMouseTrackingMode event = GHOSTTY_MOUSE_TRACKING_NONE;
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_EVENT, &event) != GHOSTTY_SUCCESS) {
         return false;
     }
-    *out_active = active;
+    switch (event) {
+        case GHOSTTY_MOUSE_TRACKING_X10:
+        case GHOSTTY_MOUSE_TRACKING_NORMAL:
+            *out_level = SPACES_GHOSTTY_VT_MOUSE_TRACKING_CLICKS;
+            break;
+        case GHOSTTY_MOUSE_TRACKING_BUTTON:
+            *out_level = SPACES_GHOSTTY_VT_MOUSE_TRACKING_BUTTON_MOTION;
+            break;
+        case GHOSTTY_MOUSE_TRACKING_ANY:
+            *out_level = SPACES_GHOSTTY_VT_MOUSE_TRACKING_ANY_MOTION;
+            break;
+        default:
+            break;
+    }
     return true;
 }
 
@@ -1149,8 +1169,13 @@ bool spaces_ghostty_vt_session_encode_mouse(
     *out_ptr = NULL;
     *out_len = 0;
     if (session == NULL || session->terminal == NULL) return false;
-    if (button < SPACES_GHOSTTY_VT_MOUSE_BUTTON_LEFT || button > SPACES_GHOSTTY_VT_MOUSE_BUTTON_ELEVEN) return false;
-    if (action != SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS && action != SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE) return false;
+    if (action != SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS && action != SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE &&
+        action != SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION) {
+        return false;
+    }
+    // Motion with no button held passes button 0; every other event names its button.
+    const bool no_button = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION && button == 0;
+    if (!no_button && (button < SPACES_GHOSTTY_VT_MOUSE_BUTTON_LEFT || button > SPACES_GHOSTTY_VT_MOUSE_BUTTON_ELEVEN)) return false;
 
     uint16_t columns = 0;
     uint16_t rows = 0;
@@ -1182,7 +1207,9 @@ bool spaces_ghostty_vt_session_encode_mouse(
         .cell_height = 1,
     };
     session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
-    const bool any_button_pressed = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS;
+    // A press has its button down, and so does motion that names a held button.
+    const bool any_button_pressed = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS ||
+        (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION && !no_button);
     session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed);
 
     GhosttyMouseEvent event = NULL;
@@ -1190,11 +1217,12 @@ bool spaces_ghostty_vt_session_encode_mouse(
         session->symbols.mouse_encoder_free(encoder);
         return false;
     }
-    session->symbols.mouse_event_set_action(
-        event,
-        action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS ? GHOSTTY_MOUSE_ACTION_PRESS : GHOSTTY_MOUSE_ACTION_RELEASE
-    );
-    session->symbols.mouse_event_set_button(event, (GhosttyMouseButton)button);
+    GhosttyMouseAction ghostty_action = GHOSTTY_MOUSE_ACTION_RELEASE;
+    if (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS) ghostty_action = GHOSTTY_MOUSE_ACTION_PRESS;
+    if (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION) ghostty_action = GHOSTTY_MOUSE_ACTION_MOTION;
+    session->symbols.mouse_event_set_action(event, ghostty_action);
+    // A new event starts with no button, which is what button-less motion needs.
+    if (!no_button) session->symbols.mouse_event_set_button(event, (GhosttyMouseButton)button);
     session->symbols.mouse_event_set_mods(event, (GhosttyMods)mods);
     // Aim at the middle of the cell so the encoder's floor-to-cell lands on the requested one.
     GhosttyMousePosition position = { .x = (float)cell_column + 0.5f, .y = (float)cell_row + 0.5f };
@@ -1693,6 +1721,26 @@ bool spaces_ghostty_vt_session_scrollbar(SpacesGhosttyVtSession *session, Spaces
     return true;
 }
 
+bool spaces_ghostty_vt_session_history_position(SpacesGhosttyVtSession *session, SpacesGhosttyVtHistoryPosition *out) {
+    if (out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyTerminalScrollbar scrollbar = {0};
+    uint64_t rows_pruned = 0;
+    uint64_t history_epoch = 0;
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_ROWS_PRUNED, &rows_pruned) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_HISTORY_EPOCH, &history_epoch) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    out->total = scrollbar.total;
+    out->offset = scrollbar.offset;
+    out->rows_pruned = rows_pruned;
+    out->history_epoch = history_epoch;
+    return true;
+}
+
 bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, intptr_t delta_rows) {
     SpacesGhosttyVtScrollbar before = {0};
     SpacesGhosttyVtScrollbar after = {0};
@@ -1703,16 +1751,16 @@ bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, 
 size_t spaces_ghostty_vt_session_take_scroll_rects(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtScrollRect *out,
-    size_t capacity,
-    bool *overflowed
+    size_t capacity
 ) {
-    if (overflowed != NULL) *overflowed = false;
+    // The wrapped API reports overflow; no consumer acts on it, so it lands in a local.
+    bool overflowed = false;
     if (session == NULL || session->terminal == NULL) return 0;
 
     // No destination (or a zero capacity) still has to drain the terminal's pending buffer, matching
     // the wrapped API's own no-op-but-clears contract.
     if (out == NULL || capacity == 0) {
-        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, overflowed);
+        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, &overflowed);
     }
 
     // GhosttyTerminalScrollRect is a sized (ABI-versioned) struct, so each output slot's `size` is set
@@ -1721,13 +1769,13 @@ size_t spaces_ghostty_vt_session_take_scroll_rects(
     if (vt_rects == NULL) {
         // Still drain the terminal's pending buffer so a caller that retries after freeing memory sees
         // fresh rects rather than a backlog, even though this particular call reports none.
-        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, overflowed);
+        return session->symbols.terminal_take_render_scroll_rects(session->terminal, NULL, 0, &overflowed);
     }
     for (size_t index = 0; index < capacity; index++) {
         vt_rects[index].size = sizeof(GhosttyTerminalScrollRect);
     }
 
-    size_t written = session->symbols.terminal_take_render_scroll_rects(session->terminal, vt_rects, capacity, overflowed);
+    size_t written = session->symbols.terminal_take_render_scroll_rects(session->terminal, vt_rects, capacity, &overflowed);
     for (size_t index = 0; index < written; index++) {
         out[index].row_start = vt_rects[index].row_start;
         out[index].row_count = vt_rects[index].row_count;
@@ -1762,8 +1810,16 @@ static bool spaces_ghostty_vt_session_screen_grid_ref(
     return session->symbols.terminal_grid_ref(session->terminal, point, out_ref) == GHOSTTY_SUCCESS;
 }
 
-bool spaces_ghostty_vt_session_set_selection(
-    SpacesGhosttyVtSession *session, uint16_t start_x, uint32_t start_y, uint16_t end_x, uint32_t end_y, bool rectangle
+// Builds an untracked selection snapshot from two screen-space endpoints, clamped into the screen
+// extent. The snapshot is valid until the next mutating terminal call.
+static bool spaces_ghostty_vt_session_screen_selection(
+    SpacesGhosttyVtSession *session,
+    uint16_t start_x,
+    uint32_t start_y,
+    uint16_t end_x,
+    uint32_t end_y,
+    bool rectangle,
+    GhosttySelection *out_selection
 ) {
     if (session == NULL || session->terminal == NULL) return false;
 
@@ -1784,16 +1840,14 @@ bool spaces_ghostty_vt_session_set_selection(
     selection.start = start_ref;
     selection.end = end_ref;
     selection.rectangle = rectangle;
-
-    return session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection) == GHOSTTY_SUCCESS;
+    *out_selection = selection;
+    return true;
 }
 
-void spaces_ghostty_vt_session_clear_selection(SpacesGhosttyVtSession *session) {
-    if (session == NULL || session->terminal == NULL) return;
-    session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
-}
-
-char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *session, size_t *out_len) {
+// Formats `selection` with Ghostty's copy semantics.
+static char *spaces_ghostty_vt_session_format_selection_text(
+    SpacesGhosttyVtSession *session, const GhosttySelection *selection, size_t *out_len
+) {
     if (out_len != NULL) *out_len = 0;
     if (session == NULL || session->terminal == NULL) return NULL;
 
@@ -1801,7 +1855,7 @@ char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *sess
     options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
     options.unwrap = true;
     options.trim = true;
-    options.selection = NULL;  // The terminal's current active selection.
+    options.selection = selection;
 
     uint8_t *formatted = NULL;
     size_t formatted_len = 0;
@@ -1824,60 +1878,61 @@ char *spaces_ghostty_vt_session_selection_text_copy(SpacesGhosttyVtSession *sess
     return result;
 }
 
+char *spaces_ghostty_vt_session_range_text_copy(
+    SpacesGhosttyVtSession *session, uint16_t start_x, uint32_t start_y, uint16_t end_x, uint32_t end_y, bool rectangle, size_t *out_len
+) {
+    if (out_len != NULL) *out_len = 0;
+    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    if (!spaces_ghostty_vt_session_screen_selection(session, start_x, start_y, end_x, end_y, rectangle, &selection)) return NULL;
+    return spaces_ghostty_vt_session_format_selection_text(session, &selection, out_len);
+}
+
 void spaces_ghostty_vt_session_selection_text_free(char *text) {
     free(text);
 }
 
-bool spaces_ghostty_vt_session_selection_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out) {
-    if (out == NULL) return false;
-    memset(out, 0, sizeof(*out));
-    if (session == NULL || session->terminal == NULL) return false;
-
-    bool valid = false;
-    GhosttyResult valid_result = session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SELECTION_VALID, &valid);
-    if (valid_result == GHOSTTY_NO_VALUE) {
-        // No selection at all; `out` is already zeroed.
-        return true;
-    }
-    if (valid_result != GHOSTTY_SUCCESS) return false;
-
-    out->present = true;
-    out->valid = valid;
-    if (!valid) {
-        // A garbage pin: the raw GHOSTTY_TERMINAL_DATA_SELECTION snapshot has collapsed to a
-        // meaningless position, so it is not read; coordinates stay zeroed.
-        return true;
-    }
-
-    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
-    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection) != GHOSTTY_SUCCESS) {
-        return false;
-    }
-
+// Writes `selection`'s screen-space endpoints into `out`, ordered so (start_y, start_x) <= (end_y, end_x).
+// GhosttySelection endpoints preserve drag direction and may be reversed; this flattens that for
+// callers that need the selected span rather than which end the drag started from.
+static bool spaces_ghostty_vt_session_fill_selection_coordinates(
+    SpacesGhosttyVtSession *session, const GhosttySelection *selection, SpacesGhosttyVtSelectionState *out
+) {
     GhosttyPointCoordinate start_coordinate = {0};
     GhosttyPointCoordinate end_coordinate = {0};
-    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection.start, GHOSTTY_POINT_TAG_SCREEN, &start_coordinate) !=
+    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection->start, GHOSTTY_POINT_TAG_SCREEN, &start_coordinate) !=
         GHOSTTY_SUCCESS) {
         return false;
     }
-    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection.end, GHOSTTY_POINT_TAG_SCREEN, &end_coordinate) !=
+    if (session->symbols.terminal_point_from_grid_ref(session->terminal, &selection->end, GHOSTTY_POINT_TAG_SCREEN, &end_coordinate) !=
         GHOSTTY_SUCCESS) {
         return false;
     }
 
-    // GhosttySelection endpoints preserve drag direction and may be reversed; order them here so
-    // callers get the selected span rather than which end the drag started from.
     bool reversed =
         start_coordinate.y > end_coordinate.y || (start_coordinate.y == end_coordinate.y && start_coordinate.x > end_coordinate.x);
     GhosttyPointCoordinate ordered_start = reversed ? end_coordinate : start_coordinate;
     GhosttyPointCoordinate ordered_end = reversed ? start_coordinate : end_coordinate;
 
-    out->rectangle = selection.rectangle;
+    out->rectangle = selection->rectangle;
     out->start_x = ordered_start.x;
     out->start_y = ordered_start.y;
     out->end_x = ordered_end.x;
     out->end_y = ordered_end.y;
     return true;
+}
+
+bool spaces_ghostty_vt_session_select_all_state(SpacesGhosttyVtSession *session, SpacesGhosttyVtSelectionState *out) {
+    if (out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    GhosttyResult result = session->symbols.terminal_select_all(session->terminal, &selection);
+    if (result == GHOSTTY_NO_VALUE) return true;  // No selectable content; `out` is already zeroed.
+    if (result != GHOSTTY_SUCCESS) return false;
+
+    out->present = true;
+    return spaces_ghostty_vt_session_fill_selection_coordinates(session, &selection, out);
 }
 
 void spaces_ghostty_vt_snapshot_free(SpacesGhosttyVtSnapshot *snapshot) {

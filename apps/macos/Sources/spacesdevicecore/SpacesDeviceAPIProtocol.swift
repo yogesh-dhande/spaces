@@ -2178,10 +2178,8 @@ public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equata
     case scroll
     case scrollToBottom
     case mouseButton
+    case mouseMotion
     case setAppearance
-    case setSelection
-    case clearSelection
-    case readSelectionText
 }
 
 public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
@@ -2213,13 +2211,6 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     /// its terminal with the client's theme variant. Mirrors `TerminalControlRequest.appearance`; without it
     /// the daemon keeps its default theme on the device-API attach path.
     public let appearance: ThemeAppearance?
-    /// `setSelection`'s endpoints, in absolute screen-space coordinates (row 0 = oldest retained
-    /// scrollback row). Mirrors `TerminalControlRequest.selectionStartColumn` etc.
-    public let selectionStartColumn: UInt16?
-    public let selectionStartRow: UInt32?
-    public let selectionEndColumn: UInt16?
-    public let selectionEndRow: UInt32?
-    public let selectionRectangle: Bool?
     /// The render frame the requesting client currently displays, sent on `heartbeat`. A heartbeat
     /// answers with the session's state, and an identity that names the session's current frame lets that
     /// state omit the render update entirely (see `TerminalHeldFrameIdentity`).
@@ -2238,8 +2229,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
         mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
         mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil,
-        selectionStartColumn: UInt16? = nil, selectionStartRow: UInt32? = nil, selectionEndColumn: UInt16? = nil, selectionEndRow: UInt32? = nil,
-        selectionRectangle: Bool? = nil, heldFrameIdentity: TerminalHeldFrameIdentity? = nil, includesRenderUpdate: Bool = true
+        heldFrameIdentity: TerminalHeldFrameIdentity? = nil, includesRenderUpdate: Bool = true
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -2266,11 +2256,6 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.appendNewline = appendNewline
         self.asPaste = asPaste
         self.appearance = appearance
-        self.selectionStartColumn = selectionStartColumn
-        self.selectionStartRow = selectionStartRow
-        self.selectionEndColumn = selectionEndColumn
-        self.selectionEndRow = selectionEndRow
-        self.selectionRectangle = selectionRectangle
         self.heldFrameIdentity = heldFrameIdentity
         self.includesRenderUpdate = includesRenderUpdate
     }
@@ -3369,7 +3354,6 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case terminalLinkMetadata(SpacesDeviceTerminalLinkMetadata)
     case terminalLinkChunk(SpacesDeviceTerminalLinkChunk)
     case terminalOutput(SpacesDeviceTerminalOutputResult)
-    case terminalSelectionText(SpacesDeviceTerminalOutputResult)
     case terminalTranscript(SpacesDeviceTerminalTranscriptResult)
     case agentHooksStatus(SpacesAgentHooksStatusPayload)
     case agentHooksInstall(AgentHookInstallOutcome)
@@ -3403,7 +3387,6 @@ extension SpacesDeviceAPIResult: Codable {
         case terminalLinkMetadata
         case terminalLinkChunk
         case terminalOutput
-        case terminalSelectionText
         case terminalTranscript
         case agentHooksStatus
         case agentHooksInstall
@@ -3442,7 +3425,6 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkMetadata: self = .terminalLinkMetadata(try container.decode(SpacesDeviceTerminalLinkMetadata.self, forKey: key))
         case .terminalLinkChunk: self = .terminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunk.self, forKey: key))
         case .terminalOutput: self = .terminalOutput(try container.decode(SpacesDeviceTerminalOutputResult.self, forKey: key))
-        case .terminalSelectionText: self = .terminalSelectionText(try container.decode(SpacesDeviceTerminalOutputResult.self, forKey: key))
         case .terminalTranscript: self = .terminalTranscript(try container.decode(SpacesDeviceTerminalTranscriptResult.self, forKey: key))
         case .agentHooksStatus: self = .agentHooksStatus(try container.decode(SpacesAgentHooksStatusPayload.self, forKey: key))
         case .agentHooksInstall: self = .agentHooksInstall(try container.decode(AgentHookInstallOutcome.self, forKey: key))
@@ -3482,7 +3464,6 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkMetadata(let payload): try container.encode(payload, forKey: .terminalLinkMetadata)
         case .terminalLinkChunk(let payload): try container.encode(payload, forKey: .terminalLinkChunk)
         case .terminalOutput(let payload): try container.encode(payload, forKey: .terminalOutput)
-        case .terminalSelectionText(let payload): try container.encode(payload, forKey: .terminalSelectionText)
         case .terminalTranscript(let payload): try container.encode(payload, forKey: .terminalTranscript)
         case .agentHooksStatus(let payload): try container.encode(payload, forKey: .agentHooksStatus)
         case .agentHooksInstall(let payload): try container.encode(payload, forKey: .agentHooksInstall)
@@ -3572,8 +3553,6 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var terminalLinkChunk: SpacesDeviceTerminalLinkChunk? { if case .terminalLinkChunk(let payload) = result { payload } else { nil } }
 
     public var terminalOutput: String? { if case .terminalOutput(let payload) = result { payload.text } else { nil } }
-
-    public var terminalSelectionText: String? { if case .terminalSelectionText(let payload) = result { payload.text } else { nil } }
 
     public var terminalTranscript: SpacesDeviceTerminalTranscriptResult? {
         if case .terminalTranscript(let payload) = result { payload } else { nil }

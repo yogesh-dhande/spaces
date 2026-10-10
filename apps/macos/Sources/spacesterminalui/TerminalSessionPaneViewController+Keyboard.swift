@@ -39,38 +39,17 @@ extension TerminalSessionPaneViewController {
 
     @objc public func copy(_ sender: Any?) {
         switch visibleRenderer {
-        case .ghosttyOwner:
-            guard preferredAttachmentMode == .owner else {
-                updateInputStatus(message: "Only the active owner can copy from the live terminal.", isError: true)
-                NSSound.beep()
+        case .ghosttyOwner, .ghosttyEndedFinalRender:
+            // The selection belongs to this pane and its text comes from the pane's own replay, so
+            // copying needs no ownership: any attached client can copy what it selected. With no
+            // selection the host does nothing.
+            guard let ghosttyRendererHost, ghosttyRendererHost.hasRenderableSurface() else {
+                copyOutputViewSelection(sender)
                 return
             }
-            // The daemon's shared selection is not owner-gated and can span rows the local mirror has
-            // scrolled away from (e.g. set by a different device viewing the same terminal), so it can
-            // hold text the local reads below cannot see. Try it first; fall back to those local reads
-            // only when there is no shared selection to find.
-            guard let ghosttyRendererHost else {
-                copyFromLocalGhosttySelection(beepOnFailure: true)
-                return
-            }
-            ghosttyRendererHost.copySharedSelectionToPasteboard { [weak self] copiedSharedSelection in
-                guard !copiedSharedSelection else { return }
-                self?.copyFromLocalGhosttySelection(beepOnFailure: true)
-            }
-        case .ghosttyEndedFinalRender:
-            if canPerformLiveTerminalReadOnlyAction, copyFromLocalGhosttySelection(beepOnFailure: false) { return }
-            copyOutputViewSelection(sender)
+            ghosttyRendererHost.copySelectionToPasteboard()
         case .ghosttyTakeoverStatus, .unavailable, .textView: copyOutputViewSelection(sender)
         }
-    }
-
-    @discardableResult
-    private func copyFromLocalGhosttySelection(beepOnFailure: Bool) -> Bool {
-        let copied =
-            copySelectionAction?() ?? ghosttyRendererHost?.performBindingAction("copy_to_clipboard") ?? ghosttyRendererHost?
-            .copySelectionToPasteboard() ?? false
-        if !copied, beepOnFailure { NSSound.beep() }
-        return copied
     }
 
     private func copyOutputViewSelection(_ sender: Any?) {
@@ -130,13 +109,10 @@ extension TerminalSessionPaneViewController {
     }
 
     @objc public func selectAll(_ sender: Any?) {
-        if visibleRenderer == .ghosttyOwner {
-            guard performLiveTerminalReadOnlyBindingAction("select_all") else { return }
-            return
-        }
-        if visibleRenderer == .ghosttyEndedFinalRender, canPerformLiveTerminalReadOnlyAction,
-            ghosttyRendererHost?.performBindingAction("select_all") == true
+        if visibleRenderer == .ghosttyOwner || visibleRenderer == .ghosttyEndedFinalRender, let ghosttyRendererHost,
+            ghosttyRendererHost.hasRenderableSurface()
         {
+            ghosttyRendererHost.selectAll()
             return
         }
         window?.makeFirstResponder(outputView)
@@ -272,12 +248,11 @@ extension TerminalSessionPaneViewController {
     /// the same reason.
     private func reportDisconnectedInputAttempt() {
         guard isStateStreamBannerVisible else { return }
-        let message = stateStreamConnectionStage == .unreachable ? TerminalPaneBannerNotice.unreachable.message : TerminalPaneBannerNotice.disconnected.message
+        let message =
+            stateStreamConnectionStage == .unreachable ? TerminalPaneBannerNotice.unreachable.message : TerminalPaneBannerNotice.disconnected.message
         // Typing repeats this on every keystroke; re-stating an unchanged message would re-run the
         // header layout pass for nothing.
-        if inputStatusLabel.stringValue != message {
-            updateInputStatus(message: message, isError: true)
-        }
+        if inputStatusLabel.stringValue != message { updateInputStatus(message: message, isError: true) }
         banner.flash()
     }
 
@@ -297,7 +272,8 @@ extension TerminalSessionPaneViewController {
             updateInputStatus(message: "", isError: false)
             return
         }
-        let message = stateStreamConnectionStage == .unreachable ? TerminalPaneBannerNotice.unreachable.message : TerminalPaneBannerNotice.disconnected.message
+        let message =
+            stateStreamConnectionStage == .unreachable ? TerminalPaneBannerNotice.unreachable.message : TerminalPaneBannerNotice.disconnected.message
         guard inputStatusLabel.stringValue != message else { return }
         updateInputStatus(message: message, isError: true)
     }
@@ -422,16 +398,4 @@ extension TerminalSessionPaneViewController {
         return true
     }
 
-    @discardableResult private func performLiveTerminalReadOnlyBindingAction(_ action: String) -> Bool {
-        guard canPerformLiveTerminalReadOnlyAction else {
-            if preferredAttachmentMode != .owner { updateInputStatus(message: "Only the active owner can edit the live terminal.", isError: true) }
-            NSSound.beep()
-            return false
-        }
-        guard ghosttyRendererHost?.performBindingAction(action) == true else {
-            NSSound.beep()
-            return false
-        }
-        return true
-    }
 }

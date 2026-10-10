@@ -27,9 +27,10 @@ import Foundation
     /// leaves the transcript exactly as it was.
     public typealias LiveTranscriptEndOffsetProvider = @TerminalEngineActor () -> UInt64?
 
-    /// Adopts the post-trim append handle and end offset. The session's previous handle points at the
+    /// Adopts the post-trim append handle, end offset, and the shift that renumbers a pre-trim offset
+    /// to the trimmed file's (see `TrimResult.offsetShift`). The session's previous handle points at the
     /// unlinked pre-trim inode, so the session must store this one and close the old one.
-    public typealias TrimmedTranscriptAdopter = @TerminalEngineActor (FileHandle, UInt64) -> Void
+    public typealias TrimmedTranscriptAdopter = @TerminalEngineActor (FileHandle, UInt64, Int64) -> Void
 
     private let outputPath: String
     private let triggerBytes: UInt64
@@ -97,7 +98,7 @@ import Foundation
             return
         }
         guard let result = try? TerminalTranscriptTrim.commit(staged, outputPath: outputPath, currentEndOffset: currentEndOffset) else { return }
-        adoptTrimmedTranscript(result.writeHandle, result.endOffset)
+        adoptTrimmedTranscript(result.writeHandle, result.endOffset, result.offsetShift)
         // A burst can append more than the trigger/retained gap while staging runs, in which case the
         // adopted file is already past the trigger again — and if the burst then stops, no further append
         // would re-evaluate. Re-check with the adopted end (the trigger guard makes this free when the

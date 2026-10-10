@@ -4047,12 +4047,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         logDeviceAPIPerformance(
             sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             attributes: responseAttributes)
-        // setSelection and readSelectionText carry their text on the control response rather than in
-        // session state (they are not owner-gated view changes, so they never includeSessionStateOnSuccess);
-        // surface it the same way sessionState surfaces above so mobile/remote clients receive it.
-        let result: SpacesDeviceAPIResult? =
-            sessionState.map(SpacesDeviceAPIResult.terminalState)
-            ?? response.selectionText.map { SpacesDeviceAPIResult.terminalSelectionText(SpacesDeviceTerminalOutputResult(text: $0)) }
+        let result = sessionState.map(SpacesDeviceAPIResult.terminalState)
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message, errorCode: response.errorCode, result: result)
     }
 
@@ -4087,14 +4082,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 TerminalControlMouseButtonPayload(
                     clientID: clientID, ownerEpoch: payload.ownerEpoch, button: payload.mouseButton, pressed: payload.mousePressed,
                     pointerX: payload.mousePointerX, pointerY: payload.mousePointerY, pointerMods: payload.mousePointerMods))
+        case .mouseMotion:
+            .mouseMotion(
+                TerminalControlMouseMotionPayload(
+                    clientID: clientID, ownerEpoch: payload.ownerEpoch, pointerX: payload.mousePointerX, pointerY: payload.mousePointerY,
+                    pointerMods: payload.mousePointerMods))
         case .setAppearance: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: payload.appearance))
-        case .setSelection:
-            .setSelection(
-                TerminalControlSetSelectionPayload(
-                    clientID: clientID, startColumn: payload.selectionStartColumn, startRow: payload.selectionStartRow,
-                    endColumn: payload.selectionEndColumn, endRow: payload.selectionEndRow, rectangle: payload.selectionRectangle))
-        case .clearSelection: .clearSelection(TerminalControlClientPayload(clientID: clientID))
-        case .readSelectionText: .readSelectionText(TerminalControlClientPayload(clientID: clientID))
         }
     }
 
@@ -4175,7 +4168,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Taken from the open descriptor, so it names the file these bytes come from even if a trim
         // renames a replacement over the path a moment later. Serving it back is what lets the client's
         // next continuation be verified (see `continuationTranscriptData`).
-        let fileIdentity = try Self.transcriptFileIdentity(handle: handle)
+        let fileIdentity = try TerminalTranscriptFileIdentity.of(handle)
         let totalBytes = try handle.seekToEnd()
         // The preamble grid (columns/rows) only shapes how a suffix rebuild renders; a session that has
         // never reported one (no runtime row yet) gets the conventional 80x24, the same shape every other
@@ -4298,25 +4291,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             remaining -= chunk.count
         }
         return result
-    }
-
-    /// The transcript file an open handle refers to, as its inode number. A rename of another file over
-    /// `output.log` (which is how a head-trim commits) leaves this handle on the file it opened and
-    /// gives the path a different one, so the number is what distinguishes the two.
-    ///
-    /// Accepted risk: an inode number can in principle be reused once the trimmed file is unlinked, which
-    /// would let a stale continuation pass this check against a same-numbered but unrelated file. APFS
-    /// allocates inode numbers monotonically and does not reuse them, and on ext4 a false match needs two
-    /// trims (each moving tens of megabytes of transcript) landing between two gestures of the same
-    /// undiscarded replay, plus the allocator happening to hand the freed number back in that window; the
-    /// existing offset and gap guards in `continuationTranscriptData` still bound what such a continuation
-    /// could return even then. A durable generation token would have to be persisted through the same
-    /// write-behind runtime state whose lag the run-identity check already tolerates, so the inode is kept
-    /// rather than adding that persistence for a risk this narrow.
-    private static func transcriptFileIdentity(handle: FileHandle) throws -> UInt64 {
-        var info = stat()
-        guard fstat(handle.fileDescriptor, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        return UInt64(info.st_ino)
     }
 
     /// The newest `cap` bytes of the transcript, cut where the VT parser can pick up and prefixed with the

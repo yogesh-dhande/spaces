@@ -155,7 +155,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// metadata-only callers (and tests) pass true to refresh title/ownership
     /// without a live surface.
     let defersInitialOwnerClientAttach: Bool
-    let copySelectionAction: (@MainActor () -> Bool)?
     let pasteClipboardAction: (@MainActor () -> Bool)?
     /// Asks the host to move the app-wide terminal text size by one step. The pane does not own the
     /// size: it is one value shared by every pane and persisted per profile, so a zoom key press is
@@ -295,11 +294,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
         pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
-        detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        defersInitialOwnerClientAttach: Bool = false, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
-        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
-        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
-        onCloseClientDetached: (@MainActor @Sendable (Bool) -> Void)? = nil,
+        detachClientAction: @escaping @Sendable (String) throws -> Void, defersInitialOwnerClientAttach: Bool = false,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil, onCloseClientDetached: (@MainActor @Sendable (Bool) -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.sessionID = sessionID
@@ -351,7 +349,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
         self.attachClientAction = attachClientAction
         self.detachClientAction = detachClientAction
         self.defersInitialOwnerClientAttach = defersInitialOwnerClientAttach
-        self.copySelectionAction = copySelectionAction
         self.pasteClipboardAction = pasteClipboardAction
         self.ownerWindowFocusAction = ownerWindowFocusAction
         self.ownerSurfaceFocusAction = ownerSurfaceFocusAction

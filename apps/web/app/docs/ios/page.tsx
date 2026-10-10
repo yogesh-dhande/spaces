@@ -74,6 +74,8 @@ export default function IOSDocsPage() {
               <li>• Open a session to watch its output and type into it, the same shell every other client sees.</li>
               <li>• Compose a longer message and attach an image, then send it in one go.</li>
               <li>• A tap acts as a click when the program inside the session tracks the mouse.</li>
+              <li>• Long-press to select a word, keep your finger down to extend the selection, and drag the handles to adjust either end. A menu offers Copy and Select All; the selection is yours alone and ends when you type or tap. Drag past the top or bottom edge to keep selecting through scrollback.</li>
+              <li>• In a program that tracks the mouse, a long-press drag goes to the program. A Select key appears in the key row while it does; tap it and the next long press selects text instead.</li>
               <li>• The keyboard comes up on its own when you open a session you own, and comes back once you close the composer or another sheet.</li>
               <li>• A connection banner with Retry shows when the app cannot reach the session&apos;s device.</li>
             </ul>
