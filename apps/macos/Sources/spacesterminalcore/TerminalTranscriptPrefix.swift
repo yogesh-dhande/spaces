@@ -67,8 +67,9 @@ public enum TerminalTranscriptPrefix {
     /// payload holds a raw newline before a bare-BEL (or CAN/SUB) terminator contains no ESC at all, so
     /// the newline cut lands inside the payload even though the sequence terminates within the window.
     /// BEL ends an OSC but is inert data inside DCS passthrough, so terminator ordering proves nothing
-    /// without parser state; the sound fix (validating the cut against parser ground state during the
-    /// preamble replay) is tracked in issue #225.
+    /// without parser state; the sound fix would validate the cut against parser ground state during the
+    /// preamble replay. Accepted (#225): the residual needs a raw LF (nonstandard) inside an OSC payload
+    /// with no ESC anywhere in the 1 MiB scan window, and the effect is cosmetic, in replayed scrollback only.
     ///
     /// Single pass: the first newline offset is remembered while scanning for the first ESC rather than
     /// re-reading the window to find it separately.

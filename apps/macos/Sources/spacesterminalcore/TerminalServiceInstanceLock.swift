@@ -113,6 +113,9 @@ public final class TerminalServiceInstanceLock {
 
     private static func existingRecord(path: String) throws -> LockRecord? {
         let url = URL(fileURLWithPath: path, isDirectory: false)
+        // Accepted (#308): a lock file removed between this exists-check and the read makes the read throw
+        // instead of reporting a free lock. Only a concurrent handoff or restart removes the file, and only
+        // inside that microsecond window.
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         let data = try Data(contentsOf: url)
         return try? JSONDecoder().decode(LockRecord.self, from: data)

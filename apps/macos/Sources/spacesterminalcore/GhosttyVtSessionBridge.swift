@@ -43,6 +43,10 @@ public enum GhosttyVtSessionBridge {
     /// paints it onto the frames it displays. The scrollback replay passes no scrollbar but does pass
     /// `historyRowBase` and `historyEpoch`, in the host's numbering once the replay is aligned with it
     /// (`TerminalLocalScrollbackModel`).
+    ///
+    /// Accepted (#365): the snapshot leaves `mouseShiftCapture` at its default, so Linux sessions do not
+    /// export XTSHIFTESCAPE state and shift-clicks stay local on mirrors for the rare programs that enable
+    /// it. Plain clicks and the wheel are unaffected; exporting it needs new libghostty-vt API.
     public static func snapshot(
         from rawSnapshot: SpacesGhosttyVtSnapshot, mouseTrackingLevel: TerminalMouseTrackingLevel, alternateScreenActive: Bool,
         scrollbarTotal: UInt32 = 0, scrollbarOffset: UInt32 = 0, historyRowBase: UInt64 = 0, historyEpoch: UInt64 = 0

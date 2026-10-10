@@ -25,6 +25,9 @@ public enum SpacesDeviceHostAddressKind: Sendable, Equatable {
         }
     }
 
+    // Accepted (#258): 100.64/10 is the shared CGNAT range Tailscale draws from, so a carrier-grade NAT or
+    // tethered LAN address in it is labeled Tailscale. Only the label and guidance text are affected;
+    // connectivity is not.
     private static func isTailscaleRangeAddress(_ host: String) -> Bool {
         let octets = host.split(separator: ".").compactMap { UInt8($0) }
         guard octets.count == 4 else { return false }

@@ -331,6 +331,12 @@ extension WorkspaceOrchestrator {
             }
             importedDocument.applying(to: &project)
         }
+        // Accepted (#638): the project row and its default workspace are separate writes, so discovery's scan
+        // of the new project can insert the default-branch workspace between them and fail this insert on
+        // `workspaces_project_branch_unique`. That is rare: the default workspace is written straight after
+        // on this thread, while discovery first installs a watcher and runs `git worktree list`. The
+        // rollback deletes the project (cascading over discovery's row) and a retry succeeds. The same
+        // pattern in `addReviewedProject` carries the same risk.
         try store.upsert(project: record)
         do { try ensureDefaultWorkspace(for: record) } catch {
             try? store.deleteProject(id: record.id)

@@ -380,6 +380,7 @@ jobs:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
           channelId: live
+          # The project id is stable and not secret, so it is written here rather than read from a secret (#311).
           projectId: spaces-a1814
           entryPoint: apps/web
 
