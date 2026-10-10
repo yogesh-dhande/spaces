@@ -48,6 +48,7 @@ Builds the Linux spacesd device artifact for the current host architecture. The 
   spacesd-linux-<arch>/bin/spacesd
   spacesd-linux-<arch>/bin/spacesd-bin
   spacesd-linux-<arch>/bin/libghostty-vt.so*
+  spacesd-linux-<arch>/bin/ghostty/shell-integration/
   spacesd-linux-<arch>/lib/libswift*.so and related Swift runtime libraries
   spacesd-linux-<arch>/install.sh
   spacesd-linux-<arch>/manifest.json
@@ -298,6 +299,18 @@ copy_ghostty_vt_libraries() {
     if [[ -e "$destination_bin/libghostty-vt.so.0" && ! -e "$destination_bin/libghostty-vt.so" ]]; then
         (cd "$destination_bin" && ln -s libghostty-vt.so.0 libghostty-vt.so)
     fi
+}
+
+# Ghostty's shell-integration scripts, which the generated shell startup files source so prompts carry
+# OSC 133 marks. They sit in `bin/ghostty/shell-integration`, where the daemon's Ghostty resource lookup
+# (the `ghostty` directory beside its executable) finds them and hands the shells that directory as
+# GHOSTTY_RESOURCES_DIR.
+copy_ghostty_shell_integration() {
+    local destination_resources="$1"
+    local source_dir="$GHOSTTY_SOURCE_ROOT/src/shell-integration"
+    [[ -d "$source_dir" ]] || die "Ghostty shell integration scripts missing at $source_dir"
+    mkdir -p "$destination_resources"
+    cp -R "$source_dir" "$destination_resources/shell-integration"
 }
 
 # Fails the build when a binary we compiled carries an instruction the target baseline CPU
@@ -832,6 +845,7 @@ package_artifact() {
     copy_swift_runtime_libraries "$spacesd_bin" "$staging_root/lib"
     copy_swift_runtime_libraries "$spaces_bin" "$staging_root/lib"
     copy_ghostty_vt_libraries "$staging_root/bin"
+    copy_ghostty_shell_integration "$staging_root/bin/ghostty"
     verify_artifact_cpu_baseline "$staging_root/bin"
     write_manifest "$staging_root" "$ghostty_sha" "$archive_name"
     (

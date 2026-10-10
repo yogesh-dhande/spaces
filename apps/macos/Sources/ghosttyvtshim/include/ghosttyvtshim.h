@@ -326,6 +326,33 @@ bool spaces_ghostty_vt_session_alternate_screen_active(
     bool *out_active
 );
 
+// What the clear-screen action (Cmd+K) is for the session's terminal right now.
+typedef enum {
+    // The query failed, or the buffer was too small. Nothing was written.
+    SPACES_GHOSTTY_VT_CLEAR_SCREEN_FAILED = 0,
+    // Nothing is cleared: the alternate screen is active.
+    SPACES_GHOSTTY_VT_CLEAR_SCREEN_NOTHING = 1,
+    // The bytes clear the screen and scrollback.
+    SPACES_GHOSTTY_VT_CLEAR_SCREEN_CLEARED = 2,
+    // The bytes clear the screen and scrollback, and the cursor is at a shell prompt: the host must
+    // also write a form feed (0x0C) to the shell so it repaints.
+    SPACES_GHOSTTY_VT_CLEAR_SCREEN_AT_PROMPT = 3,
+} SpacesGhosttyVtClearScreenResult;
+
+// Capacity `spaces_ghostty_vt_session_clear_screen_sequence` needs in `out`.
+#define SPACES_GHOSTTY_VT_CLEAR_SCREEN_SEQUENCE_CAPACITY 256
+
+// Writes the escape sequences that perform Ghostty's clear-screen action into `out` and the byte
+// count into `out_len`. The terminal is only read: the caller feeds the bytes to the session (and
+// records them wherever it records output) before any other output, so the state they were built
+// from still holds.
+SpacesGhosttyVtClearScreenResult spaces_ghostty_vt_session_clear_screen_sequence(
+    SpacesGhosttyVtSession *session,
+    uint8_t *out,
+    size_t out_capacity,
+    size_t *out_len
+);
+
 bool spaces_ghostty_vt_session_copy_snapshot(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtSnapshot *out_snapshot

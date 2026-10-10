@@ -1114,11 +1114,26 @@
             guard ownerRequestIsCurrent(request) else {
                 return TerminalControlResponse(ok: false, message: "Only the active owner can clear the terminal.", errorCode: .ownershipRejected)
             }
-            let mutation = GhosttyTerminalTranscriptMutation.clearScreenAndScrollback
+            guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            // The clear is Ghostty's own rule, built from the live terminal state as escape bytes. They take
+            // the normal output path (transcript, then renderer, in this engine turn), so `output.log`
+            // replays to exactly this screen.
+            var sequence = [UInt8](repeating: 0, count: Int(SPACES_GHOSTTY_VT_CLEAR_SCREEN_SEQUENCE_CAPACITY))
+            var length = 0
+            let result = spaces_ghostty_vt_session_clear_screen_sequence(vtSession, &sequence, sequence.count, &length)
+            switch result {
+            case SPACES_GHOSTTY_VT_CLEAR_SCREEN_CLEARED, SPACES_GHOSTTY_VT_CLEAR_SCREEN_AT_PROMPT: break
+            case SPACES_GHOSTTY_VT_CLEAR_SCREEN_NOTHING:
+                return TerminalControlResponse(ok: false, message: "Unable to clear terminal screen.")
+            default: return TerminalControlResponse(ok: false, message: "Unable to build the terminal clear operation.")
+            }
+            let mutation = Data(sequence[..<length])
             guard appendTranscript(mutation) else {
                 return TerminalControlResponse(ok: false, message: "Unable to persist the terminal clear operation.")
             }
             writeVTRenderer(mutation)
+            // At a prompt the shell repaints it on a form feed; its redraw is ordinary output.
+            if result == SPACES_GHOSTTY_VT_CLEAR_SCREEN_AT_PROMPT { enqueueControlInputWrite(Data([0x0C])) }
             broadcastCurrentState(reason: .clearScreen)
             return TerminalControlResponse(ok: true, message: "Cleared terminal screen and scrollback.")
         }

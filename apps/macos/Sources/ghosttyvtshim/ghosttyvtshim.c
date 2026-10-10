@@ -78,6 +78,7 @@ typedef GhosttyResult (*GhosttyTerminalSelectAllFn)(GhosttyTerminal, GhosttySele
 typedef size_t (*GhosttyTerminalTakeRenderScrollRectsFn)(GhosttyTerminal, GhosttyTerminalScrollRect *, size_t, bool *);
 typedef GhosttyResult (*GhosttyTerminalSetActiveScreenFn)(GhosttyTerminal, GhosttyTerminalScreen);
 typedef GhosttyResult (*GhosttyTerminalTabstopFn)(GhosttyTerminal, uint16_t, bool *);
+typedef GhosttyResult (*GhosttyTerminalClearScreenSequenceFn)(GhosttyTerminal, uint8_t *, size_t, size_t *, bool *);
 
 // Every libghostty-vt entry point the shim calls, as (table field, function-pointer type, library
 // function). This one list drives the symbol table's layout, how it is filled, and the completeness
@@ -138,7 +139,8 @@ typedef GhosttyResult (*GhosttyTerminalTabstopFn)(GhosttyTerminal, uint16_t, boo
     X(terminal_select_all, GhosttyTerminalSelectAllFn, ghostty_terminal_select_all)                                            \
     X(terminal_take_render_scroll_rects, GhosttyTerminalTakeRenderScrollRectsFn, ghostty_terminal_take_render_scroll_rects) \
     X(terminal_set_active_screen, GhosttyTerminalSetActiveScreenFn, ghostty_terminal_set_active_screen)                        \
-    X(terminal_tabstop, GhosttyTerminalTabstopFn, ghostty_terminal_tabstop)
+    X(terminal_tabstop, GhosttyTerminalTabstopFn, ghostty_terminal_tabstop)                                                    \
+    X(terminal_clear_screen_sequence, GhosttyTerminalClearScreenSequenceFn, ghostty_terminal_clear_screen_sequence)
 
 typedef struct {
     void *handle;
@@ -1153,6 +1155,28 @@ bool spaces_ghostty_vt_session_alternate_screen_active(SpacesGhosttyVtSession *s
     }
     *out_active = screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
     return true;
+}
+
+SpacesGhosttyVtClearScreenResult spaces_ghostty_vt_session_clear_screen_sequence(
+    SpacesGhosttyVtSession *session,
+    uint8_t *out,
+    size_t out_capacity,
+    size_t *out_len
+) {
+    if (out_len != NULL) *out_len = 0;
+    if (session == NULL || session->terminal == NULL || out == NULL || out_len == NULL) {
+        return SPACES_GHOSTTY_VT_CLEAR_SCREEN_FAILED;
+    }
+
+    bool at_prompt = false;
+    GhosttyResult result =
+        session->symbols.terminal_clear_screen_sequence(session->terminal, out, out_capacity, out_len, &at_prompt);
+    if (result == GHOSTTY_NO_VALUE) return SPACES_GHOSTTY_VT_CLEAR_SCREEN_NOTHING;
+    if (result != GHOSTTY_SUCCESS) {
+        *out_len = 0;
+        return SPACES_GHOSTTY_VT_CLEAR_SCREEN_FAILED;
+    }
+    return at_prompt ? SPACES_GHOSTTY_VT_CLEAR_SCREEN_AT_PROMPT : SPACES_GHOSTTY_VT_CLEAR_SCREEN_CLEARED;
 }
 
 bool spaces_ghostty_vt_session_encode_mouse(

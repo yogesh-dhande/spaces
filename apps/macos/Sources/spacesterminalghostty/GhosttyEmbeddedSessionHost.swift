@@ -384,10 +384,9 @@
         /// Invariant: every PTY byte reaches Ghostty's parser (`ghostty_session_process_output` on the PTY
         /// reader thread) and, through the data callback that fires on the same bytes before parsing,
         /// `output.log` in the same order, so replaying the first `n` bytes of the file leaves a terminal
-        /// that has consumed `n` PTY bytes. Three things break the one-to-one count, and `delta` absorbs
-        /// each:
-        ///  - A clear (`clearScreenAndScrollback`) mutates Ghostty directly and appends a marker sequence
-        ///    to the file that Ghostty never parses, so the file runs ahead by the marker's length.
+        /// that has consumed `n` PTY bytes. A clear keeps the count one-to-one: Ghostty performs it as
+        /// escape bytes through the same data callback and parser. Two things break the count, and `delta`
+        /// absorbs each:
         ///  - A head trim replaces the file with a preamble plus the retained tail, so every later offset
         ///    shifts by `TrimResult.offsetShift`.
         ///  - A core resumed from an exec handoff replays the whole file through the parser before it
@@ -397,9 +396,7 @@
         /// The file is appended on a later engine-actor turn than the parse (the data callback only
         /// buffers), and a capture flushes that buffer first, so a chunk parsed after the flush can sit
         /// past the file's current end: the offset then names bytes that are about to land, in order, in
-        /// the same file. A clear that lands while PTY bytes are still in flight can likewise leave one
-        /// frame's offset off by the marker's length until the parser catches up (the next frame is
-        /// exact).
+        /// the same file.
         private var transcriptOffsetDelta: Int64 = 0
         private var started = false
         private var didTerminateCurrentRun = false
@@ -2391,19 +2388,12 @@
             }
         }
 
-        /// Keeps the renderer mutation replayable. The marker enters the same locked
-        /// coalescing buffer as PTY callbacks, preserving its byte order with concurrent
-        /// output before the buffer is drained synchronously.
-        private func clearScreenAndScrollback() -> Bool {
-            guard sessionDriver.clearScreenAndScrollback() else { return false }
-            _ = incomingOutputBuffer.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback, interactive: false)
-            let outputThroughClear = incomingOutputBuffer.drain()
-            let appended = appendOutput(outputThroughClear.data, interactiveResync: outputThroughClear.isInteractive, shouldBroadcastState: false)
-            // Ghostty cleared directly and never parsed the marker, so the file is now longer than the
-            // parser's count by the marker's length (see `transcriptOffsetDelta`).
-            if appended { transcriptOffsetDelta += Int64(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback.count) }
-            return appended
-        }
+        /// Runs Ghostty's `clear_screen` action. Ghostty performs it on its IO thread as escape bytes it
+        /// parses itself, so the clear reaches the data callback (and so `output.log`) and
+        /// `bytes_processed` in the same mailbox order as PTY output; the host records nothing of its own,
+        /// which is what keeps the file replaying to the live screen. Returns false when Ghostty declines
+        /// (the alternate screen).
+        private func clearScreenAndScrollback() -> Bool { sessionDriver.clearScreenAndScrollback() }
 
         @discardableResult private func ensureOutputHandle() throws -> FileHandle {
             if let outputHandle { return outputHandle }
@@ -3028,12 +3018,10 @@
                 if flushSchedule == .delayed { do { try await Task.sleep(for: Self.incomingOutputCoalescingInterval) } catch { return } }
                 guard let self else { return }
                 // Drain ON the terminal engine actor so drain and file append form one critical
-                // section. Every other drain (clearScreenAndScrollback's transcript
-                // mutation, the quiesce flush) runs on the engine actor too, so this keeps
-                // output.log byte order identical to buffer order. Draining here off the
-                // engine actor would let an engine-actor drain+append (e.g. a clear) write
-                // first, landing these earlier bytes AFTER the clear in the transcript —
-                // a handoff replay would then resurrect the cleared screen.
+                // section. Every other drain (the quiesce flush) runs on the engine actor
+                // too, so this keeps output.log byte order identical to buffer order.
+                // Draining here off the engine actor would let an engine-actor drain+append
+                // write first, landing these earlier bytes AFTER later ones in the transcript.
                 await TerminalEngineActor.run {
                     let drainedOutput = self.incomingOutputBuffer.drain()
                     guard !drainedOutput.data.isEmpty else { return }

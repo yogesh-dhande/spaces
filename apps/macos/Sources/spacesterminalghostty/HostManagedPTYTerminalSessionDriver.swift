@@ -155,12 +155,20 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         var windowSize = winsize(ws_row: UInt16(cellSize.rows), ws_col: UInt16(cellSize.columns), ws_xpixel: 0, ws_ypixel: 0)
         let command = Self.execCommand(for: launchConfiguration)
         #if os(macOS)
-            let terminfoDirectoryPath = try Self.resolvedTerminfoDirectoryPath()
-            let environmentOverrides: [(key: String, value: String)] = [
-                ("TERM", "xterm-ghostty"), ("TERMINFO", terminfoDirectoryPath), ("COLORTERM", "truecolor"),
-            ]
+            let ghosttyPaths = try Self.resolvedGhosttyPaths()
+            let environmentOverrides: [(key: String, value: String)] =
+                [("TERM", "xterm-ghostty"), ("TERMINFO", ghosttyPaths.terminfoDirectoryPath), ("COLORTERM", "truecolor")]
+                + Self.ghosttyShellIntegrationEnvironment(resourcesDirectoryPath: ghosttyPaths.resourcesDirectoryPath)
         #else
-            let environmentOverrides: [(key: String, value: String)] = [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
+            // A Linux daemon built outside the release artifact (a development build) has no bundled
+            // Ghostty resources; its shells then run without prompt marks.
+            var resourcesDirectoryPath: String?
+            if case .available(let paths) = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath) {
+                resourcesDirectoryPath = paths.resourcesDirectoryPath
+            }
+            let environmentOverrides: [(key: String, value: String)] =
+                [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
+                + Self.ghosttyShellIntegrationEnvironment(resourcesDirectoryPath: resourcesDirectoryPath)
         #endif
         // Everything the child needs is materialized here, in the parent: C strings for the
         // executable, argv, the child's full environment, and the working directory, plus the
@@ -785,13 +793,25 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     }
 
     #if os(macOS)
-        private static func resolvedTerminfoDirectoryPath() throws -> String {
+        private static func resolvedGhosttyPaths() throws -> GhosttyEmbeddedPaths {
             switch GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath) {
-            case .available(let paths): paths.terminfoDirectoryPath
+            case .available(let paths): paths
             case .unavailable(let reason): throw GhosttyEmbeddedAppServiceError.configuration(reason)
             }
         }
     #endif
+
+    /// What lets a shell load Ghostty's own shell integration (the scripts under
+    /// `<resources>/shell-integration`, sourced from the generated startup files in `SpacesShellIntegration`):
+    /// the resources directory those scripts are found through, and `GHOSTTY_SHELL_FEATURES` set to empty so
+    /// every optional feature (title, cursor shape, sudo, ssh, PATH) stays off even when the daemon itself
+    /// was started from a Ghostty terminal that exports its own. Only the always-on parts remain: OSC 133
+    /// prompt marks, which Cmd+K needs to tell a prompt from a running program, and OSC 7 directory reports.
+    static func ghosttyShellIntegrationEnvironment(resourcesDirectoryPath: String?) -> [(key: String, value: String)] {
+        var environment: [(key: String, value: String)] = [("GHOSTTY_SHELL_FEATURES", "")]
+        if let resourcesDirectoryPath { environment.append(("GHOSTTY_RESOURCES_DIR", resourcesDirectoryPath)) }
+        return environment
+    }
 
     private static func forkPTY(master: inout Int32, windowSize: inout winsize) -> Int32 {
         #if os(Linux)

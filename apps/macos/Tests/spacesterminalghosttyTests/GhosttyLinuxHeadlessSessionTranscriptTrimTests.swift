@@ -239,11 +239,12 @@
             let screen = try #require(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: core) })
             #expect(!screen.contains(marker), "the live renderer must apply the clear, dropping the marker from the visible screen")
 
-            // The clear mutation bytes are durably persisted at the tail of output.log — the trim never
-            // rewrites the file, so the durable write is intact.
+            // The clear bytes are durably persisted at the tail of output.log — the trim never rewrites the
+            // file, so the durable write is intact. Whatever else the clear writes, it erases scrollback.
             let persisted = try Data(contentsOf: URL(fileURLWithPath: paths.outputPath))
-            let mutation = GhosttyTerminalTranscriptMutation.clearScreenAndScrollback
-            #expect(persisted.suffix(mutation.count) == mutation, "the clear mutation bytes must be durably appended to output.log")
+            let eraseScrollback = Data("\u{1B}[3J".utf8)
+            #expect(persisted.range(of: eraseScrollback, options: .backwards) != nil, "the clear bytes must be durably appended to output.log")
+            #expect(persisted.count > transcript.count, "the clear must grow output.log")
         }
     }
 #endif

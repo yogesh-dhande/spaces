@@ -293,7 +293,93 @@ final class SpacesShellIntegrationTests: XCTestCase {
         if ran == 0 { throw XCTSkip("no zsh, bash or fish available") }
     }
 
+    // MARK: Ghostty prompt marks
+
+    /// What Cmd+K needs from a shell: each prompt carries an OSC 133 mark, and the directory is reported
+    /// with OSC 7. The terminal's other shell-integration features stay off, so neither the window title
+    /// nor the cursor shape is ever set.
+    private func expectMarksPromptsWithOptionalFeaturesOff(_ result: Result, shell: String) {
+        let output = result.stdout + result.stderr
+        XCTAssertTrue(output.contains("\u{1B}]133;A"), "\(shell) emitted no prompt mark: \(result)")
+        XCTAssertTrue(output.contains("\u{1B}]7;"), "\(shell) reported no directory: \(result)")
+        XCTAssertFalse(output.contains("\u{1B}]2;"), "\(shell) set the window title: \(result)")
+        XCTAssertFalse(output.contains("\u{1B}[5 q") || output.contains("\u{1B}[0 q"), "\(shell) set the cursor shape: \(result)")
+    }
+
+    func testZshMarksPromptsWithEveryOptionalFeatureOff() throws {
+        let shell = try requireShell(["/bin/zsh", "/usr/bin/zsh"])
+        let result = try runBareShell(
+            shell, stdin: "echo hi\ncd /\n", extraEnvironment: try ghosttyIntegrationEnvironment(), detachedFromTerminal: true)
+        expectMarksPromptsWithOptionalFeaturesOff(result, shell: shell)
+    }
+
+    func testBashMarksPromptsWithEveryOptionalFeatureOff() throws {
+        let shell = try requireInjectableBash()
+        let result = try runBareShell(
+            shell, stdin: "echo hi\ncd /\n", extraEnvironment: try ghosttyIntegrationEnvironment(), detachedFromTerminal: true)
+        expectMarksPromptsWithOptionalFeaturesOff(result, shell: shell)
+    }
+
+    func testFishMarksPromptsWithEveryOptionalFeatureOff() throws {
+        let shell = try requireShell(fishCandidates)
+        let result = try runBareShell(
+            shell, stdin: "echo hi\ncd /\n", extraEnvironment: try ghosttyIntegrationEnvironment(), detachedFromTerminal: true)
+        expectMarksPromptsWithOptionalFeaturesOff(result, shell: shell)
+    }
+
+    func testPromptMarksDoNotDisturbThePathHook() throws {
+        let environment = try ghosttyIntegrationEnvironment()
+        let zsh = try requireShell(["/bin/zsh", "/usr/bin/zsh"])
+        try writeFile(prependFnm + "prepend_node() { path=(\(quotedFnm) $path) }\nprecmd_functions+=(prepend_node)\n", at: home.appendingPathComponent(".zshrc"))
+        let zshResult = try runBareShell(zsh, stdin: "command -v codex\ncodex hello\n", extraEnvironment: environment, detachedFromTerminal: true)
+        XCTAssertTrue(zshResult.stdout.contains(integration.wrapperPath), "\(zshResult)")
+        XCTAssertEqual(zshResult.args, ["--no-daemon", "hello"], "\(zshResult)")
+
+        let bash = try requireInjectableBash()
+        try writeFile(prependFnm, at: home.appendingPathComponent(".bash_profile"))
+        let bashResult = try runBareShell(bash, stdin: "command -v codex\ncodex hello\n", extraEnvironment: environment, detachedFromTerminal: true)
+        XCTAssertTrue(bashResult.stdout.contains(integration.wrapperPath), "\(bashResult)")
+        XCTAssertEqual(bashResult.args, ["--no-daemon", "hello"], "\(bashResult)")
+    }
+
+    func testShellsStartWithoutMarksWhenGhosttyResourcesAreUnset() throws {
+        let zsh = try requireShell(["/bin/zsh", "/usr/bin/zsh"])
+        let result = try runBareShell(zsh, stdin: "echo hi\n", detachedFromTerminal: true)
+        XCTAssertFalse((result.stdout + result.stderr).contains("\u{1B}]133;"), "\(result)")
+        XCTAssertFalse(result.stderr.contains("No such file"), "\(result)")
+    }
+
+    func testCommandLaunchRunsNoPromptMarkIntegration() throws {
+        let environment = try ghosttyIntegrationEnvironment()
+        let shell = try requireShell(["/bin/zsh", "/usr/bin/zsh"])
+        let inner = integration.commandPathPrelude(shellPath: shell).map { "\($0); echo hi" } ?? "echo hi"
+        let exec = "exec \(SpacesShellIntegrationScripts.quoted(shell)) -l -i -c \(SpacesShellIntegrationScripts.quoted(inner))"
+        let launch = (integration.commandLaunchStatements(shellPath: shell) + [exec]).joined(separator: "; ")
+        let result = try run(
+            shell, ["-l", "-c", launch], environment: baseEnvironment(path: "/usr/bin:/bin", extra: environment), detachedFromTerminal: true)
+        XCTAssertTrue(result.stdout.contains("hi"), "\(result)")
+        XCTAssertFalse((result.stdout + result.stderr).contains("\u{1B}]133;"), "\(result)")
+    }
+
     // MARK: Harness
+
+    /// The environment the terminal driver gives a shell so the generated startup files can load Ghostty's
+    /// shell integration: its resources directory, with every optional feature off. The scripts are the
+    /// pinned fork's own, linked into a resources layout under the sandbox.
+    private func ghosttyIntegrationEnvironment(filePath: String = #filePath) throws -> [String: String] {
+        let macOSPackage = URL(fileURLWithPath: filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let scripts = macOSPackage.appendingPathComponent("vendor/ghostty/src/shell-integration", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: scripts.appendingPathComponent("zsh/ghostty-integration").path) else {
+            throw XCTSkip("the Ghostty submodule is not checked out")
+        }
+        let resources = sandbox.appendingPathComponent("ghostty resources", isDirectory: true)
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        let link = resources.appendingPathComponent("shell-integration")
+        if !FileManager.default.fileExists(atPath: link.path) {
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: scripts)
+        }
+        return ["GHOSTTY_RESOURCES_DIR": resources.path, "GHOSTTY_SHELL_FEATURES": ""]
+    }
 
     private var quotedFnm: String { SpacesShellIntegrationScripts.quoted(fnmBin.path) }
     /// What a version manager's rc line does: puts its per-shell directory (holding the real `codex`) first.
@@ -338,11 +424,15 @@ final class SpacesShellIntegrationTests: XCTestCase {
     /// The launch Spaces builds for a bare shell, driven the way the PTY driver drives it (`<shell> -l -c
     /// '<statements>; exec <shell> ...'`). `-i` is added to the exec'd shell because the test has no
     /// terminal to make it interactive.
-    private func runBareShell(_ shell: String, stdin: String, extraEnvironment: [String: String] = [:]) throws -> Result {
+    private func runBareShell(_ shell: String, stdin: String, extraEnvironment: [String: String] = [:], detachedFromTerminal: Bool = false) throws
+        -> Result
+    {
         let launch = integration.bareShellLaunch(shellPath: shell)
         let exec = "exec \(SpacesShellIntegrationScripts.quoted(shell)) \((launch.shellArguments + ["-i"]).joined(separator: " "))"
         let command = (launch.statements + [exec]).joined(separator: "; ")
-        return try run(shell, ["-l", "-c", command], environment: baseEnvironment(path: "/usr/bin:/bin", extra: extraEnvironment), stdin: stdin)
+        return try run(
+            shell, ["-l", "-c", command], environment: baseEnvironment(path: "/usr/bin:/bin", extra: extraEnvironment), stdin: stdin,
+            detachedFromTerminal: detachedFromTerminal)
     }
 
     private func runCommandLaunch(_ shell: String, command: String) throws -> Result {
@@ -352,12 +442,22 @@ final class SpacesShellIntegrationTests: XCTestCase {
         return try run(shell, ["-l", "-c", launch], environment: baseEnvironment(path: "/usr/bin:/bin"))
     }
 
-    private func run(_ executable: String, _ arguments: [String], environment: [String: String], stdin: String = "", currentDirectory: URL? = nil)
-        throws -> Result
-    {
+    /// `detachedFromTerminal` starts the program in its own session, so it has no controlling terminal.
+    /// Ghostty's integration writes its marks to `/dev/tty` when it can open it, which would send them to
+    /// the terminal running the tests instead of the captured output; without a controlling terminal it
+    /// writes them to stdout.
+    private func run(
+        _ executable: String, _ arguments: [String], environment: [String: String], stdin: String = "", currentDirectory: URL? = nil,
+        detachedFromTerminal: Bool = false
+    ) throws -> Result {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
+        if detachedFromTerminal {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+            process.arguments = ["-MPOSIX", "-e", "POSIX::setsid(); exec @ARGV", executable] + arguments
+        } else {
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+        }
         process.environment = environment
         process.currentDirectoryURL = currentDirectory ?? home
         let stdoutURL = sandbox.appendingPathComponent("out-\(UUID().uuidString)")

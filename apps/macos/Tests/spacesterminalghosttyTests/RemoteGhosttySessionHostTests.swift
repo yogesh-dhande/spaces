@@ -2394,7 +2394,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // What the daemon's `output.log` holds after it performs the clear: the history it already had,
         // the clear it records for anyone replaying those bytes, and what the session prints afterwards.
         var clearedTranscript = Self.transcript(rows: 1...200)
-        clearedTranscript.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback)
+        clearedTranscript.append(Self.recordedClear)
         clearedTranscript.append(Data("\r\n".utf8))
         clearedTranscript.append(Data((1...200).map { String(format: "new-%03d", $0) }.joined(separator: "\r\n").utf8))
         let transcript = MutableTranscript(Self.transcript(rows: 1...200))
@@ -2451,7 +2451,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // What the daemon's `output.log` holds after the other client's clear: the history it already had,
         // the clear it records for anyone replaying those bytes, and what the session prints afterwards.
         var clearedTranscript = Self.transcript(rows: 1...200)
-        clearedTranscript.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback)
+        clearedTranscript.append(Self.recordedClear)
         clearedTranscript.append(Data("\r\n".utf8))
         clearedTranscript.append(Data((1...200).map { String(format: "new-%03d", $0) }.joined(separator: "\r\n").utf8))
         let transcript = MutableTranscript(Self.transcript(rows: 1...200))
@@ -2604,7 +2604,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // What the daemon's `output.log` holds after the other client's clear: the history it already had,
         // the clear it records for anyone replaying those bytes, and what the session prints afterwards.
         var clearedTranscript = Self.transcript(rows: 1...200)
-        clearedTranscript.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback)
+        clearedTranscript.append(Self.recordedClear)
         clearedTranscript.append(Data("\r\n".utf8))
         clearedTranscript.append(Data((1...200).map { String(format: "new-%03d", $0) }.joined(separator: "\r\n").utf8))
         let transcript = MutableTranscript(Self.transcript(rows: 1...200))
@@ -3766,6 +3766,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     private static func transcript(rows: ClosedRange<Int>) -> Data {
         Data(rows.map { String(format: "row-%03d", $0) }.joined(separator: "\r\n").utf8)
     }
+
+    /// A clear as it appears in a daemon's `output.log`: escape bytes that erase the screen and scrollback.
+    private static let recordedClear = Data("\u{1B}[H\u{1B}[2J\u{1B}[3J".utf8)
 
     /// A key window holding a pane-sized content view. A pane in no window is off screen, and an
     /// off-screen pane holds its screen updates, so any test that needs a later payload to actually reach
