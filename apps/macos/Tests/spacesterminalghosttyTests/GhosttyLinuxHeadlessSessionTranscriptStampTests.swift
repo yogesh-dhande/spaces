@@ -272,6 +272,102 @@
             try expectPrefixReproduces(frame, at: paths.outputPath)
         }
 
+        /// Puts the test's end of the PTY in raw, non-blocking mode so what the host writes to the session
+        /// (its input) can be read back without echo or line editing.
+        private func prepareToReadHostInput(from pty: AdoptablePTY) {
+            var attributes = termios()
+            #expect(tcgetattr(pty.slave, &attributes) == 0)
+            attributes.c_lflag &= ~tcflag_t(ECHO | ICANON)
+            #expect(tcsetattr(pty.slave, TCSANOW, &attributes) == 0)
+            #expect(fcntl(pty.slave, F_SETFL, fcntl(pty.slave, F_GETFL) | O_NONBLOCK) != -1)
+        }
+
+        /// The bytes the host has written to the session so far, waiting up to `timeout` for the first.
+        private func readHostInput(from pty: AdoptablePTY, timeout: TimeInterval) async -> [UInt8] {
+            var collected: [UInt8] = []
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                var buffer = [UInt8](repeating: 0, count: 64)
+                let count = read(pty.slave, &buffer, buffer.count)
+                if count > 0 {
+                    collected += buffer[..<count]
+                } else if !collected.isEmpty {
+                    break
+                } else {
+                    try? await Task.sleep(for: .milliseconds(30))
+                }
+            }
+            return collected
+        }
+
+        /// Ghostty's rule away from a shell-integration prompt mark: scrollback goes, the rows above the cursor
+        /// go, and the prompt row moves to the top with the cursor still after the prompt. No form feed is
+        /// sent. The transcript replays to the live screen, so a client copying the command it just ran gets
+        /// the row the screen shows.
+        @Test func clearAtAnUnmarkedPromptKeepsThePromptRowAndReplaysToTheLiveScreen() async throws {
+            let (box, pty, paths) = try await startResumedCore()
+            defer {
+                tearDown(pty)
+                TerminalEngineActor.runSynchronously { box.value.terminate() }
+                try? FileManager.default.removeItem(atPath: paths.rootDirectory)
+            }
+            prepareToReadHostInput(from: pty)
+            let harness = Harness(core: box.value, pty: pty, paths: paths)
+            _ = try await sendAndCapture("first line\nsecond line\n~ % ", to: harness, awaiting: "~ %")
+            let response = TerminalEngineActor.runSynchronously { box.value.handleControlRequest(TerminalControlRequest(command: "clearScreen")) }
+            #expect(response.ok, "\(response.message)")
+            let frame = try await sendAndCapture("ls\n", to: harness, awaiting: "ls")
+            #expect(TranscriptReplayVT.rowTexts(frame).first == "~ % ls", "the prompt row moves to the top with the command after it")
+            #expect(!TranscriptReplayVT.rowTexts(frame).contains { $0.contains("first line") || $0.contains("second line") })
+            try expectPrefixReproduces(frame, at: paths.outputPath)
+            #expect(await readHostInput(from: pty, timeout: 0.3).isEmpty, "away from a marked prompt no form feed is sent")
+        }
+
+        /// At a prompt the shell marked with OSC 133, Ghostty erases the screen and asks the shell to repaint
+        /// with a form feed. The repaint is ordinary output, so it reaches the transcript like any other.
+        @Test func clearAtAMarkedPromptEmptiesTheScreenAndAsksTheShellToRepaint() async throws {
+            let (box, pty, paths) = try await startResumedCore()
+            defer {
+                tearDown(pty)
+                TerminalEngineActor.runSynchronously { box.value.terminate() }
+                try? FileManager.default.removeItem(atPath: paths.rootDirectory)
+            }
+            prepareToReadHostInput(from: pty)
+            let harness = Harness(core: box.value, pty: pty, paths: paths)
+            let prompt = "\u{1B}]133;A\u{07}$ \u{1B}]133;B\u{07}"
+            _ = try await sendAndCapture("old output\n" + prompt, to: harness, awaiting: "$")
+            let response = TerminalEngineActor.runSynchronously { box.value.handleControlRequest(TerminalControlRequest(command: "clearScreen")) }
+            #expect(response.ok, "\(response.message)")
+            #expect(await readHostInput(from: pty, timeout: 10) == [0x0C], "the shell is asked to repaint with a form feed")
+            let cleared = try #require(TerminalEngineActor.runSynchronously { Self.frame(of: box.value) })
+            #expect(!TranscriptReplayVT.rowTexts(cleared).contains { $0.contains("old output") })
+            try expectPrefixReproduces(cleared, at: paths.outputPath)
+
+            let repainted = try await sendAndCapture("\r" + prompt + "pwd\n", to: harness, awaiting: "pwd")
+            #expect(!TranscriptReplayVT.rowTexts(repainted).contains { $0.contains("old output") })
+            try expectPrefixReproduces(repainted, at: paths.outputPath)
+        }
+
+        /// The alternate screen belongs to the running program: the clear does nothing and writes nothing.
+        @Test func clearOnTheAlternateScreenChangesNothing() async throws {
+            let (box, pty, paths) = try await startResumedCore()
+            defer {
+                tearDown(pty)
+                TerminalEngineActor.runSynchronously { box.value.terminate() }
+                try? FileManager.default.removeItem(atPath: paths.rootDirectory)
+            }
+            prepareToReadHostInput(from: pty)
+            let harness = Harness(core: box.value, pty: pty, paths: paths)
+            _ = try await sendAndCapture("\u{1B}[?1049hfull screen app", to: harness, awaiting: "full screen app")
+            let sizeBefore = Self.fileSize(paths.outputPath)
+            let response = TerminalEngineActor.runSynchronously { box.value.handleControlRequest(TerminalControlRequest(command: "clearScreen")) }
+            #expect(!response.ok)
+            #expect(Self.fileSize(paths.outputPath) == sizeBefore, "nothing is recorded")
+            let frame = try #require(TerminalEngineActor.runSynchronously { Self.frame(of: box.value) })
+            #expect(TranscriptReplayVT.rowTexts(frame).contains { $0.contains("full screen app") })
+            #expect(await readHostInput(from: pty, timeout: 0.3).isEmpty)
+        }
+
         /// Renumbering events (ED3, RIS, alternate-screen enter and exit, a column resize) change the epoch;
         /// a rows-only resize does not.
         @Test func epochChangesOnRenumberingEventsAndNotOnARowsOnlyResize() async throws {

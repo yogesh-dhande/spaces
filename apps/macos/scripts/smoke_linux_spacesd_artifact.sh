@@ -35,6 +35,10 @@ smoke_artifact() {
         test -x bin/spacesd-bin
         test -x bin/spaces-bin
         test -x install.sh
+        # The generated shell startup files source these for OSC 133 prompt marks.
+        test -f bin/ghostty/shell-integration/zsh/ghostty-integration
+        test -f bin/ghostty/shell-integration/bash/ghostty.bash
+        test -f bin/ghostty/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish
         bin/spaces --help >/tmp/spaces-linux-helper-smoke.log
         ldd bin/spacesd-bin >/dev/null
         ldd bin/spaces-bin >/dev/null

@@ -118,6 +118,31 @@ final class GhosttyEmbeddedSessionTranscriptStampTests: XCTestCase {
         throw NSError(domain: "GhosttyEmbeddedSessionTranscriptStampTests", code: 1)
     }
 
+    /// Clears the session the way Cmd+K does and returns once `text` is gone from its screen. Ghostty
+    /// applies the clear on its IO thread after the call returns, and output sent before it lands would be
+    /// wiped with the screen, so a test waits here before sending more.
+    private func clearScreen(of core: GhosttyEmbeddedSessionCore, removing text: String) async throws {
+        XCTAssertTrue(TerminalEngineActor.runSynchronously { Self.host(of: core).clearScreenAndScrollback() })
+        let deadline = Date().addingTimeInterval(30)
+        while let screen = TerminalEngineActor.runSynchronously({ () -> String? in
+            GhosttyEmbeddedAppService.shared.tick()
+            let screen = core.rendererHost.snapshotText() ?? ""
+            return screen.contains(text) ? screen : nil
+        }) {
+            guard Date() < deadline else {
+                XCTFail("the clear never took effect; the screen still reads:\n\(screen)")
+                throw NSError(domain: "GhosttyEmbeddedSessionTranscriptStampTests", code: 2)
+            }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+    }
+
+    /// The colors a pane's replay is built with; nothing here reads them.
+    private static let replayTheme = GhosttyThemeExport(
+        background: ThemeColor(0, 0, 0), foreground: ThemeColor(255, 255, 255), cursorColor: ThemeColor(200, 200, 200),
+        cursorText: ThemeColor(0, 0, 0), selectionBackground: ThemeColor(50, 50, 50), selectionForeground: ThemeColor(255, 255, 255),
+        palette: (0..<16).map { ThemeColor($0 * 8, $0 * 8, $0 * 8) })
+
     private func terminate(_ core: GhosttyEmbeddedSessionCore) { TerminalEngineActor.runSynchronously { core.terminate() } }
 
     // MARK: - Absolute rows and transcript offsets under a flood
@@ -190,34 +215,95 @@ final class GhosttyEmbeddedSessionTranscriptStampTests: XCTestCase {
             "replaying the transcript to the frame's offset must reproduce the frame's grid")
     }
 
-    /// A clear mutates Ghostty directly and appends a marker sequence to `output.log` that the parser never
-    /// consumed, so the offset has to count the marker for the prefix to reproduce the grid.
-    func testTranscriptOffsetCountsTheClearMarkerTheParserNeverConsumed() async throws {
+    /// A clear reaches `output.log` and the parser as the same escape bytes, so the frame offset needs no
+    /// correction for it and the prefix it names still reproduces the grid.
+    func testTranscriptOffsetStaysAlignedThroughAClear() async throws {
         try Self.requireGhosttyAvailable()
         let paths = try Self.makeTemporaryPaths()
         defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
-        let core = try await startCore(command: "stty -echo; cat", paths: paths)
+        // `ready` prints only once `stty -echo` has run. Input sent before that is echoed by the tty as well
+        // as by `cat`, and a clear landing between the two copies leaves the second one on screen.
+        let core = try await startCore(command: "stty -echo; echo ready; cat", paths: paths)
         defer { terminate(core) }
+        _ = try await waitForFrame(of: core) { TranscriptReplayVT.rowTexts($0).contains("ready") }
 
         sendThroughCat("before clear\n", to: core)
         _ = try await waitForFrame(of: core) { TranscriptReplayVT.rowTexts($0).contains("before clear") }
-        XCTAssertTrue(TerminalEngineActor.runSynchronously { Self.host(of: core).clearScreenAndScrollback() })
-        // Ghostty applies the clear on its IO thread; output sent before it lands would be wiped with the
-        // screen, so wait for the clear to take effect first.
-        let clearDeadline = Date().addingTimeInterval(30)
-        while TerminalEngineActor.runSynchronously({
-            GhosttyEmbeddedAppService.shared.tick()
-            return core.rendererHost.snapshotText()?.contains("before clear") == true
-        }) {
-            XCTAssertLessThan(Date(), clearDeadline, "the clear never took effect")
-            try await Task.sleep(for: .milliseconds(30))
-        }
+        try await clearScreen(of: core, removing: "before clear")
         sendThroughCat("after clear\n", to: core)
         let frame = try await waitForFrame(of: core) { TranscriptReplayVT.rowTexts($0).contains("after clear") }
 
         let transcript = try await waitForTranscriptPrefix(at: paths.outputPath, length: frame.transcriptByteOffset)
         XCTAssertEqual(TranscriptReplayVT.screenRows(columns: frame.columns, rows: frame.rows, bytes: transcript), TranscriptReplayVT.rowTexts(frame))
+    }
+
+    /// Cmd+K at a prompt the shell marked with OSC 133: Ghostty erases the screen and writes a form feed
+    /// to the shell so it repaints. The form feed reaches the session (`cat` echoes it into the
+    /// transcript), and the transcript replays to the live screen.
+    func testAClearAtAMarkedPromptEmptiesTheScreenAndSendsAFormFeed() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let core = try await startCore(
+            command: "stty -echo; printf 'first line\\nsecond line\\n\\033]133;A\\007$ \\033]133;B\\007'; cat", paths: paths)
+        defer { terminate(core) }
+        _ = try await waitForFrame(of: core) { TranscriptReplayVT.rowTexts($0).contains("$") }
+
+        try await clearScreen(of: core, removing: "first line")
+        // `cat` hands back what the host wrote to the session once the line is complete.
+        sendThroughCat("ls\n", to: core)
+        let frame = try await waitForFrame(of: core) { frame in TranscriptReplayVT.rowTexts(frame).contains { $0.hasSuffix("ls") } }
+        let transcript = try await waitForTranscriptPrefix(at: paths.outputPath, length: frame.transcriptByteOffset)
+
+        XCTAssertTrue(transcript.contains(0x0C), "the host asks the shell to repaint with a form feed")
+        XCTAssertFalse(TranscriptReplayVT.rowTexts(frame).contains { $0.contains("first line") || $0.contains("second line") })
+        XCTAssertEqual(
+            TranscriptReplayVT.screenRows(columns: frame.columns, rows: frame.rows, bytes: transcript), TranscriptReplayVT.rowTexts(frame),
+            "replaying the transcript to the frame's offset must show the screen the clear left")
+    }
+
+    /// Cmd+K at a shell prompt with no OSC 133 marks (the shell has no integration, or it is a shell the
+    /// integration does not cover), with output above the cursor and the prompt to its left. A pane copies
+    /// and scrolls from its own replay of `output.log`, so whatever the clear leaves on screen the replay
+    /// has to show too: replaying the file to the frame's offset reproduces the frame's grid, and copying
+    /// the row the command was typed on gives the text the screen shows, prompt included.
+    func testAClearAtAnUnmarkedPromptLeavesTheReplayShowingTheLiveScreen() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        // Two lines of output, then a prompt with the cursor after it, as a shell leaves a session waiting
+        // for input.
+        let core = try await startCore(command: "stty -echo; printf 'first line\\nsecond line\\n~ %% '; cat", paths: paths)
+        defer { terminate(core) }
+        _ = try await waitForFrame(of: core) { TranscriptReplayVT.rowTexts($0).contains("~ %") }
+
+        try await clearScreen(of: core, removing: "first line")
+        // The command typed at the prompt: `cat` prints it at the cursor, where a shell would echo it.
+        sendThroughCat("ls\n", to: core)
+        let frame = try await waitForFrame(of: core) { frame in TranscriptReplayVT.rowTexts(frame).contains { $0.hasSuffix("ls") } }
+        let screen = TranscriptReplayVT.rowTexts(frame)
+        let transcript = try await waitForTranscriptPrefix(at: paths.outputPath, length: frame.transcriptByteOffset)
+
+        XCTAssertEqual(
+            TranscriptReplayVT.screenRows(columns: frame.columns, rows: frame.rows, bytes: transcript), screen,
+            "replaying the transcript to the frame's offset must show the screen the clear left")
+
+        // Copy reads a selection over the command's row from a replay lined up with the host at this frame.
+        let commandRow = try XCTUnwrap(screen.firstIndex { $0.hasSuffix("ls") })
+        let stamp = try XCTUnwrap(TerminalLiveFrameStamp(frame: frame.frame))
+        let replay = try XCTUnwrap(
+            TerminalLocalScrollbackModel(
+                columns: frame.columns, rows: frame.rows, theme: Self.replayTheme, appearance: .dark, transcript: transcript,
+                transcriptStartByteOffset: 0, transcriptEndByteOffset: frame.transcriptByteOffset, requestedByteCount: transcript.count,
+                transcriptFileIdentity: frame.transcriptFileIdentity, runIdentity: nil, stamps: [stamp]))
+        let row = Int64(clamping: frame.historyRowBase) + Int64(commandRow)
+        let selection = TerminalAbsoluteSelection(
+            from: TerminalAbsoluteCell(column: 0, row: row), to: TerminalAbsoluteCell(column: frame.columns - 1, row: row), isRectangle: false,
+            historyEpoch: frame.historyEpoch)
+        XCTAssertEqual(replay.text(for: selection), screen[commandRow], "copying the command's row must give the text the screen shows")
     }
 
     /// A head trim swaps `output.log` for a preamble plus the retained tail: every offset renumbers and the

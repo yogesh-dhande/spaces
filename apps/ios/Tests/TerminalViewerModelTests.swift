@@ -10840,9 +10840,8 @@
             XCTAssertLessThan(lineBeforeTheClear, 400, "setup: the gesture must be reading the history printed before the clear")
 
             // The daemon performs the clear, appends it to the transcript so anyone replaying those bytes
-            // reproduces it, and the session prints its next prompt under it. The bytes are the ones the
-            // daemon appends as `GhosttyTerminalTranscriptMutation.clearScreenAndScrollback`, spelled out
-            // here because that type lives in the macOS-only session-host module.
+            // reproduces it, and the session prints its next prompt under it. The bytes erase the screen
+            // and scrollback, as the daemon's recorded clear does.
             await transcript.append(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
             await transcript.append(Self.numberedTranscript(lineCount: 200, startingAt: 900_000))
 
@@ -10891,9 +10890,7 @@
 
             // The other client's clear: the daemon performs it, appends it to the transcript so anyone
             // replaying those bytes reproduces it, and the session prints its next prompt under it. The
-            // bytes are the ones the daemon appends as `GhosttyTerminalTranscriptMutation
-            // .clearScreenAndScrollback`, spelled out here because that type lives in the macOS-only
-            // session-host module.
+            // bytes erase the screen and scrollback, as the daemon's recorded clear does.
             await transcript.append(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
             await transcript.append(Self.numberedTranscript(lineCount: 200, startingAt: 900_000))
             // Broadcast the way the daemon broadcasts it: the screen the clear left behind, under reason

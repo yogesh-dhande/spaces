@@ -620,6 +620,23 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(entries.filter { $0.hasPrefix("COLORTERM=") }, ["COLORTERM=truecolor"])
     }
 
+    /// A shell launched by Spaces gets Ghostty's resources directory and no optional shell-integration
+    /// feature, even when the daemon itself was started from a Ghostty terminal that exports its own.
+    func testShellsGetGhosttyResourcesAndNoOptionalShellIntegrationFeatures() {
+        setenv("GHOSTTY_SHELL_FEATURES", "cursor,title,sudo", 1)
+        setenv("GHOSTTY_RESOURCES_DIR", "/elsewhere/ghostty", 1)
+        defer {
+            unsetenv("GHOSTTY_SHELL_FEATURES")
+            unsetenv("GHOSTTY_RESOURCES_DIR")
+        }
+
+        let entries = HostManagedPTYTerminalSessionDriver.childEnvironmentForExec(
+            overrides: HostManagedPTYTerminalSessionDriver.ghosttyShellIntegrationEnvironment(resourcesDirectoryPath: "/app/Resources/ghostty"))
+
+        XCTAssertEqual(entries.filter { $0.hasPrefix("GHOSTTY_SHELL_FEATURES=") }, ["GHOSTTY_SHELL_FEATURES="])
+        XCTAssertEqual(entries.filter { $0.hasPrefix("GHOSTTY_RESOURCES_DIR=") }, ["GHOSTTY_RESOURCES_DIR=/app/Resources/ghostty"])
+    }
+
     func testHostManagedPTYStripsGhosttyCommandPrefixesBeforeShellExecution() {
         let direct = HostManagedPTYTerminalSessionDriver.execCommand(
             for: TerminalSessionLaunchConfiguration(

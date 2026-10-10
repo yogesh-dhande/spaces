@@ -82,6 +82,13 @@ enum SpacesShellIntegrationScripts {
                 }
                 precmd_functions+=('__spaces_path_hook')
                 preexec_functions+=('__spaces_path_hook')
+
+                # Ghostty's own integration (OSC 133 prompt marks, OSC 7 directory reports). Sourced the way
+                # Ghostty documents for a manual setup; the terminal sets GHOSTTY_RESOURCES_DIR and leaves
+                # every optional feature off.
+                if [[ -n "${GHOSTTY_RESOURCES_DIR-}" ]]; then
+                    'builtin' 'source' '--' "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration"
+                fi
             fi
         }
 
@@ -129,6 +136,13 @@ enum SpacesShellIntegrationScripts {
         fi
         builtin unset __spaces_rcfile
 
+        # Ghostty's own integration (OSC 133 prompt marks, OSC 7 directory reports), sourced the way Ghostty
+        # documents for a manual setup; the terminal sets GHOSTTY_RESOURCES_DIR and leaves every optional
+        # feature off. It goes before the hook below so that hook stays last in PROMPT_COMMAND.
+        if [[ -n "${GHOSTTY_RESOURCES_DIR-}" ]]; then
+          builtin source "$GHOSTTY_RESOURCES_DIR/shell-integration/bash/ghostty.bash"
+        fi
+
         # Last in PROMPT_COMMAND so it also wins over hooks the rc files registered. It passes through the
         # status it was given, which is the user's last command status unless an earlier hook changed it.
         __spaces_path_prompt() {
@@ -175,6 +189,13 @@ enum SpacesShellIntegrationScripts {
                     end
                     set -gx PATH $bin $rest
                 end
+            end
+
+            # Ghostty's own integration (OSC 133 prompt marks, OSC 7 directory reports), sourced the way
+            # Ghostty documents for a manual setup; the terminal sets GHOSTTY_RESOURCES_DIR and leaves every
+            # optional feature off. Last, because that script ends in `exit`, which also ends this file.
+            if set -q GHOSTTY_RESOURCES_DIR
+                source "$GHOSTTY_RESOURCES_DIR/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish"
             end
         end
 
