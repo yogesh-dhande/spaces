@@ -729,13 +729,25 @@ private struct DeviceSyncState {
     /// for callers that do not say.
     func loadRemoteDeviceSections(forceRefresh: Bool = false, bypassesBackoff: Bool = false) {
         let remotes = host.macPairedDevices()
-        var addedSection = false
-        for record in remotes where !host.deviceModel.deviceSections.contains(where: { $0.deviceID == record.id }) {
-            host.deviceModel.deviceSections.append(
-                DeviceSection(deviceID: record.id, deviceName: record.name, isLocal: false, loadState: .loading, device: record))
-            addedSection = true
+        var sectionsChanged = false
+        for record in remotes {
+            guard let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == record.id }) else {
+                host.deviceModel.deviceSections.append(
+                    DeviceSection(deviceID: record.id, deviceName: record.name, isLocal: false, loadState: .loading, device: record))
+                sectionsChanged = true
+                continue
+            }
+            guard host.deviceModel.deviceSections[index].deviceName != record.name else { continue }
+            host.deviceModel.deviceSections[index].deviceName = record.name
+            // The automation alerts group is titled with the device's name when it is built, so it is
+            // rebuilt from the retained overview rather than waiting for the next overview delivery.
+            if let overview = host.deviceModel.deviceSections[index].overview {
+                host.deviceModel.deviceSections[index].alertsGroups = AlertsController.buildOverviewAlertsGroups(
+                    from: overview, deviceID: record.id, deviceName: record.name)
+            }
+            sectionsChanged = true
         }
-        if addedSection { applySidebarDataChange() }
+        if sectionsChanged { applySidebarDataChange() }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let now = ContinuousClock.now
         let freshnessWindow = Duration.seconds(PollingConstants.remoteOverviewFreshnessInterval)
