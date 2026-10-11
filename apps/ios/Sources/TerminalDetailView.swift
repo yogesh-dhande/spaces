@@ -157,7 +157,7 @@ struct TerminalDetailView: View {
                                 model.sendMouseButton(button: button, pressed: pressed, at: pointerPosition)
                             }, onSendMouseMotion: { pointerPosition in model.sendMouseMotion(at: pointerPosition) },
                             clientSelection: model.clientSelection, selectionActions: selectionActions, selectionAccentColor: UIColor(Theme.accent),
-                            onOpenLink: { link in openTerminalLink(link) }, onOpenComposer: { isShowingComposer = true },
+                            onOpenLink: { link, kind in openTerminalLink(link, kind: kind) }, onOpenComposer: { isShowingComposer = true },
                             // A clipboard image pasted at the terminal lands in the composer pre-attached
                             // rather than in the session: sending an image stays a deliberate composer action.
                             onPasteClipboardImage: {
@@ -237,7 +237,7 @@ struct TerminalDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text(StopConfirmationCopy.rowMessage)
-        }.onDisappear { model.stop() }
+        }.modifier(TerminalLinkDialogs(model: model)).onDisappear { model.stop() }
     }
 
     /// Every sheet and full-screen cover this view presents over the terminal routes its dismissal
@@ -413,9 +413,9 @@ struct TerminalDetailView: View {
         return true
     }
 
-    private func openTerminalLink(_ link: String) {
+    private func openTerminalLink(_ link: String, kind: GhosttyMobileActionEvent.OpenURLKind) {
         writeE2EEventIfNeeded(kind: "open_link", detail: link)
-        Task { await model.openTerminalLink(link) }
+        Task { await model.openTappedTerminalLink(link, kind: kind) }
     }
 
     private var topOverlay: some View {
@@ -744,6 +744,34 @@ struct TerminalDetailView: View {
         while !Task.isCancelled, ContinuousClock.now < deadline {
             if model.acceptsInput && model.isInputSurfaceReady { return }
             try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+}
+
+/// The link confirmation dialog and blocked-link alert, kept out of `detailContent`'s modifier chain,
+/// which is too long for the compiler to type-check with these appended.
+private struct TerminalLinkDialogs: ViewModifier {
+    let model: TerminalViewerModel
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            model.pendingLinkConfirmation?.title ?? "",
+            isPresented: Binding(get: { model.pendingLinkConfirmation != nil }, set: { if !$0 { model.dismissPendingLinkConfirmation() } }),
+            titleVisibility: .visible, presenting: model.pendingLinkConfirmation
+        ) { confirmation in
+            Button("Open Link") { Task { await model.openConfirmedLink(confirmation) } }
+            Button("Copy Link") { model.copyLinkText(confirmation.displayString) }
+            Button("Cancel", role: .cancel) {}
+        } message: { confirmation in
+            Text(confirmation.displayString)
+        }.alert(
+            "Blocked This Link", isPresented: Binding(get: { model.blockedLink != nil }, set: { if !$0 { model.dismissBlockedLink() } }),
+            presenting: model.blockedLink
+        ) { blocked in
+            Button("OK", role: .cancel) {}
+            Button("Copy Link") { model.copyLinkText(blocked.displayString) }
+        } message: { blocked in
+            Text("\(blocked.reason)\n\n\(blocked.displayString)")
         }
     }
 }

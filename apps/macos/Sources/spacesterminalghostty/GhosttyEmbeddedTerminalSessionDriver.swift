@@ -288,7 +288,7 @@
                 outputPipe.process(data)
                 self?.requestEngineCatchUp()
             }
-            hostPTY.setSessionClosedHandler { [weak self] in self?.handleHostPTYClosed() }
+            hostPTY.setSessionClosedHandler { [weak self] in Task { @TerminalEngineActor in self?.handleHostPTYClosed() } }
             return (createdSession, hostPTY)
         }
 

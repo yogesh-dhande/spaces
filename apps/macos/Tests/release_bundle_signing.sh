@@ -21,12 +21,13 @@ detach_mount() {
   hdiutil detach -force "$MOUNT_POINT" >/dev/null
 }
 
-# The same Spotlight/fseventsd transient-busy window that makes detach flaky can make attach
-# fail immediately too ("Resource temporarily unavailable"); retry it the same way. Each attempt
-# also gets its own hard deadline so a wedged hdiutil process can't hang the CI step forever: it
-# runs in the background and we poll for it, since GNU `timeout` isn't preinstalled on macOS
-# runners. Unlike detach, a failed attach must not be swallowed -- there is nothing useful to
-# force past, so we report the last hdiutil error and let the script fail.
+# A contended runner makes attach fail with "Resource busy" or "Resource temporarily unavailable"
+# for tens of seconds (#599), so those two errors are retried with the 5/10/20/40s backoff that
+# spaces_release_hdiutil_retrying in scripts/spaces-release-helpers.sh uses for the other hdiutil
+# call sites; any other error fails at once. Each attempt also has a 120s deadline, so a wedged
+# hdiutil can't hang CI: it runs in the background and is polled, since `timeout` isn't preinstalled
+# on macOS runners. A hung attempt is retried too. Unlike detach, a failed attach is never
+# swallowed: there is nothing useful to force past, so the last hdiutil error is reported.
 ATTACH_LOG="$WORK_ROOT/hdiutil-attach.log"
 attach_mount() {
   local attempt
@@ -34,17 +35,21 @@ attach_mount() {
   local waited
   local deadline=120
   local poll=2
+  local backoff_seconds=5
+  local was_killed
 
   for attempt in 1 2 3 4 5; do
     : >"$ATTACH_LOG"
     hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT_POINT" "$DMG_PATH" >"$ATTACH_LOG" 2>&1 &
     pid=$!
 
+    was_killed=0
     waited=0
     while kill -0 "$pid" 2>/dev/null; do
       if [ "$waited" -ge "$deadline" ]; then
         echo "hdiutil attach attempt $attempt exceeded ${deadline}s; killing it as hung." >>"$ATTACH_LOG"
         kill -KILL "$pid" 2>/dev/null || true
+        was_killed=1
         break
       fi
       sleep "$poll"
@@ -61,7 +66,16 @@ attach_mount() {
       hdiutil detach -force "$MOUNT_POINT" >/dev/null 2>&1 || true
     fi
 
-    sleep 2
+    if [ "$was_killed" -eq 0 ] && ! grep -Eq 'Resource busy|Resource temporarily unavailable' "$ATTACH_LOG"; then
+      echo "hdiutil attach failed:" >&2
+      cat "$ATTACH_LOG" >&2
+      return 1
+    fi
+
+    if [ "$attempt" -lt 5 ]; then
+      sleep "$backoff_seconds"
+      backoff_seconds=$((backoff_seconds * 2))
+    fi
   done
 
   echo "hdiutil attach failed after 5 attempts:" >&2

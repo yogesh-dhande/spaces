@@ -96,6 +96,10 @@ The visual system and reusable interaction patterns for the Spaces Mac and iOS a
 - A pane has one banner: a transient banner temporarily replaces the persistent one. Only the banner's control takes clicks; the rest lets clicks through to the pane, except a transient notice, which dismisses on any click.
 - When a pane still looks interactive but is not, acting on it pulses its banner rather than doing nothing silently.
 
+### Link tooltip
+
+- A hovered terminal link shows its target in a one-line pill directly under the link's row (above it when the pane has no room below), with no delay, gone as soon as the hover ends. The pill inverts the terminal (light pill on a dark terminal, dark on light), uses the 12 pt system font, truncates in the middle, stays 8 px inside the pane, and never takes mouse events.
+
 ### Version-gap surfaces
 
 - A device whose daemon and client cannot talk because of a version gap gets a centered hero in place of that device's detail content, on every client: a small uppercase orange eyebrow naming the state, the two versions large with the side that must move muted and an accent arrow between them, one line on how the fix travels, and at most one action. No card frame, no warning icon. An unknown version renders as "?". A command the user must run on the device is a selectable monospaced block.

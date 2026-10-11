@@ -347,7 +347,8 @@ import workspacecore
                             guard let stateModel else { throw WorkspaceError.invalidArgument(message: "Terminal state model was released.") }
                             return try await stateModel.fetchTranscript(
                                 maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity)
-                        }, agentSignalHandler: agentSignalHandler, linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) },
+                        }, agentSignalHandler: agentSignalHandler,
+                        linkOpenHandler: { [linkOpenBox] rawLink, kind in linkOpenBox.open(rawLink, kind: kind) },
                         // A keystroke that cannot reach the device is the pane's earliest evidence its link
                         // is gone; the state model owns that verdict, so the raw failure goes there rather
                         // than being classified or acted on at the render host. `reportFailedInputSend` is
@@ -355,7 +356,8 @@ import workspacecore
                         // return value is exactly the `RemoteGhosttyInputFailureHandler` contract (whether
                         // the failure proves the link is gone), and the host awaits it to decide whether to
                         // drop this pane's queued input.
-                        inputFailureHandler: { [weak stateModel] error in await stateModel?.reportFailedInputSend(error) ?? false })
+                        inputFailureHandler: { [weak stateModel] error in await stateModel?.reportFailedInputSend(error) ?? false },
+                        linkFileLocation: clientKind == .local ? .thisDevice : .anotherDevice)
                 })
             let linkOpenCoordinator = TerminalLinkOpenCoordinator(
                 sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: clientKind == .local,
@@ -780,13 +782,14 @@ import workspacecore
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
         terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
         stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
-        agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil,
-        inputFailureHandler: RemoteGhosttyInputFailureHandler? = nil
+        agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
+        linkOpenHandler: (@MainActor (String, GhosttyActionEvent.OpenURLKind) -> Void)? = nil,
+        inputFailureHandler: RemoteGhosttyInputFailureHandler? = nil, linkFileLocation: SpacesUntrustedTerminalLink.FileLocation = .anotherDevice
     ) -> any TerminalGhosttySessionHosting {
         RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: terminalServiceRequestSender,
             stateStreamSubscriber: stateStreamSubscriber, transcriptProvider: transcriptProvider, agentSignalHandler: agentSignalHandler,
-            linkOpenHandler: linkOpenHandler, inputFailureHandler: inputFailureHandler)
+            linkOpenHandler: linkOpenHandler, inputFailureHandler: inputFailureHandler, linkFileLocation: linkFileLocation)
     }
 
     nonisolated static func appBuiltInTerminalSessionLauncher(

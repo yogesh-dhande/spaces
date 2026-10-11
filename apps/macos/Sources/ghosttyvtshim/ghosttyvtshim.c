@@ -70,6 +70,7 @@ typedef GhosttyResult (*GhosttyRenderStateRowCellsGetFn)(GhosttyRenderStateRowCe
 typedef GhosttyResult (*GhosttyCellGetFn)(GhosttyCell, GhosttyCellData, void *);
 typedef GhosttyResult (*GhosttyRowGetFn)(GhosttyRow, GhosttyRowData, void *);
 typedef GhosttyResult (*GhosttyTerminalGridRefFn)(GhosttyTerminal, GhosttyPoint, GhosttyGridRef *);
+typedef GhosttyResult (*GhosttyGridRefHyperlinkUriFn)(const GhosttyGridRef *, uint8_t *, size_t, size_t *);
 typedef GhosttyResult (*GhosttyTerminalPointFromGridRefFn)(GhosttyTerminal, const GhosttyGridRef *, GhosttyPointTag, GhosttyPointCoordinate *);
 typedef GhosttyResult (*GhosttyTerminalSelectionFormatAllocFn)(
     GhosttyTerminal, const GhosttyAllocator *, GhosttyTerminalSelectionFormatOptions, uint8_t **, size_t *
@@ -134,6 +135,7 @@ typedef GhosttyResult (*GhosttyTerminalClearScreenSequenceFn)(GhosttyTerminal, u
     X(cell_get, GhosttyCellGetFn, ghostty_cell_get)                                                                            \
     X(grid_row_get, GhosttyRowGetFn, ghostty_row_get)                                                                          \
     X(terminal_grid_ref, GhosttyTerminalGridRefFn, ghostty_terminal_grid_ref)                                                  \
+    X(grid_ref_hyperlink_uri, GhosttyGridRefHyperlinkUriFn, ghostty_grid_ref_hyperlink_uri)                                    \
     X(terminal_point_from_grid_ref, GhosttyTerminalPointFromGridRefFn, ghostty_terminal_point_from_grid_ref)                   \
     X(terminal_selection_format_alloc, GhosttyTerminalSelectionFormatAllocFn, ghostty_terminal_selection_format_alloc)         \
     X(terminal_select_all, GhosttyTerminalSelectAllFn, ghostty_terminal_select_all)                                            \
@@ -534,10 +536,56 @@ static void spaces_ghostty_vt_free_cells(SpacesGhosttyVtSnapshotCell *cells, siz
     free(cells);
 }
 
+// Releases a link table along with the target bytes it owns.
+static void spaces_ghostty_vt_free_links(SpacesGhosttyVtSnapshotLink *links, size_t link_count) {
+    if (links == NULL) return;
+    for (size_t index = 0; index < link_count; index++) free(links[index].bytes);
+    free(links);
+}
+
 static void spaces_ghostty_vt_snapshot_reset(SpacesGhosttyVtSnapshot *snapshot) {
     if (snapshot == NULL) return;
     spaces_ghostty_vt_free_cells(snapshot->cells, snapshot->cell_count);
+    spaces_ghostty_vt_free_links(snapshot->links, snapshot->link_count);
     memset(snapshot, 0, sizeof(*snapshot));
+}
+
+// The growing link table `spaces_ghostty_vt_session_copy_snapshot` fills while it walks the cells.
+typedef struct {
+    SpacesGhosttyVtSnapshotLink *links;
+    size_t count;
+    size_t capacity;
+} SpacesGhosttyVtLinkTable;
+
+// The 1-based table index of the target `uri`, appending a copy when this is the first cell to
+// reference it, or 0 when the table cannot grow. Deduplicated by bytes: a cell's page-local hyperlink
+// id means nothing across pages, and the Swift side and the mirror surface key on the target anyway.
+// The cell just before usually shares the target, so that entry is tried first.
+static uint32_t spaces_ghostty_vt_link_table_index(
+    SpacesGhosttyVtLinkTable *table, const uint8_t *uri, size_t len, uint32_t previous_index
+) {
+    if (previous_index != 0) {
+        const SpacesGhosttyVtSnapshotLink *previous = &table->links[previous_index - 1];
+        if (previous->len == len && memcmp(previous->bytes, uri, len) == 0) return previous_index;
+    }
+    for (size_t index = 0; index < table->count; index++) {
+        if (table->links[index].len == len && memcmp(table->links[index].bytes, uri, len) == 0) return (uint32_t)(index + 1);
+    }
+    if (table->count == table->capacity) {
+        size_t next_capacity = table->capacity == 0 ? 8 : table->capacity * 2;
+        SpacesGhosttyVtSnapshotLink *grown =
+            (SpacesGhosttyVtSnapshotLink *)realloc(table->links, next_capacity * sizeof(SpacesGhosttyVtSnapshotLink));
+        if (grown == NULL) return 0;
+        table->links = grown;
+        table->capacity = next_capacity;
+    }
+    uint8_t *copy = (uint8_t *)malloc(len);
+    if (copy == NULL) return 0;
+    memcpy(copy, uri, len);
+    table->links[table->count].bytes = copy;
+    table->links[table->count].len = len;
+    table->count++;
+    return (uint32_t)table->count;
 }
 
 static bool spaces_ghostty_vt_format_plain_for_terminal(
@@ -1355,6 +1403,10 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
         );
     }
 
+    SpacesGhosttyVtLinkTable link_table = {0};
+    // The link index of the most recent linked cell, so a run of cells on one link skips the table scan.
+    uint32_t last_link_index = 0;
+
     if (session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &session->row_iterator) != GHOSTTY_SUCCESS) {
         spaces_ghostty_vt_free_cells(cells, cell_count);
         return false;
@@ -1372,6 +1424,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
             session->symbols.grid_row_get(raw_row, GHOSTTY_ROW_DATA_WRAP_CONTINUATION, &row_is_wrap_continuation) != GHOSTTY_SUCCESS
         ) {
             spaces_ghostty_vt_free_cells(cells, cell_count);
+            spaces_ghostty_vt_free_links(link_table.links, link_table.count);
             return false;
         }
         uint16_t row_flags = 0;
@@ -1386,6 +1439,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
             ) != GHOSTTY_SUCCESS
         ) {
             spaces_ghostty_vt_free_cells(cells, cell_count);
+            spaces_ghostty_vt_free_links(link_table.links, link_table.count);
             return false;
         }
 
@@ -1440,12 +1494,42 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
                     uint32_t *extras = (uint32_t *)malloc((size_t)extra_len * sizeof(uint32_t));
                     if (extras == NULL) {
                         spaces_ghostty_vt_free_cells(cells, cell_count);
+                        spaces_ghostty_vt_free_links(link_table.links, link_table.count);
                         return false;
                     }
                     memcpy(extras, cluster + 1, (size_t)extra_len * sizeof(uint32_t));
                     codepoint = cluster[0];
                     cells[cell_index].grapheme_extra_len = extra_len;
                     cells[cell_index].grapheme_extras = extras;
+                }
+            }
+
+            // The render-state iterator has no hyperlink accessor, so a linked cell's target is read
+            // through a viewport grid reference to the same cell. A target longer than the snapshot's
+            // cap, or one the table cannot grow to hold, leaves the cell unlinked rather than failing
+            // the frame.
+            bool has_hyperlink = false;
+            if (
+                session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &has_hyperlink) == GHOSTTY_SUCCESS &&
+                has_hyperlink && columns > 0
+            ) {
+                GhosttyPoint point = {0};
+                point.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+                point.value.coordinate.x = (uint16_t)(cell_index - row_start);
+                point.value.coordinate.y = (uint32_t)(row_start / (size_t)columns);
+                GhosttyGridRef ref = {0};
+                uint8_t uri[SPACES_GHOSTTY_VT_MAX_LINK_URI_BYTES];
+                size_t uri_len = 0;
+                if (
+                    session->symbols.terminal_grid_ref(session->terminal, point, &ref) == GHOSTTY_SUCCESS &&
+                    session->symbols.grid_ref_hyperlink_uri(&ref, uri, sizeof(uri), &uri_len) == GHOSTTY_SUCCESS &&
+                    uri_len > 0
+                ) {
+                    uint32_t link_index = spaces_ghostty_vt_link_table_index(&link_table, uri, uri_len, last_link_index);
+                    if (link_index != 0) {
+                        cells[cell_index].link_index = link_index;
+                        last_link_index = link_index;
+                    }
                 }
             }
 
@@ -1478,6 +1562,8 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
     out_snapshot->default_background_rgb = spaces_ghostty_vt_pack_rgb(colors.background);
     out_snapshot->cell_count = cell_count;
     out_snapshot->cells = cells;
+    out_snapshot->link_count = link_table.count;
+    out_snapshot->links = link_table.links;
     return true;
 }
 

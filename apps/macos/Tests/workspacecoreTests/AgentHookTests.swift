@@ -413,6 +413,75 @@ final class AgentHookTests: XCTestCase {
         XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
     }
 
+    /// A `done` that read the agent's row before a concurrent `exit` finalized it must not recreate the
+    /// row when it applies: the stale read is replayed through the entry point after the real exit path ran.
+    func testStatusUpdateThatReadARowFinalizedByExitDoesNotRecreateIt() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let staleRead = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "racing-session", status: .spinning)
+
+        _ = try orchestrator.recordRemoteAgentSignal(
+            remoteSignalEvent(id: "event-exit", sessionID: "racing-session", workspaceID: workspace.id, workspacePath: workspace.dir, type: "exit"))
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "racing-session", label: "Mock Agent", status: .done,
+                eventType: "done", readAgent: staleRead)
+        ) { XCTAssertEqual($0 as? AgentRowFinalizedError, AgentRowFinalizedError(agentID: staleRead.id)) }
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "A finalized row is not brought back by a late status.")
+    }
+
+    /// The same drop when a different row has since taken over the terminal binding: the stale read's id no
+    /// longer names the row the write would land on.
+    func testStatusUpdateThatReadAReplacedRowIsDropped() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let older = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "rebound-session", status: .spinning)
+        try orchestrator.finalizeAgentRow(older, reason: .destroyed(terminateTerminalSession: false))
+        let current = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "rebound-session", status: .idle)
+        XCTAssertNotEqual(current.id, older.id)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "rebound-session", status: .done, readAgent: older))
+        XCTAssertEqual(try store.agentWindow(id: current.id)?.status, .idle)
+    }
+
+    func testStatusUpdateOfALiveRowStillApplies() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let row = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "live-session", status: .spinning)
+
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "live-session", status: .done, eventType: "done", readAgent: row)
+
+        XCTAssertEqual(updated.id, row.id)
+        XCTAssertEqual(try store.agentWindow(id: row.id)?.status, .done)
+    }
+
+    /// A signal whose read found no row keeps establishing the agent from evidence (a labeled `done`).
+    func testRemoteSignalWithNoRowStillEstablishesAgentFromEvidence() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let applied = try orchestrator.recordRemoteAgentSignal(
+            remoteSignalEvent(id: "event-done", sessionID: "new-session", workspaceID: workspace.id, workspacePath: workspace.dir, type: "done"))
+
+        XCTAssertTrue(applied)
+        let agent = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(agent.status, .done)
+        XCTAssertEqual(agent.terminalTrackingID, "new-session")
+    }
+
     private func remoteSignalEvent(id: String, sessionID: String, workspaceID: String?, workspacePath: String?, type: String)
         -> TerminalServiceAgentSignalEvent
     {

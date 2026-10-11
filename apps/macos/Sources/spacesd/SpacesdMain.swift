@@ -2778,15 +2778,19 @@ enum SpacesDaemonErrorClassification {
             // approvals fire no hook of their own, so this transition is also what withdraws any held
             // "is blocked" line for this child before a subscriber can receive stale misinformation.
             let resumedFromBlocked = existingAgent?.status == .waiting
-            let updated = try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, sessionKey: agentSessionKey, label: signalLabel,
-                status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+            guard
+                let updated = try updateExistingProfileAgentStatus(
+                    orchestrator, existingAgent: existingAgent, workspaceID: workspaceID, sessionID: sessionID, sessionKey: agentSessionKey,
+                    label: signalLabel, type: type, environmentKeys: environmentKeys)
+            else { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
             if resumedFromBlocked { try engine.childDidResumeWorking(agentSessionID: updated.id) }
             shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .blocked, .done:
-            let updated = try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, sessionKey: agentSessionKey, label: signalLabel,
-                status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+            guard
+                let updated = try updateExistingProfileAgentStatus(
+                    orchestrator, existingAgent: existingAgent, workspaceID: workspaceID, sessionID: sessionID, sessionKey: agentSessionKey,
+                    label: signalLabel, type: type, environmentKeys: environmentKeys)
+            else { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
             if let transition = type.childNotificationTransition { try engine.childDidTransition(agent: updated, transition: transition) }
             shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .exit:
@@ -2803,6 +2807,21 @@ enum SpacesDaemonErrorClassification {
         if shouldFlushQueuedNotifications { try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID) }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
+    }
+
+    /// Applies a `working`/`blocked`/`done` status. A signal that read an existing row may update only
+    /// that row: if a concurrent exit finalized it first, the signal is dropped (nil) rather than
+    /// recreating or reviving the row. A signal whose read found no row (it establishes the agent from evidence)
+    /// registers one.
+    private nonisolated func updateExistingProfileAgentStatus(
+        _ orchestrator: WorkspaceOrchestrator, existingAgent: AgentWindowRecord?, workspaceID: String, sessionID: String,
+        sessionKey: AgentSessionKeyUpdate, label: String?, type: ProfileAgentEventType, environmentKeys: [String]
+    ) throws -> AgentWindowRecord? {
+        do {
+            return try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, sessionKey: sessionKey, label: label, status: type.status,
+                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys, readAgent: existingAgent)
+        } catch is AgentRowFinalizedError { return nil }
     }
 
     private nonisolated func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws

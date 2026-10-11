@@ -69,3 +69,11 @@ public enum WorkspaceError: LocalizedError {
         }
     }
 }
+
+/// An agent-row status write was refused because a concurrent exit finalized the row it was meant to
+/// update (deleted it, or kept it as exited) after the caller read it. Not a failure of the signal, which
+/// is dropped, and kept apart from `WorkspaceError` so callers can tell "finalized under me" from a real error.
+public struct AgentRowFinalizedError: Error, Equatable {
+    public let agentID: String
+    public init(agentID: String) { self.agentID = agentID }
+}

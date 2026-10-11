@@ -534,6 +534,70 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try await waitUntilChildIsReaped(childPID)
     }
 
+    /// A session's close report and its leader's teardown belong to the driver, so they must not wait on
+    /// shared executors. Here the terminal engine actor is held by an unrelated job and every cooperative-pool
+    /// worker is parked, which is what a saturated test run or a busy daemon looks like. The test body is
+    /// synchronous so it needs neither executor itself.
+    func testHostManagedPTYCloseAndReapDoNotWaitOnBusyExecutors() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let pidPath = root.appendingPathComponent("leader.pid")
+        // The leader releases the slave while staying alive, so the driver must escalate to collect it.
+        let script = """
+            import os, time
+
+            pid_path = "\(pidPath.path)"
+            with open(pid_path + ".tmp", "w") as pid_file:
+                pid_file.write(str(os.getpid()))
+            os.rename(pid_path + ".tmp", pid_path)
+            for fd in (0, 1, 2):
+                os.close(fd)
+            time.sleep(300)
+            """
+        let scriptPath = root.appendingPathComponent("release-pty-at-startup.py")
+        try script.write(to: scriptPath, atomically: true, encoding: .utf8)
+
+        let release = DispatchSemaphore(value: 0)
+        let engineActorHeld = DispatchSemaphore(value: 0)
+        let park: @Sendable () -> Void = { release.wait() }
+        Task { @TerminalEngineActor in
+            engineActorHeld.signal()
+            park()
+        }
+        XCTAssertEqual(engineActorHeld.wait(timeout: .now() + 10), .success)
+        // Far more parkers than workers, so the cooperative pool has no free thread until they are released.
+        let parkers = ProcessInfo.processInfo.activeProcessorCount * 4
+        for _ in 0..<parkers { Task.detached { park() } }
+        defer { for _ in 0...parkers { release.signal() } }
+
+        let sessionClosed = DispatchSemaphore(value: 0)
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "close-busy-executors-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "close-busy-executors",
+                workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
+                createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            terminationEscalationIntervals: .init(hupGrace: 0.2, termGrace: 2.0, killGrace: 2.0))
+        driver.setSessionClosedHandler { sessionClosed.signal() }
+
+        try driver.startIfNeeded()
+        XCTAssertEqual(sessionClosed.wait(timeout: .now() + 10), .success, "the close report must not wait on the engine actor")
+        let recordedPID = try String(contentsOf: pidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let childPID = try XCTUnwrap(Int32(recordedPID))
+        defer {
+            if Self.processLifecycle(childPID) != .reaped {
+                kill(childPID, SIGKILL)
+                var status: Int32 = 0
+                while waitpid(childPID, &status, 0) == -1, errno == EINTR {}
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(10)
+        while Self.processLifecycle(childPID) != .reaped, Date() < deadline { usleep(20_000) }
+        XCTAssertEqual(Self.processLifecycle(childPID), .reaped, "the leader's teardown must not wait on the cooperative pool")
+    }
+
     /// Asserts the PTY leader was genuinely collected, not merely killed. The exit itself is waited on
     /// generously; the reap that follows it is bounded tightly because a stage only reports success once
     /// it has collected the leader. A leaked zombie therefore fails in seconds and says so, instead of
@@ -556,7 +620,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// does not use: a sibling test occupying the engine actor would block every tick here for no reason.
     /// `Task.sleep` itself only ever suspends the calling task, so unlike `Thread.sleep` it never pins a
     /// cooperative-executor worker while it waits — that pinning is exactly how a saturated pool starved
-    /// this same wait and blew a 30s timeout under load (#236) even though the reaper (a `Task.detached` in
+    /// this same wait and blew a 30s timeout under load (#236) even though the reaper (in
     /// `HostManagedPTYTerminalSessionDriver.escalateUntilLeaderIsCollected`) had already finished its work.
     private func waitForProcess(
         timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line, diagnostics: (() -> String)? = nil, _ condition: () -> Bool

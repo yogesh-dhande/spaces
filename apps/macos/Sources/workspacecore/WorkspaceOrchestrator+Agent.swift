@@ -516,9 +516,13 @@ extension WorkspaceOrchestrator {
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "remote_spaces_signal",
                 environmentKeys: event.environmentKeys)
         case .working, .blocked, .done:
-            try updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, label: signalLabel, status: type.status,
-                eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
+            do {
+                try updateAgentWindowStatus(
+                    workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, label: signalLabel, status: type.status,
+                    eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys, readAgent: existingAgent)
+            } catch is AgentRowFinalizedError {
+                // A concurrent exit finalized the row this signal read; a late status never brings it back.
+            }
         case .exit:
             guard let existingAgent else { return true }
             try finalizeAgentRow(
@@ -717,12 +721,43 @@ extension WorkspaceOrchestrator {
         return persisted
     }
 
+    /// Applies a status transition to the agent row bound to the terminal or conversation, registering
+    /// the row when none exists. A caller that has already read the row (a signal that found it) passes it as
+    /// `readAgent`: the write then applies only to that row, and throws `AgentRowFinalizedError` when a
+    /// concurrent finalize deleted it, a different row now owns the binding, or it now reads `.exited`
+    /// though the caller read it live, rather than recreating or reviving a row that went through the
+    /// termination chokepoint. Callers whose read found no row leave it nil and keep the registering
+    /// behavior.
     @discardableResult public func updateAgentWindowStatus(
         workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, sessionKey: AgentSessionKeyUpdate = .keep,
         label: String? = nil, status: AgentWindowStatus, eventType: String? = nil, eventSource: String = "orchestrator",
-        environmentKeys: [String]? = nil
+        environmentKeys: [String]? = nil, readAgent: AgentWindowRecord? = nil
+    ) throws -> AgentWindowRecord {
+        // Read, decide, and write as one transaction, so `BEGIN IMMEDIATE` holds the write lock from the
+        // row read to the row write and nothing can finalize (delete) the row in between.
+        try store.withTransaction {
+            try updateAgentWindowStatusInTransaction(
+                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey, label: label,
+                status: status, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys, readAgent: readAgent)
+        }
+    }
+
+    private func updateAgentWindowStatusInTransaction(
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, sessionKey: AgentSessionKeyUpdate, label: String?,
+        status: AgentWindowStatus, eventType: String?, eventSource: String, environmentKeys: [String]?, readAgent: AgentWindowRecord?
     ) throws -> AgentWindowRecord {
         let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey.matchableKey)
+        if let readAgent {
+            // The write is dropped when the row the signal read was finalized meanwhile: deleted, replaced by
+            // another row, or kept as `.exited` (terminal still live) when it was not exited at read time.
+            // A read that already saw `.exited` may write over it; that is how an agent restarting in the
+            // same terminal comes back.
+            let finalizedSinceRead = existing?.id != readAgent.id || (existing?.status == .exited && readAgent.status != .exited)
+            if finalizedSinceRead { throw AgentRowFinalizedError(agentID: readAgent.id) }
+            // Accepted: two near-simultaneous status signals other than an exit land in commit order, not
+            // hook order. A provider's hooks for one agent fire in sequence, so this is rare, and the next
+            // transition corrects the row.
+        }
         // Per-tool hooks make an active agent signal `working` on every tool call. A signal that would
         // keep the row spinning is a pure no-op: no `agent_session_events` row (the event log records
         // state transitions, not tool calls) and no row rewrite — `updated_at` deliberately stays the
