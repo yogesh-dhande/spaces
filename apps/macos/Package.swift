@@ -269,6 +269,7 @@ let executableTargets: [Target] = [
                 "GhosttyLinuxHeadlessSessionQueryResponseTests.swift",
                 "GhosttyLinuxHeadlessSessionResizeTests.swift",
                 "GhosttyRemoteSessionStateStreamServerSigpipeTests.swift",
+                "HostManagedPTYEscalationLinuxTests.swift",
                 "GhosttyLinuxHeadlessSessionTranscriptStampTests.swift",
                 "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",
                 "GhosttyLinuxHeadlessSpawnStressTests.swift",

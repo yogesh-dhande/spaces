@@ -101,7 +101,9 @@ final class HostManagedPTYAdoptTests: XCTestCase {
     /// then exits immediately. The reader stays blocked while that descendant lives, so terminate()'s
     /// escalation must continue past the (already-reaped) leader to the process group (SIGTERM/SIGKILL)
     /// until the reader actually reaches EOF — otherwise the master fd and the driver leak forever and the
-    /// closed handler never fires.
+    /// closed handler never fires. On macOS the leader's exit revokes the slave, so the reader reaches EOF
+    /// immediately and this test covers only that teardown completes; the escalation past a reaped leader is
+    /// covered on Linux by `HostManagedPTYEscalationLinuxTests`.
     func testTerminateEscalatesPastReapedLeaderUntilSurvivingDescendantReleasesPTYSlave() throws {
         // The subshell inherits the leader's PTY slave on fds 0/1/2; `trap '' HUP` sets SIG_IGN for SIGHUP
         // (preserved across the `exec`), so the descendant survives the group SIGHUP and keeps the slave open

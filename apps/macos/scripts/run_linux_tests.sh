@@ -95,6 +95,7 @@ for suite in \
   GhosttyLinuxHeadlessSessionTranscriptStampTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \
   GhosttyLinuxHeadlessSessionHandoffTests \
+  HostManagedPTYEscalationLinuxTests \
   GhosttyLinuxHeadlessSubmitOrderingTests \
   GhosttyLinuxHeadlessSpawnStressTests; do
   suite_started="$(date +%s)"
