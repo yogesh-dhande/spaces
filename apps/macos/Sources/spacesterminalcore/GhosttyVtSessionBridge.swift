@@ -53,6 +53,8 @@ public enum GhosttyVtSessionBridge {
     ) -> GhosttyTerminalSnapshot {
         var cells: [GhosttyTerminalSnapshot.Cell] = []
         var clusters: [Int: String] = [:]
+        var linkURLs: [Int: String] = [:]
+        let targets = linkTargets(in: rawSnapshot)
         if let rawCells = rawSnapshot.cells, rawSnapshot.cell_count > 0 {
             cells.reserveCapacity(rawSnapshot.cell_count)
             for (index, rawCell) in UnsafeBufferPointer(start: rawCells, count: rawSnapshot.cell_count).enumerated() {
@@ -61,14 +63,27 @@ public enum GhosttyVtSessionBridge {
                         codepoint: rawCell.codepoint, foregroundRGB: rawCell.foreground_rgb, backgroundRGB: rawCell.background_rgb,
                         flags: rawCell.flags))
                 if let cluster = cluster(for: rawCell) { GhosttyTerminalSnapshot.setCluster(cluster, forCell: index, in: &clusters) }
+                if rawCell.link_index > 0, Int(rawCell.link_index) <= targets.count {
+                    GhosttyTerminalSnapshot.setLinkURL(targets[Int(rawCell.link_index) - 1], forCell: index, in: &linkURLs)
+                }
             }
         }
         return GhosttyTerminalSnapshot(
             columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
             cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
             defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells,
-            clusters: clusters, mouseTrackingLevel: mouseTrackingLevel, alternateScreenActive: alternateScreenActive,
+            clusters: clusters, linkURLs: linkURLs, mouseTrackingLevel: mouseTrackingLevel, alternateScreenActive: alternateScreenActive,
             scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset, historyRowBase: historyRowBase, historyEpoch: historyEpoch)
+    }
+
+    /// The snapshot's link table as strings, in table order so a cell's 1-based `link_index` indexes it.
+    /// An entry that is not valid UTF-8 is an empty string, which `setLinkURL` treats as no link.
+    private static func linkTargets(in rawSnapshot: SpacesGhosttyVtSnapshot) -> [String] {
+        guard let links = rawSnapshot.links, rawSnapshot.link_count > 0 else { return [] }
+        return UnsafeBufferPointer(start: links, count: rawSnapshot.link_count).map { link in
+            guard let bytes = link.bytes else { return "" }
+            return String(bytes: UnsafeBufferPointer(start: bytes, count: link.len), encoding: .utf8) ?? ""
+        }
     }
 
     /// Rebuilds a cell's grapheme cluster from the shim's base codepoint plus the extra codepoints it

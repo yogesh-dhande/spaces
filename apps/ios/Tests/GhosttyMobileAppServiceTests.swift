@@ -982,7 +982,7 @@
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var openedLinks: [String] = []
-            hostView.onOpenLink = { openedLinks.append($0) }
+            hostView.onOpenLink = { link, _ in openedLinks.append(link) }
 
             hostView.debugApplyActionEventForTesting(.openURL(kind: .unknown, value: "https://example.com/image.png"))
             hostView.debugApplyActionEventForTesting(.mouseOverLink("https://example.com/image.png"))
@@ -990,10 +990,21 @@
             XCTAssertEqual(openedLinks, ["https://example.com/image.png"])
         }
 
+        func testRemoteTerminalHostViewReportsTheKindOfAnOpenedLink() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var kinds: [GhosttyMobileActionEvent.OpenURLKind] = []
+            hostView.onOpenLink = { _, kind in kinds.append(kind) }
+
+            hostView.debugApplyActionEventForTesting(.openURL(kind: .osc8, value: "https://example.com/docs"))
+            hostView.debugApplyActionEventForTesting(.openURL(kind: .text, value: "https://example.com/image.png"))
+
+            XCTAssertEqual(kinds, [.osc8, .text])
+        }
+
         func testRemoteTerminalHostViewIgnoresHoveredLinkDuringTapProbe() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var openedLinks: [String] = []
-            hostView.onOpenLink = { openedLinks.append($0) }
+            hostView.onOpenLink = { link, _ in openedLinks.append(link) }
 
             XCTAssertFalse(hostView.debugApplyActionEventsDuringTapProbeForTesting([.mouseOverLink(" image.png ")]))
 
@@ -1004,7 +1015,7 @@
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             let fullPath = "/Users/yogesh/Downloads/Screen Recording 2026-03-20 at 11.17.57 AM.mov"
             var openedLinks: [String] = []
-            hostView.onOpenLink = { openedLinks.append($0) }
+            hostView.onOpenLink = { link, _ in openedLinks.append(link) }
 
             XCTAssertTrue(
                 hostView.debugApplyActionEventsDuringTapProbeForTesting([
@@ -1012,6 +1023,60 @@
                 ]))
 
             XCTAssertEqual(openedLinks, [fullPath])
+        }
+
+        /// A hyperlink whose label is not its target ("Docs" linked to a URL) opens the target on a tap. The
+        /// tap probe finds it on the real mirror surface, which holds the frame's link table as page
+        /// hyperlinks; a label that is not itself a URL has nothing else for the probe to match.
+        func testRemoteTerminalHostViewTapOnAnOSC8LabelOpensItsTarget() async throws {
+            let opened = try await openedLinksAfterTappingOSC8Label(mouseTrackingLevel: .none)
+            XCTAssertEqual(opened, ["https://example.com/docs"])
+        }
+
+        /// Under a program that tracks the mouse the probe's click carries shift as well, which is what
+        /// releases the pointer for the link.
+        func testRemoteTerminalHostViewTapOnAnOSC8LabelOpensItsTargetUnderMouseTracking() async throws {
+            let opened = try await openedLinksAfterTappingOSC8Label(mouseTrackingLevel: .clicks)
+            XCTAssertEqual(opened, ["https://example.com/docs"])
+        }
+
+        private func openedLinksAfterTappingOSC8Label(mouseTrackingLevel: TerminalMouseTrackingLevel) async throws -> [String] {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+            viewController.view.frame = window.bounds
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            hostView.setAcceptsTerminalInput(true)
+            viewController.view.addSubview(hostView)
+            viewController.view.layoutIfNeeded()
+            defer { hostView.removeFromSuperview() }
+
+            let label = Array("Docs".unicodeScalars)
+            let cells = (0..<400).map { index -> GhosttyTerminalSnapshot.Cell in
+                let scalar = index < label.count ? label[index].value : 0x20
+                return GhosttyTerminalSnapshot.Cell(codepoint: scalar, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
+            }
+            var linkURLs: [Int: String] = [:]
+            for index in 0..<label.count { linkURLs[index] = "https://example.com/docs" }
+            hostView.update(
+                snapshot: GhosttyTerminalSnapshot(
+                    columns: 40, rows: 10, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xF2F2F2,
+                    defaultBackgroundRGB: 0x1A1E26, cells: cells, linkURLs: linkURLs, mouseTrackingLevel: mouseTrackingLevel),
+                renderStateKey: "osc8-label", fallbackText: "")
+            let deadline = Date().addingTimeInterval(5)
+            // Slept rather than run-looped: the mirror is acquired by a main-actor task.
+            while !hostView.hasMirrorSurfaceForTesting && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
+            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
+            try await Task.sleep(for: .milliseconds(200))
+
+            var opened: [String] = []
+            hostView.onOpenLink = { link, _ in opened.append(link) }
+            hostView.debugAppliedFrameCoversHostColumnsForTesting = true
+            _ = hostView.debugTapToActivateInputForTesting(at: pointInCell(column: 1, row: 0))
+            return opened
         }
 
         func testRemoteTerminalHostViewSuppressesSystemKeyboardAssistant() {

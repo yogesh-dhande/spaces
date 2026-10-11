@@ -15,6 +15,9 @@
         case text
         case html
         case webURL
+        /// A URL the system opens with whatever application is registered for its scheme: a `mailto:` link
+        /// opens the mail client, a confirmed custom-scheme link opens its own application.
+        case systemURL
 
         public init(kind: SpacesDeviceTerminalLinkArtifactKind) {
             switch kind {
@@ -59,7 +62,7 @@
         }
 
         /// The macOS-native handler set: every category opens via `NSWorkspace.shared.open(_:)`
-        /// except `.webURL` and `.html`, which are forced into the system default browser rather
+        /// (the system URL category is that and nothing more) except `.webURL` and `.html`, which are forced into the system default browser rather
         /// than whatever app the file's extension is otherwise associated with (e.g. an `.html`
         /// file should render in a browser tab, not open in a text/code editor).
         public static func defaultRegistry() -> TerminalArtifactHandlerRegistry {
@@ -67,7 +70,7 @@
             let openInWorkspace: Handler = { NSWorkspace.shared.open($0) }
             return TerminalArtifactHandlerRegistry(handlers: [
                 .webURL: openInBrowser, .html: openInBrowser, .image: openInWorkspace, .video: openInWorkspace, .pdf: openInWorkspace,
-                .markdown: openInWorkspace, .text: openInWorkspace,
+                .markdown: openInWorkspace, .text: openInWorkspace, .systemURL: openInWorkspace,
             ])
         }
 

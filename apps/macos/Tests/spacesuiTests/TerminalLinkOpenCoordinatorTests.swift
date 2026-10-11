@@ -36,6 +36,21 @@ import spacesterminalui
         func flash() {}
     }
 
+    @MainActor private final class RecordingUntrustedLinkPresenter: UntrustedTerminalLinkPresenting {
+        var confirmations: [(url: URL, displayString: String)] = []
+        var blocks: [(reason: SpacesUntrustedTerminalLink.DenialReason, displayString: String)] = []
+        private var confirmedOpens: [@MainActor () -> Void] = []
+
+        func presentConfirmation(for url: URL, displayString: String, open: @escaping @MainActor () -> Void) {
+            confirmations.append((url, displayString))
+            confirmedOpens.append(open)
+        }
+        func presentBlock(reason: SpacesUntrustedTerminalLink.DenialReason, displayString: String) { blocks.append((reason, displayString)) }
+
+        /// What the user's "Open Link" press does.
+        func confirmLastPrompt() { confirmedOpens.last?() }
+    }
+
     @MainActor private final class OpenRecorder {
         struct Open {
             let category: TerminalArtifactCategory?
@@ -63,7 +78,7 @@ import spacesterminalui
         }
 
         func makeRegistry() -> TerminalArtifactHandlerRegistry {
-            let categories: [TerminalArtifactCategory] = [.image, .video, .pdf, .markdown, .text, .html, .webURL]
+            let categories: [TerminalArtifactCategory] = [.image, .video, .pdf, .markdown, .text, .html, .webURL, .systemURL]
             var handlers: [TerminalArtifactCategory: TerminalArtifactHandlerRegistry.Handler] = [:]
             for category in categories {
                 handlers[category] = { [weak self] url in
@@ -153,12 +168,14 @@ import spacesterminalui
     private func makeCoordinator(
         isLocalDevice: Bool, workingDirectory: String? = nil, sender: FakeLinkSender = FakeLinkSender(), banner: RecordingBanner,
         recorder: OpenRecorder, sessionID: String = "session-\(UUID().uuidString)", deviceID: String? = nil,
-        onSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void = { _ in }
+        onSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void = { _ in },
+        untrustedLinkPresenter: any UntrustedTerminalLinkPresenting = RecordingUntrustedLinkPresenter()
     ) -> TerminalLinkOpenCoordinator {
         TerminalLinkOpenCoordinator(
             sessionID: sessionID, deviceID: deviceID ?? (isLocalDevice ? "local" : "remote-\(UUID().uuidString)"), isLocalDevice: isLocalDevice,
             workingDirectoryProvider: { workingDirectory }, requestSender: { [sender] request in try sender.send(request) },
-            registry: recorder.makeRegistry(), banner: banner, openSpacesTerminalLink: onSpacesTerminalLink)
+            registry: recorder.makeRegistry(), banner: banner, openSpacesTerminalLink: onSpacesTerminalLink,
+            untrustedLinkPresenter: untrustedLinkPresenter)
     }
 
     private func metadata(
@@ -287,6 +304,156 @@ import spacesterminalui
         coordinator.openLink("spaces://terminal/session-7")
 
         #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: nil)])
+    }
+
+    // MARK: - OSC 8 hyperlinks (untrusted targets)
+
+    @Test func osc8WebLinkOpensInTheBrowserWithoutAsking() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let presenter = RecordingUntrustedLinkPresenter()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
+
+        coordinator.openLink("https://example.com/docs", kind: .osc8)
+
+        #expect(recorder.opens.map(\.category) == [.webURL])
+        #expect(recorder.opens.first?.url.absoluteString == "https://example.com/docs")
+        #expect(presenter.confirmations.isEmpty && presenter.blocks.isEmpty)
+    }
+
+    @Test func osc8LoopbackLinkOnARemoteDeviceStillShowsTheNotice() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let coordinator = makeCoordinator(isLocalDevice: false, banner: banner, recorder: recorder)
+
+        coordinator.openLink("http://localhost:3000/", kind: .osc8)
+
+        #expect(recorder.opens.isEmpty)
+        #expect(banner.noticeMessages == [TerminalLinkOpenCoordinator.loopbackRemoteNotice])
+    }
+
+    @Test func osc8SpacesTerminalLinkStillFocusesTheSessionInApp() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, onSpacesTerminalLink: { routed.append($0) })
+
+        coordinator.openLink("spaces://terminal/session-1", kind: .osc8)
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-1", deviceID: nil)])
+        #expect(recorder.opens.isEmpty)
+    }
+
+    @Test func osc8MailLinkGoesToTheSystemHandler() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let coordinator = makeCoordinator(isLocalDevice: false, banner: banner, recorder: recorder)
+
+        coordinator.openLink("mailto:person@example.com", kind: .osc8)
+
+        #expect(recorder.opens.map(\.category) == [.systemURL])
+        #expect(recorder.opens.first?.url.absoluteString == "mailto:person@example.com")
+    }
+
+    @Test func osc8CustomSchemeAsksFirstAndOpensOnlyOnConfirmation() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let presenter = RecordingUntrustedLinkPresenter()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
+
+        coordinator.openLink("slack://open?team=T1", kind: .osc8)
+
+        #expect(presenter.confirmations.map(\.url.absoluteString) == ["slack://open?team=T1"])
+        #expect(recorder.opens.isEmpty, "nothing opens before the user confirms")
+
+        presenter.confirmLastPrompt()
+        #expect(recorder.opens.map(\.category) == [.systemURL])
+        #expect(recorder.opens.first?.url.absoluteString == "slack://open?team=T1")
+    }
+
+    /// A bare path in a hyperlink is refused, though the same text clicked as a detected link opens.
+    @Test func osc8BarePathIsBlockedWhereATextLinkWouldOpen() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let presenter = RecordingUntrustedLinkPresenter()
+        let coordinator = makeCoordinator(
+            isLocalDevice: true, workingDirectory: "/tmp", banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
+
+        coordinator.openLink("/etc/hosts", kind: .osc8)
+
+        #expect(presenter.blocks.map(\.reason) == [.malformedURL])
+        #expect(recorder.opens.isEmpty)
+    }
+
+    @Test func osc8LinkWithUnsafeCharactersIsBlockedWithAnEscapedTarget() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let presenter = RecordingUntrustedLinkPresenter()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
+
+        coordinator.openLink("https://example.com/\u{202E}evil", kind: .osc8)
+
+        #expect(presenter.blocks.map(\.reason) == [.unsafeCharacters])
+        #expect(presenter.blocks.first?.displayString.contains("\\u{202E}") == true)
+        #expect(recorder.opens.isEmpty)
+    }
+
+    @Test func osc8LocalFileLinkOpensOnlyAnExistingNonExecutableFile() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let notes = directory.appendingPathComponent("notes.txt")
+        try "contents".write(to: notes, atomically: true, encoding: .utf8)
+        let script = directory.appendingPathComponent("run.txt")
+        try "#!/bin/sh".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let presenter = RecordingUntrustedLinkPresenter()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
+
+        coordinator.openLink(notes.absoluteString, kind: .osc8)
+        #expect(recorder.opens.map(\.category) == [.text])
+        #expect(recorder.opens.first?.url.lastPathComponent == "notes.txt")
+
+        coordinator.openLink(script.absoluteString, kind: .osc8)
+        coordinator.openLink(directory.appendingPathComponent("missing.txt").absoluteString, kind: .osc8)
+        #expect(presenter.blocks.map(\.reason) == [.unsafeFile, .inaccessibleFile])
+        #expect(recorder.opens.count == 1)
+    }
+
+    /// The viewing Mac cannot check a file on another device's disk, so an allowed file link goes to
+    /// that device's resolver, which decides.
+    @Test func osc8FileLinkOnARemoteDeviceIsResolvedByTheDeviceNotCheckedLocally() async {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let presenter = RecordingUntrustedLinkPresenter()
+        let coordinator = makeCoordinator(isLocalDevice: false, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
+
+        coordinator.openLink("file:///no/such/path/on/this/mac.png", kind: .osc8)
+        #expect(banner.progressMessages == ["Resolving link…"])
+        await coordinator.drainActiveWorkForTesting()
+        #expect(presenter.blocks.isEmpty)
+
+        coordinator.openLink("file:///tmp/report.png?x=1", kind: .osc8)
+        #expect(presenter.blocks.map(\.reason) == [.malformedURL])
+    }
+
+    /// Only hyperlinks are untrusted: a link detected in the text keeps opening anything.
+    @Test func textLinkKindKeepsTheOpenAnythingRule() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("tool.swift")
+        try "print(1)".write(to: file, atomically: true, encoding: .utf8)
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let presenter = RecordingUntrustedLinkPresenter()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
+
+        coordinator.openLink(file.path, kind: .unknown)
+
+        #expect(recorder.opens.count == 1)
+        #expect(presenter.blocks.isEmpty && presenter.confirmations.isEmpty)
     }
 
     @Test func localFileLinkResolvesRelativePathAndOpens() throws {

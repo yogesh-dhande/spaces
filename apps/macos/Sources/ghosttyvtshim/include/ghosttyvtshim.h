@@ -104,7 +104,21 @@ typedef struct {
     // codepoint. Owned by the snapshot and released by `spaces_ghostty_vt_snapshot_free`.
     uint16_t grapheme_extra_len;
     uint32_t *grapheme_extras;
+    // 1-based index of this cell's OSC 8 hyperlink target in the snapshot's `links` table; 0 when the
+    // cell carries no link.
+    uint32_t link_index;
 } SpacesGhosttyVtSnapshotCell;
+
+// The longest hyperlink target a snapshot exports. A cell whose target is longer is exported without
+// its link, which bounds both the copy the snapshot makes and the payload the render wire format
+// accepts (`GhosttyTerminalSnapshot.maximumLinkURLUTF8ByteCount`).
+#define SPACES_GHOSTTY_VT_MAX_LINK_URI_BYTES 2048
+
+// One distinct hyperlink target, owned by the snapshot and released by `spaces_ghostty_vt_snapshot_free`.
+typedef struct {
+    uint8_t *bytes;
+    size_t len;
+} SpacesGhosttyVtSnapshotLink;
 
 typedef struct {
     uint16_t columns;
@@ -116,6 +130,9 @@ typedef struct {
     uint32_t default_background_rgb;
     size_t cell_count;
     SpacesGhosttyVtSnapshotCell *cells;
+    // The distinct OSC 8 targets the cells reference, deduplicated by URI bytes.
+    size_t link_count;
+    SpacesGhosttyVtSnapshotLink *links;
 } SpacesGhosttyVtSnapshot;
 
 typedef struct {

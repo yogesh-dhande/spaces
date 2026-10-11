@@ -4830,6 +4830,44 @@
             XCTAssertFalse(model.isPreparingLinkPreview)
         }
 
+        func testTappingAnotherLinkSupersedesAPreviewStillLoading() async throws {
+            let settings = settings()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let gate = LinkPreviewGate()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                let link = request.terminalLink ?? ""
+                return Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|\(link)", source: .externalURL, originalLink: link, displayName: URL(string: link)?.lastPathComponent ?? link,
+                        contentType: "image/png", artifactKind: .image, byteCount: nil, externalURL: link))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient,
+                remoteMediaDownloader: { _, _ in
+                    try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+                    await gate.markSlowStarted()
+                    await gate.waitForRelease()
+                    let downloadedURL = cacheRoot.appendingPathComponent("downloaded-\(UUID().uuidString).png")
+                    try Data([0x01, 0x01, 0x01]).write(to: downloadedURL)
+                    return downloadedURL
+                }, linkPreviewCacheDirectory: cacheRoot)
+
+            let loadingTask = Task { await model.openTerminalLink("https://example.com/slow.png") }
+            await gate.waitForSlowStart()
+            await model.openTappedTerminalLink("https://example.com", kind: .osc8)
+            XCTAssertNotNil(model.pendingLinkConfirmation)
+
+            await gate.releaseSlow()
+            await loadingTask.value
+
+            XCTAssertNil(model.linkPreview, "a late preview must not present over the new tap's dialog")
+            XCTAssertNil(model.safariLink)
+            XCTAssertNotNil(model.pendingLinkConfirmation)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
         func testOpenTerminalLinkDownloadsLocalMediaChunks() async throws {
             let settings = settings()
             let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -4905,6 +4943,192 @@
             XCTAssertNil(model.linkPreviewErrorMessage)
             XCTAssertNil(model.linkNotice)
             XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
+        private final class LinkResolveCounter: @unchecked Sendable { var count = 0 }
+
+        /// A model whose daemon counts link resolves (the observable of a link that went on to open), and
+        /// whose system hand-off and deep-link navigator are recorded rather than performed.
+        private func linkTapHarness() -> (
+            model: TerminalViewerModel, resolves: LinkResolveCounter, systemOpened: SystemOpenRecorder, deepLinks: DeepLinkRecorder
+        ) {
+            let settings = settings()
+            let resolves = LinkResolveCounter()
+            let systemOpened = SystemOpenRecorder()
+            let deepLinks = DeepLinkRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "resolveTerminalLink" { resolves.count += 1 }
+                return SpacesDeviceAPIResponse(ok: false, message: "unavailable")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { deepLinks.links.append($0) },
+                bridgeClient: bridgeClient, openSystemURL: { systemOpened.urls.append($0) })
+            return (model, resolves, systemOpened, deepLinks)
+        }
+
+        private final class SystemOpenRecorder { var urls: [URL] = [] }
+        private final class DeepLinkRecorder { var links: [SpacesTerminalDeepLink] = [] }
+
+        func testTappedWebLinkAsksFirstAndOpensOnlyAfterOpenLink() async throws {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("https://github.com/org/repo", kind: .text)
+
+            let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(confirmation.title, "github.com")
+            XCTAssertEqual(confirmation.displayString, "https://github.com/org/repo")
+            XCTAssertEqual(harness.resolves.count, 0, "nothing opens until the user says so")
+
+            await harness.model.openConfirmedLink(confirmation)
+
+            XCTAssertNil(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(harness.resolves.count, 1)
+        }
+
+        /// A detected relative path opens relative to the session's directory on its device, so the
+        /// confirmation (and the text Copy Link copies) shows it as written, never resolved against the
+        /// phone's own working directory.
+        func testTappedRelativeFileLinkShowsThePathAsWritten() async throws {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("src/app/main.swift", kind: .text)
+
+            let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(confirmation.displayString, "src/app/main.swift")
+            XCTAssertEqual(harness.resolves.count, 0, "nothing opens until the user says so")
+        }
+
+        func testCancellingTheConfirmationOpensNothing() async throws {
+            let harness = linkTapHarness()
+            await harness.model.openTappedTerminalLink("https://github.com/org/repo", kind: .text)
+            XCTAssertNotNil(harness.model.pendingLinkConfirmation)
+
+            harness.model.dismissPendingLinkConfirmation()
+
+            XCTAssertNil(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(harness.resolves.count, 0)
+            XCTAssertTrue(harness.systemOpened.urls.isEmpty)
+        }
+
+        func testCopyLinkPutsTheDisplayStringOnThePasteboard() async throws {
+            let harness = linkTapHarness()
+            let pasteboard = UIPasteboard.withUniqueName()
+            defer { UIPasteboard.remove(withName: pasteboard.name) }
+            harness.model.pasteboardOverrideForTesting = pasteboard
+            await harness.model.openTappedTerminalLink("https://github.com/org/repo", kind: .text)
+            let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
+
+            harness.model.copyLinkText(confirmation.displayString)
+
+            XCTAssertEqual(pasteboard.string, "https://github.com/org/repo")
+            XCTAssertEqual(harness.resolves.count, 0, "copying opens nothing")
+        }
+
+        func testTappedFileLinkAsksWithItsFileName() async throws {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("src/app/main.swift", kind: .text)
+
+            XCTAssertEqual(harness.model.pendingLinkConfirmation?.title, "main.swift")
+            XCTAssertEqual(harness.resolves.count, 0)
+        }
+
+        func testTappedSpacesTerminalLinkOpensInAppWithoutAsking() async {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("spaces://terminal/abc", kind: .text)
+
+            XCTAssertNil(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(harness.deepLinks.links, [SpacesTerminalDeepLink(sessionID: "abc")])
+        }
+
+        func testTappedLoopbackLinkShowsItsNoticeWithoutAsking() async {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("http://localhost:3000/dashboard", kind: .text)
+
+            XCTAssertNil(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(harness.model.linkNotice, "This address runs on the session's host machine and isn't reachable from this device yet.")
+        }
+
+        func testTappedTextLinkWithUnknownSchemeDoesNothing() async {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("ftp://example.com/file", kind: .text)
+
+            XCTAssertNil(harness.model.pendingLinkConfirmation)
+            XCTAssertNil(harness.model.blockedLink)
+            XCTAssertTrue(harness.systemOpened.urls.isEmpty)
+            XCTAssertEqual(harness.resolves.count, 0)
+        }
+
+        func testOSC8LinkWithBidirectionalOverrideIsBlockedAndNothingOpens() async throws {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("https://example.com/\u{202E}gpj.exe", kind: .osc8)
+
+            XCTAssertNil(harness.model.pendingLinkConfirmation)
+            let blocked = try XCTUnwrap(harness.model.blockedLink)
+            XCTAssertEqual(blocked.reason, SpacesUntrustedTerminalLink.DenialReason.unsafeCharacters.message)
+            XCTAssertEqual(blocked.displayString, "https://example.com/\\u{202E}gpj.exe")
+            XCTAssertTrue(harness.systemOpened.urls.isEmpty)
+            XCTAssertEqual(harness.resolves.count, 0)
+        }
+
+        func testOSC8CustomSchemeLinkAsksThenHandsItToTheSystem() async throws {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("zoommtg://zoom.us/join?confno=123", kind: .osc8)
+
+            let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(confirmation.title, "zoom.us")
+            XCTAssertTrue(harness.systemOpened.urls.isEmpty)
+
+            await harness.model.openConfirmedLink(confirmation)
+
+            XCTAssertEqual(harness.systemOpened.urls, [URL(string: "zoommtg://zoom.us/join?confno=123")!])
+            XCTAssertEqual(harness.resolves.count, 0)
+        }
+
+        func testOSC8MailtoLinkAsksThenHandsItToTheSystem() async throws {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("mailto:person@example.com", kind: .osc8)
+
+            let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(confirmation.title, "person@example.com")
+            XCTAssertTrue(harness.systemOpened.urls.isEmpty)
+
+            await harness.model.openConfirmedLink(confirmation)
+
+            XCTAssertEqual(harness.systemOpened.urls, [URL(string: "mailto:person@example.com")!])
+        }
+
+        /// Titles come from percent-decoded URL parts, so an encoded bidi override or newline must not
+        /// reach the prominent title as a real character.
+        func testDecodedTitlesNeverCarryBidiOverridesOrNewlines() {
+            let file = TerminalLinkConfirmation.title(forFileLink: "file:///tmp/%E2%80%AEgpj.exe.txt", displayString: "/tmp/x")
+            XCTAssertFalse(file.unicodeScalars.contains("\u{202E}"))
+            XCTAssertTrue(file.contains("\\u{202E}"))
+
+            let fileURL = TerminalLinkConfirmation.title(for: URL(string: "file:///tmp/%E2%80%AEgpj.exe.txt")!, displayString: "/tmp/x")
+            XCTAssertFalse(fileURL.unicodeScalars.contains("\u{202E}"))
+
+            let mail = TerminalLinkConfirmation.title(for: URL(string: "mailto:person%0Aevil@example.com")!, displayString: "mailto:x")
+            XCTAssertFalse(mail.contains("\n"))
+            XCTAssertTrue(mail.contains("\\u{A}"))
+        }
+
+        func testOSC8WebLinkAsksThenOpensThroughTheDaemon() async throws {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink("https://example.com/docs", kind: .osc8)
+
+            let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
+            await harness.model.openConfirmedLink(confirmation)
+
+            XCTAssertEqual(harness.resolves.count, 1)
+            XCTAssertTrue(harness.systemOpened.urls.isEmpty)
         }
 
         func testOpenTerminalLinkIgnoresUnknownScheme() async {
@@ -11537,7 +11761,9 @@
             let tickCount = 3
             model.beginWordSelection(wordSelection())
             for _ in 0..<tickCount { model.autoscrollSelection(towardOlderRows: true) }
-            await waitUntilAsync("the first tick to start the continuation read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            await waitUntilAsync("the first tick to start the continuation read") {
+                await Self.transcriptRequests(in: recorder.snapshot()).count == 2
+            }
             XCTAssertFalse(model.isShowingLocalScrollFrame, "the stale replay must not be shown while its continuation is on the wire")
 
             await heldContinuation.release()
@@ -11555,7 +11781,8 @@
             let lineOneRowUp = try XCTUnwrap(
                 Self.transcriptLineNumber(of: Self.topRowText(of: try XCTUnwrap(model.ownerRenderEpoch?.bootstrapSnapshot))))
             XCTAssertEqual(
-                lineAfterTheTicks, lineOneRowUp - (tickCount - 1), "the ticks scroll the caught-up replay one row each, from the rows above the live screen")
+                lineAfterTheTicks, lineOneRowUp - (tickCount - 1),
+                "the ticks scroll the caught-up replay one row each, from the rows above the live screen")
         }
 
         /// Typing ends the gesture the queued autoscroll rows belong to, so the continuation read failing
@@ -11586,7 +11813,9 @@
 
             model.beginWordSelection(wordSelection())
             for _ in 0..<3 { model.autoscrollSelection(towardOlderRows: true) }
-            await waitUntilAsync("the first tick to start the continuation read") { await Self.transcriptRequests(in: recorder.snapshot()).count == 2 }
+            await waitUntilAsync("the first tick to start the continuation read") {
+                await Self.transcriptRequests(in: recorder.snapshot()).count == 2
+            }
             await model.sendKey("a")
 
             await heldContinuation.release()

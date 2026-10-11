@@ -2,6 +2,7 @@
     import AppKit
     import Foundation
     import GhosttyKit
+    import spacesdevicecore
     import spacesterminalcore
 
     public struct GhosttyTerminalSearchDebugState: Sendable, Equatable {
@@ -128,8 +129,20 @@
                 guard hoveredLink != oldValue else { return }
                 window?.invalidateCursorRects(for: self)
                 if hoveredLink != nil { NSCursor.pointingHand.set() }
+                hoveredLinkDisplayString = hoveredLink.map { SpacesUntrustedTerminalLink($0).displayString(fileLocation: linkFileLocation) }
+                updateLinkTooltip()
             }
         }
+        /// Where the files named by this pane's links live: this Mac for a local session, another device
+        /// otherwise. The tooltip resolves symlinks only for files on this Mac. Set once when the pane's
+        /// host creates the view.
+        var linkFileLocation: SpacesUntrustedTerminalLink.FileLocation = .anotherDevice
+        /// The hovered link's target in a form safe to show as one line of text (unsafe characters are
+        /// escaped, file paths standardized), or nil when no link is hovered. Ghostty raises the hover
+        /// while Cmd is held over a link (Cmd+Shift under a program that tracks the mouse), and this is
+        /// the text `linkTooltip` shows under it.
+        private(set) var hoveredLinkDisplayString: String?
+        private let linkTooltip = TerminalLinkTooltipView()
         var debugBindingActionHandler: (@MainActor (String) -> Bool)?
         private(set) var debugRecordedBindingActions: [String] = []
         var debugMouseEventHandler: (@MainActor (String) -> Bool)?
@@ -162,7 +175,7 @@
         /// coordinator can route web/loopback/remote-file links (fetch-over-Device-API, loopback notice).
         /// Left nil in contexts with no coordinator (tests, non-device hosts), where the legacy opener
         /// and its `debugOpenURLHandler` test seam still apply.
-        var onOpenLink: (@MainActor (String) -> Void)?
+        var onOpenLink: (@MainActor (String, GhosttyActionEvent.OpenURLKind) -> Void)?
         /// Called whenever this pane goes on or off screen (see `isDisplayed`). `RemoteGhosttySessionHost`
         /// uses it to stop paying for screen updates nobody can see; nothing else observes it.
         var onDisplayStateChanged: (@MainActor (Bool) -> Void)?
@@ -217,6 +230,23 @@
         /// Where the pointer last was during the drag, in window coordinates: the auto-scroll tick
         /// re-resolves the drag against it.
         private var selectionPointer: (location: NSPoint, modifierFlags: NSEvent.ModifierFlags)?
+        /// Where the pointer last was inside this pane, in window coordinates; nil once it leaves. A
+        /// modifier change re-resolves link hover at this point (see `refreshLinkHover`). The modifier
+        /// monitor is installed while this holds a location, so it is live exactly while the pointer is
+        /// inside the pane.
+        private var lastPointerLocationInWindow: NSPoint? {
+            didSet {
+                if lastPointerLocationInWindow == nil {
+                    removeLinkModifierMonitor()
+                } else if linkModifierMonitor == nil {
+                    installLinkModifierMonitor()
+                }
+            }
+        }
+        /// The app-local `.flagsChanged` monitor that keeps link hover current (see
+        /// `installLinkModifierMonitor`). `nonisolated(unsafe)` so `deinit` can hand it to the main thread
+        /// for removal.
+        private nonisolated(unsafe) var linkModifierMonitor: Any?
         private var selectionAutoscrollTask: Task<Void, Never>?
         /// The snapshot of the frame the mirror surface currently shows, which the gesture is resolved
         /// against.
@@ -234,6 +264,7 @@
             installSurfaceHostView()
             installSearchOverlay()
             installJumpToBottomControl()
+            addSubview(linkTooltip)
         }
 
         @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -254,7 +285,9 @@
             if let windowOcclusionObserver { NotificationCenter.default.removeObserver(windowOcclusionObserver) }
             let actionHandlerToken = actionHandlerToken
             let mirror = mirror
+            let linkModifierMonitor = linkModifierMonitor
             MainThreadDeinitCleanup.run {
+                if let linkModifierMonitor { NSEvent.removeMonitor(linkModifierMonitor) }
                 GhosttyMirrorAppService.shared.unregisterActionHandler(actionHandlerToken)
                 if let mirror { ghostty_mirror_free(mirror) }
             }
@@ -283,6 +316,7 @@
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            if window == nil { lastPointerLocationInWindow = nil }
             observeWindowVisibility()
             observeWindowOcclusion()
             applyDisplayState()
@@ -470,8 +504,45 @@
             forwardMouseMotionIfWanted(event)
         }
 
+        /// Pressing or releasing Cmd (or Shift, which releases the pointer from a mouse-tracking program)
+        /// over a link has to highlight or clear it without the pointer moving.
+        ///
+        /// Ghostty only re-resolves links when the pointer enters a new cell, and the mirror surface never
+        /// sees key events, so the modifier change is delivered as a pointer position. A pointer that
+        /// parks at its current cell would be ignored, so the position is cleared first, which makes the
+        /// repeat a fresh entry into the cell. Both calls run in one main-thread turn, before any frame is
+        /// drawn.
+        ///
+        /// The change is observed by an app-local event monitor rather than `flagsChanged(with:)`:
+        /// modifier events go to the first responder, not to the pane under the pointer, so an unfocused
+        /// pane, or an ended or read-only one that refuses first responder, would never see Cmd go down
+        /// or up. The monitor lives only while the pointer is inside this pane.
+        private func installLinkModifierMonitor() {
+            linkModifierMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                MainActor.assumeIsolated { self?.refreshLinkHover(modifierFlags: event.modifierFlags) }
+                return event
+            }
+        }
+
+        private func removeLinkModifierMonitor() {
+            guard let linkModifierMonitor else { return }
+            NSEvent.removeMonitor(linkModifierMonitor)
+            self.linkModifierMonitor = nil
+        }
+
+        private func refreshLinkHover(modifierFlags: NSEvent.ModifierFlags) {
+            // A held button means a drag or a forwarded press owns the pointer, and Ghostty ignores link
+            // hover for it anyway.
+            guard debugMouseEventHandler == nil, NSEvent.pressedMouseButtons == 0, let location = lastPointerLocationInWindow,
+                let surface = mirrorSurface()
+            else { return }
+            ghostty_surface_mouse_pos(surface, -1, -1, Self.ghosttyMouseModifiers(for: modifierFlags))
+            sendMousePosition(locationInWindow: location, modifierFlags: modifierFlags)
+        }
+
         override func mouseExited(with event: NSEvent) {
             hoveredLink = nil
+            lastPointerLocationInWindow = nil
             guard let surface = mirrorSurface() else { return }
             guard NSEvent.pressedMouseButtons == 0 else { return }
             ghostty_surface_mouse_pos(surface, -1, -1, Self.ghosttyMouseModifiers(for: event.modifierFlags))
@@ -633,8 +704,8 @@
 
         func applyActionEvent(_ event: GhosttyActionEvent) {
             switch event {
-            case .openURL(_, let value):
-                if let onOpenLink { onOpenLink(value) } else { _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler) }
+            case .openURL(let kind, let value):
+                if let onOpenLink { onOpenLink(value, kind) } else { _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler) }
             case .mouseOverLink(let value): hoveredLink = value
             case .startSearch(let needle): showSearchOverlay(query: needle, submitSeededQuery: needle != nil)
             case .endSearch: hideSearchOverlay()
@@ -1053,6 +1124,40 @@
             return (Int(column), Int(row), Int(size.columns), Int(size.rows))
         }
 
+        /// The cell's rectangle in this view's coordinates, laid out with the padding and cell metrics
+        /// `gridCell(at:)` inverts.
+        private func cellRect(column: Int, row: Int) -> NSRect? {
+            guard let surface = mirrorSurface() else { return nil }
+            let size = ghostty_surface_size(surface)
+            guard size.cell_width_px > 0, size.cell_height_px > 0 else { return nil }
+            let scale = Double(window?.backingScaleFactor ?? 2.0)
+            let padding = GhosttySurfaceGridPadding.perSidePixels(scale: scale)
+            let width = CGFloat(Double(size.cell_width_px) / scale)
+            let height = CGFloat(Double(size.cell_height_px) / scale)
+            let x = bounds.minX + CGFloat((padding + Double(column) * Double(size.cell_width_px)) / scale)
+            let yFromTop = CGFloat((padding + Double(row) * Double(size.cell_height_px)) / scale)
+            return NSRect(x: x, y: bounds.maxY - yFromTop - height, width: width, height: height)
+        }
+
+        /// Places the tooltip under the hovered link's row, anchored at the pointer when the link became
+        /// hovered. It is not re-placed while the same link stays hovered (the hover only changes with the
+        /// link), so it holds still as the pointer moves within the link.
+        private func updateLinkTooltip() {
+            guard let text = hoveredLinkDisplayString, let location = lastPointerLocationInWindow, let cell = gridCell(at: location),
+                let rect = cellRect(column: cell.column, row: cell.row)
+            else {
+                linkTooltip.hide()
+                return
+            }
+            let frame = TerminalLinkTooltipView.frame(
+                paneBounds: bounds, rowRect: rect, anchorX: rect.minX, tooltipSize: TerminalLinkTooltipView.size(for: text))
+            let isLightTerminal = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .aqua
+            linkTooltip.show(text: text, frame: frame, onLightTerminal: isLightTerminal)
+        }
+
+        /// The tooltip's text and frame while it is showing, nil while hidden.
+        var debugLinkTooltip: (text: String, frame: NSRect)? { linkTooltip.shownText.map { ($0, linkTooltip.frame) } }
+
         /// The window point at the centre of a grid cell: `gridCell(at:)` inverted, so a test can aim a
         /// mouse event at a cell without duplicating the surface's padding and cell metrics.
         func windowPointForTesting(column: Int, row: Int) -> NSPoint? {
@@ -1096,6 +1201,7 @@
         private static let dragPointerEdgeInset: CGFloat = 3
 
         private func sendMousePosition(locationInWindow: NSPoint, modifierFlags: NSEvent.ModifierFlags) {
+            lastPointerLocationInWindow = locationInWindow
             if let debugMouseEventHandler {
                 debugRecordedMouseEvents.append("position")
                 _ = debugMouseEventHandler("position")
@@ -1626,15 +1732,16 @@
                 if isRectangle { row = min(max(row, 0), snapshot.rows - 1) }
                 return (Int32(clamping: drag.anchor.column), Int32(clamping: row))
             }
-            // The C cell's link fields are export-only — applying a snapshot ignores them — so they
-            // stay zeroed here and a cell's OSC 8 target travels no further than the Swift snapshot.
-            // Nothing consumes those targets for interaction yet: a mirrored link whose label is not
-            // itself a URL renders as plain text (#373 tracks hit-testing or surface apply).
             var cells = snapshot.cells.map { cell in
                 ghostty_terminal_snapshot_cell_s(
                     codepoint: cell.codepoint, foreground_rgb: cell.foregroundRGB, background_rgb: cell.backgroundRGB, flags: cell.flags,
                     grapheme_extra_len: 0, grapheme_extras: nil, link_index: 0)
             }
+            // The frame's OSC 8 targets become page hyperlinks on the mirror surface, which is what
+            // lets Ghostty's own Cmd-click, underline and hover resolve a link whose label is not
+            // itself a URL.
+            let linkTable = GhosttyTerminalSnapshotLinkTable.flatten(snapshot)
+            for (cellIndex, linkIndex) in linkTable.cellLinkIndexes { cells[cellIndex].link_index = linkIndex }
             // The frame's clusters live in one buffer the cells point into, so they stay alive for
             // exactly the span of the C call and no cell owns memory Ghostty would have to free.
             var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
@@ -1647,38 +1754,49 @@
                         cells[placement.cellIndex].grapheme_extras = base + placement.offset
                     }
                 }
-                return cells.withUnsafeMutableBufferPointer { buffer in
-                    var cSnapshot = ghostty_terminal_snapshot_s()
-                    cSnapshot.columns = UInt16(snapshot.columns)
-                    cSnapshot.rows = UInt16(snapshot.rows)
-                    cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
-                    cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
-                    cSnapshot.cursor_visible = snapshot.cursorVisible
-                    cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
-                    cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
-                    cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
-                    cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
-                    cSnapshot.cell_count = buffer.count
-                    cSnapshot.cells = buffer.baseAddress
-                    cSnapshot.selection_flags = selectionFields.selectionFlags
-                    cSnapshot.selection_start_x = selectionFields.selectionStartX
-                    cSnapshot.selection_start_y = selectionFields.selectionStartY
-                    cSnapshot.selection_end_x = selectionFields.selectionEndX
-                    cSnapshot.selection_end_y = selectionFields.selectionEndY
-                    cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
-                    cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
-                    cSnapshot.drag_anchor_valid = dragAnchor != nil
-                    cSnapshot.drag_anchor_x = dragAnchor?.column ?? 0
-                    cSnapshot.drag_anchor_y = dragAnchor?.row ?? 0
+                // The link table's URI bytes live in one buffer the C table's strings point into,
+                // alive for exactly the span of the C call like the cluster buffer above.
+                return linkTable.uriBytes.withUnsafeBufferPointer { uriBytes in
+                    var cLinks = linkTable.entries.map { entry in
+                        ghostty_terminal_snapshot_string_s(ptr: uriBytes.baseAddress! + entry.offset, len: entry.count)
+                    }
+                    return cLinks.withUnsafeMutableBufferPointer { links in
+                        cells.withUnsafeMutableBufferPointer { buffer in
+                            var cSnapshot = ghostty_terminal_snapshot_s()
+                            cSnapshot.columns = UInt16(snapshot.columns)
+                            cSnapshot.rows = UInt16(snapshot.rows)
+                            cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
+                            cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
+                            cSnapshot.cursor_visible = snapshot.cursorVisible
+                            cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
+                            cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                            cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
+                            cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
+                            cSnapshot.cell_count = buffer.count
+                            cSnapshot.cells = buffer.baseAddress
+                            cSnapshot.link_count = links.count
+                            cSnapshot.links = links.baseAddress
+                            cSnapshot.selection_flags = selectionFields.selectionFlags
+                            cSnapshot.selection_start_x = selectionFields.selectionStartX
+                            cSnapshot.selection_start_y = selectionFields.selectionStartY
+                            cSnapshot.selection_end_x = selectionFields.selectionEndX
+                            cSnapshot.selection_end_y = selectionFields.selectionEndY
+                            cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
+                            cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
+                            cSnapshot.drag_anchor_valid = dragAnchor != nil
+                            cSnapshot.drag_anchor_x = dragAnchor?.column ?? 0
+                            cSnapshot.drag_anchor_y = dragAnchor?.row ?? 0
 
-                    var cFrame = ghostty_render_frame_s()
-                    cFrame.version = UInt32(frame.version)
-                    cFrame.session_revision = frame.sessionRevision ?? 0
-                    cFrame.owner_epoch = frame.ownerEpoch
-                    cFrame.columns = UInt16(snapshot.columns)
-                    cFrame.rows = UInt16(snapshot.rows)
-                    cFrame.snapshot = cSnapshot
-                    return withUnsafePointer(to: &cFrame, body)
+                            var cFrame = ghostty_render_frame_s()
+                            cFrame.version = UInt32(frame.version)
+                            cFrame.session_revision = frame.sessionRevision ?? 0
+                            cFrame.owner_epoch = frame.ownerEpoch
+                            cFrame.columns = UInt16(snapshot.columns)
+                            cFrame.rows = UInt16(snapshot.rows)
+                            cFrame.snapshot = cSnapshot
+                            return withUnsafePointer(to: &cFrame, body)
+                        }
+                    }
                 }
             }
         }

@@ -102,7 +102,7 @@ import Foundation
         /// a click at the tapped cell. Answers whether the click was actually sent, because the rest of
         /// the gate is client state the host view cannot see (see `handleTapToActivateInput`).
         public let onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)?
-        public let onOpenLink: @MainActor (String) -> Void
+        public let onOpenLink: @MainActor (String, GhosttyMobileActionEvent.OpenURLKind) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
         public let onPasteClipboardImage: (@MainActor () -> Bool)?
         /// A press or release by a long-press drag in a session whose application is tracking the mouse.
@@ -136,8 +136,8 @@ import Foundation
             onSendMouseButton: (@MainActor (UInt8, Bool, TerminalScrollPointerPosition) -> Bool)? = nil,
             onSendMouseMotion: (@MainActor (TerminalScrollPointerPosition) -> Bool)? = nil, clientSelection: TerminalAbsoluteSelection? = nil,
             selectionActions: GhosttyRemoteTerminalSelectionActions? = nil, selectionAccentColor: UIColor = .systemTeal,
-            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
-            onPasteClipboardImage: (@MainActor () -> Bool)? = nil
+            onOpenLink: @escaping @MainActor (String, GhosttyMobileActionEvent.OpenURLKind) -> Void = { _, _ in },
+            onOpenComposer: (@MainActor () -> Void)? = nil, onPasteClipboardImage: (@MainActor () -> Bool)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -209,7 +209,7 @@ import Foundation
             }
             hostView.selectionActions = selectionActions
             hostView.setSelectionAccentColor(selectionAccentColor)
-            hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
+            hostView.onOpenLink = { link, kind in _ = Task { @MainActor in onOpenLink(link, kind) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
             // Synchronous, unlike the Task-hopping callbacks around it: the paste routes need the
             // handler's answer (did the clipboard image claim this paste?) before deciding whether to
@@ -446,7 +446,7 @@ import Foundation
         /// it was sent. See `forwardMouseClick(at:)` for the half of the gate that lives here and the half
         /// the app layer owns.
         public var onSendMouseClick: ((UInt8, TerminalScrollPointerPosition) -> Bool)?
-        public var onOpenLink: ((String) -> Void)?
+        public var onOpenLink: ((String, GhosttyMobileActionEvent.OpenURLKind) -> Void)?
         public var onOpenComposer: (() -> Void)?
         /// Handles a paste whose clipboard declares an image. The app layer reads and validates the image
         /// (types this layer cannot see) and returns whether it claimed the paste; `false` means the
@@ -1371,9 +1371,9 @@ import Foundation
 
         private func handleActionEvent(_ event: GhosttyMobileActionEvent) {
             switch event {
-            case .openURL(_, let value):
+            case .openURL(let kind, let value):
                 if tapLinkProbeDepth > 0 { openedLinkDuringTapProbe = true }
-                onOpenLink?(value)
+                onOpenLink?(value, kind)
             case .mouseOverLink: return
             }
         }
@@ -1561,15 +1561,15 @@ import Foundation
             guard frame.version == GhosttyRenderFrame.currentVersion else { return false }
             let snapshot = frame.snapshot
             guard snapshot.columns > 0, snapshot.rows > 0, snapshot.columns <= Int(UInt16.max), snapshot.rows <= Int(UInt16.max) else { return false }
-            // The C cell's link fields are export-only — applying a snapshot ignores them — so they
-            // stay zeroed here and a cell's OSC 8 target travels no further than the Swift snapshot.
-            // Nothing consumes those targets for interaction yet: a mirrored link whose label is not
-            // itself a URL renders as plain text (#373 tracks hit-testing or surface apply).
             var cells = snapshot.cells.map { cell in
                 ghostty_terminal_snapshot_cell_s(
                     codepoint: cell.codepoint, foreground_rgb: cell.foregroundRGB, background_rgb: cell.backgroundRGB, flags: cell.flags,
                     grapheme_extra_len: 0, grapheme_extras: nil, link_index: 0)
             }
+            // The frame's OSC 8 targets become page hyperlinks on the mirror surface, which is what
+            // lets Ghostty's own click probe resolve a link whose label is not itself a URL.
+            let linkTable = GhosttyTerminalSnapshotLinkTable.flatten(snapshot)
+            for (cellIndex, linkIndex) in linkTable.cellLinkIndexes { cells[cellIndex].link_index = linkIndex }
             // The frame's clusters live in one buffer the cells point into, so they stay alive for
             // exactly the span of the C call and no cell owns memory Ghostty would have to free.
             var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
@@ -1582,39 +1582,50 @@ import Foundation
                         cells[placement.cellIndex].grapheme_extras = base + placement.offset
                     }
                 }
-                return cells.withUnsafeMutableBufferPointer { buffer in
-                    var cSnapshot = ghostty_terminal_snapshot_s()
-                    cSnapshot.columns = UInt16(snapshot.columns)
-                    cSnapshot.rows = UInt16(snapshot.rows)
-                    cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
-                    cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
-                    cSnapshot.cursor_visible = snapshot.cursorVisible
-                    cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
-                    cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
-                    // Only an interactive owner's mirror keeps the session's capture flags. An ended or
-                    // read-only pane's frame can still carry them (a crash never disables tracking), and
-                    // a captured mirror consumes the synthetic click a link tap probes with — links in
-                    // that pane would silently stop opening.
-                    cSnapshot.mouse_reporting_active = acceptsTerminalInput && snapshot.mouseReportingActive
-                    cSnapshot.mouse_shift_capture = acceptsTerminalInput ? snapshot.mouseShiftCapture : 0
-                    cSnapshot.cell_count = buffer.count
-                    cSnapshot.cells = buffer.baseAddress
-                    cSnapshot.selection_flags = selectionFields.selectionFlags
-                    cSnapshot.selection_start_x = selectionFields.selectionStartX
-                    cSnapshot.selection_start_y = selectionFields.selectionStartY
-                    cSnapshot.selection_end_x = selectionFields.selectionEndX
-                    cSnapshot.selection_end_y = selectionFields.selectionEndY
-                    cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
-                    cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
+                // The link table's URI bytes live in one buffer the C table's strings point into,
+                // alive for exactly the span of the C call like the cluster buffer above.
+                return linkTable.uriBytes.withUnsafeBufferPointer { uriBytes in
+                    var cLinks = linkTable.entries.map { entry in
+                        ghostty_terminal_snapshot_string_s(ptr: uriBytes.baseAddress! + entry.offset, len: entry.count)
+                    }
+                    return cLinks.withUnsafeMutableBufferPointer { links in
+                        cells.withUnsafeMutableBufferPointer { buffer in
+                            var cSnapshot = ghostty_terminal_snapshot_s()
+                            cSnapshot.columns = UInt16(snapshot.columns)
+                            cSnapshot.rows = UInt16(snapshot.rows)
+                            cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
+                            cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
+                            cSnapshot.cursor_visible = snapshot.cursorVisible
+                            cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
+                            cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                            // Only an interactive owner's mirror keeps the session's capture flags. An ended or
+                            // read-only pane's frame can still carry them (a crash never disables tracking), and
+                            // a captured mirror consumes the synthetic click a link tap probes with — links in
+                            // that pane would silently stop opening.
+                            cSnapshot.mouse_reporting_active = acceptsTerminalInput && snapshot.mouseReportingActive
+                            cSnapshot.mouse_shift_capture = acceptsTerminalInput ? snapshot.mouseShiftCapture : 0
+                            cSnapshot.cell_count = buffer.count
+                            cSnapshot.cells = buffer.baseAddress
+                            cSnapshot.link_count = links.count
+                            cSnapshot.links = links.baseAddress
+                            cSnapshot.selection_flags = selectionFields.selectionFlags
+                            cSnapshot.selection_start_x = selectionFields.selectionStartX
+                            cSnapshot.selection_start_y = selectionFields.selectionStartY
+                            cSnapshot.selection_end_x = selectionFields.selectionEndX
+                            cSnapshot.selection_end_y = selectionFields.selectionEndY
+                            cSnapshot.scrollbar_total = selectionFields.scrollbarTotal
+                            cSnapshot.scrollbar_offset = selectionFields.scrollbarOffset
 
-                    var cFrame = ghostty_render_frame_s()
-                    cFrame.version = UInt32(frame.version)
-                    cFrame.session_revision = frame.sessionRevision ?? 0
-                    cFrame.owner_epoch = frame.ownerEpoch
-                    cFrame.columns = UInt16(snapshot.columns)
-                    cFrame.rows = UInt16(snapshot.rows)
-                    cFrame.snapshot = cSnapshot
-                    return withUnsafePointer(to: &cFrame, body)
+                            var cFrame = ghostty_render_frame_s()
+                            cFrame.version = UInt32(frame.version)
+                            cFrame.session_revision = frame.sessionRevision ?? 0
+                            cFrame.owner_epoch = frame.ownerEpoch
+                            cFrame.columns = UInt16(snapshot.columns)
+                            cFrame.rows = UInt16(snapshot.rows)
+                            cFrame.snapshot = cSnapshot
+                            return withUnsafePointer(to: &cFrame, body)
+                        }
+                    }
                 }
             }
         }

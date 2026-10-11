@@ -1,6 +1,7 @@
 #if canImport(AppKit)
     import AppKit
     import Foundation
+    import spacesdevicecore
     import spacesterminalcore
 
     public typealias RemoteGhosttyTerminalServiceRequestSender = @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
@@ -310,8 +311,9 @@
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
             stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
-            agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil,
-            inputFailureHandler: RemoteGhosttyInputFailureHandler? = nil
+            agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
+            linkOpenHandler: (@MainActor (String, GhosttyActionEvent.OpenURLKind) -> Void)? = nil,
+            inputFailureHandler: RemoteGhosttyInputFailureHandler? = nil, linkFileLocation: SpacesUntrustedTerminalLink.FileLocation = .anotherDevice
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
@@ -322,6 +324,7 @@
             self.inputFailureHandler = inputFailureHandler
             terminalView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
             terminalView.onOpenLink = linkOpenHandler
+            terminalView.linkFileLocation = linkFileLocation
             terminalView.onDisplayStateChanged = { [weak self] _ in self?.updateHeldScreenUpdates() }
             ensureStateStreamStartedIfNeeded()
         }
