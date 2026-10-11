@@ -1156,7 +1156,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // When `onOpenLink` is set it fully replaces the legacy local-only opener path, so the
         // per-pane coordinator can route web/loopback/remote-file clicks. The legacy
         // `debugOpenURLHandler` seam must not fire.
-        mirrorView.onOpenLink = { routedLinks.append($0) }
+        mirrorView.onOpenLink = { link, _ in routedLinks.append(link) }
         mirrorView.debugOpenURLHandler = { _ in
             legacyOpens += 1
             return true
@@ -2808,8 +2808,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // A repaint with no new output. A Linux daemon stamps every payload with where `output.log` ends,
         // so this one carries a full frame at a transcript end that has not moved.
         recorder.setPayload(
-            try liveScrollbackPayload(
-                session, text: "sel-001\nsel-002\nsel-003\nsel-004\nsel-005", revision: 2, outputEndByteOffset: page.count))
+            try liveScrollbackPayload(session, text: "sel-001\nsel-002\nsel-003\nsel-004\nsel-005", revision: 2, outputEndByteOffset: page.count))
         for _ in 0..<30 {
             host.requestSurfaceRefresh()
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))

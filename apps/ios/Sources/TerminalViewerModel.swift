@@ -203,6 +203,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// instead of attempting a resolve round trip or a preview. Cleared at the start of the next link
     /// open attempt and on stop/auth-failure resets, alongside `linkPreviewErrorMessage`.
     var linkNotice: String?
+    /// A tapped link the user has not yet said to open; the terminal view asks in an action sheet.
+    var pendingLinkConfirmation: TerminalLinkConfirmation?
+    /// A program-supplied link the untrusted-link policy refused; the terminal view says so in an alert.
+    var blockedLink: TerminalBlockedLink?
+    /// Hands a URL to the system's handler for its scheme. Injected so tests can observe the hand-off
+    /// instead of leaving the app.
+    @ObservationIgnored private let openSystemURL: @MainActor (URL) -> Void
 
     /// Rich-composer draft. The draft text is a two-way binding for the composer's text field; the
     /// attachments and sending/error flags are mutated only through the composer API below. The draft
@@ -838,8 +845,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         awaitForegroundEndpointRefresh: @escaping @MainActor @Sendable () async -> Void = {}, bridgeClient: SpacesDeviceAPIClient? = nil,
         isDemoMode: Bool = false, openSource: String = "list", retainedScreens: TerminalRetainedScreenStore = TerminalRetainedScreenStore(),
         remoteMediaDownloader: @escaping @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL = TerminalViewerModel
-            .defaultRemoteMediaDownloader, linkPreviewCacheDirectory: URL? = nil
+            .defaultRemoteMediaDownloader, linkPreviewCacheDirectory: URL? = nil,
+        openSystemURL: @escaping @MainActor (URL) -> Void = { UIApplication.shared.open($0, options: [:], completionHandler: nil) }
     ) {
+        self.openSystemURL = openSystemURL
         self.session = session
         self.settings = settings
         self.isDemoMode = isDemoMode
@@ -2819,6 +2828,72 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     func dismissSafariLink() { safariLink = nil }
+
+    func dismissPendingLinkConfirmation() { pendingLinkConfirmation = nil }
+
+    func dismissBlockedLink() { blockedLink = nil }
+
+    func copyLinkText(_ text: String) { selectionPasteboard.string = text }
+
+    /// Open Link: routes the link, or hands the URL to the system, as the confirmation recorded.
+    func openConfirmedLink(_ confirmation: TerminalLinkConfirmation) async {
+        pendingLinkConfirmation = nil
+        switch confirmation.destination {
+        case .routedLink(let link): await openTerminalLink(link)
+        case .systemURL(let url): openSystemURL(url)
+        }
+    }
+
+    /// The one entry for a link the user tapped. A link that would open something asks first
+    /// (`pendingLinkConfirmation`); a Spaces terminal link and a loopback link do not, since the first
+    /// stays in the app and the second only shows its notice, and a link nothing would open does nothing.
+    ///
+    /// A hyperlink the program supplied (OSC 8) is vetted first by `SpacesUntrustedTerminalLink`, the
+    /// policy the Mac applies. The phone never holds the session's files, so a file target is checked for
+    /// shape here and the session's daemon resolver checks the file itself before anything is fetched.
+    /// Text the terminal detected as a link skips the policy, as on the Mac.
+    func openTappedTerminalLink(_ tappedLink: String, kind: GhosttyMobileActionEvent.OpenURLKind) async {
+        pendingLinkConfirmation = nil
+        blockedLink = nil
+        // A tap supersedes a link still loading from an earlier Open Link, so the late result cannot present over this tap's dialog.
+        cancelAndClearLinkPreviewState()
+        let link = tappedLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !link.isEmpty else { return }
+        let untrusted = SpacesUntrustedTerminalLink(link)
+        let displayString = untrusted.displayString(fileLocation: .anotherDevice)
+        var rawLink = link
+        if kind == .osc8 {
+            switch untrusted.decision(fileLocation: .anotherDevice) {
+            case .deny(let reason):
+                blockedLink = TerminalBlockedLink(reason: reason.message, displayString: displayString)
+                return
+            case .confirm(let url):
+                pendingLinkConfirmation = TerminalLinkConfirmation(
+                    title: TerminalLinkConfirmation.title(for: url, displayString: displayString), displayString: displayString,
+                    destination: .systemURL(url))
+                return
+            case .allow(let url):
+                // The classifier routes only web, file and Spaces links; mail goes to the system handler.
+                if url.scheme?.lowercased() == "mailto" {
+                    pendingLinkConfirmation = TerminalLinkConfirmation(
+                        title: TerminalLinkConfirmation.title(for: url, displayString: displayString), displayString: displayString,
+                        destination: .systemURL(url))
+                    return
+                }
+                if url.isFileURL { rawLink = url.absoluteString }
+            }
+        }
+        guard let route = SpacesDeviceTerminalLinkClassifier.route(for: rawLink) else { return }
+        let title: String
+        switch route {
+        case .spacesTerminal, .loopbackURL:
+            await openTerminalLink(rawLink)
+            return
+        case .webURL(let url): title = TerminalLinkConfirmation.title(for: url, displayString: displayString)
+        case .fileLink(let raw): title = TerminalLinkConfirmation.title(forFileLink: raw, displayString: displayString)
+        }
+        pendingLinkConfirmation = TerminalLinkConfirmation(title: title, displayString: displayString, destination: .routedLink(rawLink))
+    }
 
     func openTerminalLink(_ link: String) async {
         let normalizedLink = link.trimmingCharacters(in: .whitespacesAndNewlines)

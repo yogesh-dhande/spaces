@@ -9,12 +9,16 @@ public enum GhosttyActionEvent: Sendable, Equatable {
         case unknown
         case text
         case html
+        /// A hyperlink the program put in the output (OSC 8). Its target is producer-controlled, so it is
+        /// opened under `SpacesUntrustedTerminalLink` rather than the open-anything rule text links get.
+        case osc8
 
         #if canImport(GhosttyKit)
             init(_ kind: ghostty_action_open_url_kind_e) {
                 switch kind {
                 case GHOSTTY_ACTION_OPEN_URL_KIND_TEXT: self = .text
                 case GHOSTTY_ACTION_OPEN_URL_KIND_HTML: self = .html
+                case GHOSTTY_ACTION_OPEN_URL_KIND_OSC8: self = .osc8
                 default: self = .unknown
                 }
             }

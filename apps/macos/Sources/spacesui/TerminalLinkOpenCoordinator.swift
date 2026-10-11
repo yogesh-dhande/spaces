@@ -16,11 +16,17 @@
     /// (retained by the long-lived host/view) never keeps a torn-down coordinator alive.
     @MainActor final class TerminalLinkOpenHandlerBox {
         weak var coordinator: TerminalLinkOpenCoordinator?
-        func open(_ rawLink: String) { coordinator?.openLink(rawLink) }
+        func open(_ rawLink: String, kind: GhosttyActionEvent.OpenURLKind) { coordinator?.openLink(rawLink, kind: kind) }
     }
 
     /// Per-pane router for terminal link clicks on macOS. One instance per terminal pane, owned by the
     /// pane's `TerminalPaneContentController`.
+    ///
+    /// A hyperlink the program put in the output (OSC 8) is untrusted text, so it passes
+    /// `SpacesUntrustedTerminalLink` before routing, exactly as Ghostty's own app treats it: a web, mail or
+    /// Spaces terminal link and a vetted `file://` link continue to the routing below, any other scheme asks
+    /// first, and a malformed, unsafe or unvetted-file target is refused with a notice. A link Ghostty
+    /// detected in the text itself keeps the open-anything rule below, since the user can read the target.
     ///
     /// Routing of a raw clicked string (via `SpacesDeviceTerminalLinkClassifier.route(for:)`):
     /// - web URL: opened in the default browser through the artifact registry.
@@ -50,6 +56,7 @@
         private let requestSender: RemoteGhosttyTerminalServiceRequestSender
         private let registry: TerminalArtifactHandlerRegistry
         private let banner: any TerminalPaneBannerPresenting
+        private let untrustedLinkPresenter: any UntrustedTerminalLinkPresenting
         /// Focuses a clicked `spaces://terminal/…` session in-app (no OS round trip). The host
         /// (`AppKitController`) owns the same device-resolution + focus path the URL handler uses, so
         /// both entry points share one behavior and one other-device alert.
@@ -83,7 +90,8 @@
         init(
             sessionID: String, deviceID: String, isLocalDevice: Bool, workingDirectoryProvider: @escaping @MainActor () -> String?,
             requestSender: @escaping RemoteGhosttyTerminalServiceRequestSender, registry: TerminalArtifactHandlerRegistry = .defaultRegistry(),
-            banner: any TerminalPaneBannerPresenting, openSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void
+            banner: any TerminalPaneBannerPresenting, openSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void,
+            untrustedLinkPresenter: any UntrustedTerminalLinkPresenting = UntrustedTerminalLinkAlertPresenter()
         ) {
             self.sessionID = sessionID
             self.deviceID = deviceID
@@ -93,6 +101,7 @@
             self.registry = registry
             self.banner = banner
             self.openSpacesTerminalLink = openSpacesTerminalLink
+            self.untrustedLinkPresenter = untrustedLinkPresenter
         }
 
         // No isolation assumption: the last release can land off-main when an async caller holds
@@ -103,15 +112,50 @@
 
         // MARK: - Routing
 
-        func openLink(_ rawLink: String) {
+        func openLink(_ clickedLink: String, kind: GhosttyActionEvent.OpenURLKind = .unknown) {
             // Every click supersedes any in-flight fetch and clears its banner before routing anew.
             cancelActiveOpen()
+            var rawLink = clickedLink
+            if kind == .osc8 {
+                guard let vetted = linkAfterUntrustedPolicy(clickedLink) else { return }
+                rawLink = vetted
+            }
             guard let route = SpacesDeviceTerminalLinkClassifier.route(for: rawLink) else { return }
             switch route {
             case .webURL(let url): _ = registry.open(url, as: .webURL)
             case .loopbackURL(let url): if isLocalDevice { _ = registry.open(url, as: .webURL) } else { banner.showNotice(Self.loopbackRemoteNotice) }
             case .fileLink(let raw): if isLocalDevice { openLocalFileLink(raw) } else { startRemoteFileOpen(raw) }
             case .spacesTerminal(let link): openSpacesTerminalLink(qualifiedDeepLink(link))
+            }
+        }
+
+        /// The link to route after the untrusted-link policy, or nil when the policy already dealt with it
+        /// (opened it through the system handler, asked the user first, or refused it).
+        ///
+        /// A file link's checks run where the file lives: on this Mac for a local session, which also
+        /// replaces the link with the symlink-resolved path that was checked; for a session on another
+        /// device only the link's shape is checked here and that device's link resolver checks the file
+        /// before anything is fetched.
+        private func linkAfterUntrustedPolicy(_ rawLink: String) -> String? {
+            let link = SpacesUntrustedTerminalLink(rawLink)
+            let fileLocation: SpacesUntrustedTerminalLink.FileLocation = isLocalDevice ? .thisDevice : .anotherDevice
+            switch link.decision(fileLocation: fileLocation) {
+            case .deny(let reason):
+                untrustedLinkPresenter.presentBlock(reason: reason, displayString: link.displayString(fileLocation: fileLocation))
+                return nil
+            case .confirm(let url):
+                let registry = registry
+                untrustedLinkPresenter.presentConfirmation(for: url, displayString: link.displayString(fileLocation: fileLocation)) {
+                    registry.open(url, as: .systemURL)
+                }
+                return nil
+            case .allow(let url):
+                // The classifier routes only web, file and Spaces links; mail goes to the system handler.
+                if url.scheme?.lowercased() == "mailto" {
+                    _ = registry.open(url, as: .systemURL)
+                    return nil
+                }
+                return url.isFileURL ? url.absoluteString : rawLink
             }
         }
 
@@ -145,7 +189,7 @@
                 return
             }
             if url.isFileURL, !FileManager.default.fileExists(atPath: url.path) {
-                banner.showError("File not found: \(url.lastPathComponent)")
+                banner.showError("File not found: \(SpacesUntrustedTerminalLink.escapingUnsafeCharacters(url.lastPathComponent))")
                 return
             }
             _ = registry.openLocalFile(at: url)
@@ -173,11 +217,7 @@
         /// task can let another appear in the meantime (a new click while draining). Returns once no
         /// task remains — the seam a test drains after a click instead of polling the recorder/banner
         /// against a settle window.
-        func drainActiveWorkForTesting() async {
-            while let (_, task) = inFlightOpenTasks.first {
-                await task.value
-            }
-        }
+        func drainActiveWorkForTesting() async { while let (_, task) = inFlightOpenTasks.first { await task.value } }
 
         private func performRemoteFileOpen(_ raw: String, generation generationAtStart: UInt64) async {
             let sessionID = self.sessionID
@@ -347,9 +387,7 @@
         private static func send(_ request: TerminalServiceRequest, using sender: @escaping RemoteGhosttyTerminalServiceRequestSender) async
             -> Result<TerminalServiceResponse, Error>
         {
-            do {
-                return .success(try await SpacesBlockingIOThread.run(name: "spaces.terminal-link.send") { try sender(request) })
-            } catch {
+            do { return .success(try await SpacesBlockingIOThread.run(name: "spaces.terminal-link.send") { try sender(request) }) } catch {
                 return .failure(error)
             }
         }

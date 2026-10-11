@@ -59,7 +59,128 @@ import spacesterminalcore
         XCTAssertEqual(try openedLinks(snapshot: Self.softWrappedVTSnapshot(), modifierFlags: [.command]), [Self.url])
     }
 
+    /// A hyperlink whose label is not its target: the link table carries the target, and the click
+    /// finds it on the surface because the frame's links were written onto its pages. The same rules
+    /// as a URL in the text decide which modifiers activate it.
+    func testIdleTerminalActivatesOSC8LabelOnCommandClickOnly() throws {
+        let snapshot = Self.osc8Snapshot(mouseReportingActive: false)
+        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: [.command]), [Self.osc8Target])
+        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: []), [], "a plain click on a link label opens nothing")
+        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: [.command, .shift]), [])
+    }
+
+    func testTrackingTerminalActivatesOSC8LabelOnlyWhenShiftReleasesThePointer() throws {
+        let snapshot = Self.osc8Snapshot(mouseReportingActive: true)
+        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: [.command]), [])
+        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: [.command, .shift]), [Self.osc8Target])
+    }
+
+    /// The click arrives tagged as an OSC 8 open, which is what puts the target under the untrusted-link
+    /// policy rather than the open-anything rule a link detected in the text gets.
+    func testOSC8ClickReportsItsKind() throws {
+        let view = try attachedView(snapshot: Self.osc8Snapshot(mouseReportingActive: false), modifierFlags: [.command])
+        defer { view.removeFromSuperview() }
+        var kinds: [GhosttyActionEvent.OpenURLKind] = []
+        view.onOpenLink = { _, kind in kinds.append(kind) }
+        click(view, modifierFlags: [.command])
+        XCTAssertEqual(kinds, [.osc8])
+    }
+
+    /// Cmd held over the label shows the target (sanitized as the standalone Ghostty banner shows it).
+    func testHoveringAnOSC8LabelWithCommandHeldReportsItsTarget() throws {
+        let view = try attachedView(snapshot: Self.osc8Snapshot(mouseReportingActive: false), modifierFlags: [.command])
+        defer { view.removeFromSuperview() }
+        XCTAssertNil(view.debugLinkTooltip)
+
+        view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: window?.windowNumber ?? 0, modifierFlags: [.command]))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        XCTAssertEqual(view.hoveredLinkDisplayString, Self.osc8Target)
+        XCTAssertEqual(view.debugLinkTooltip?.text, Self.osc8Target)
+    }
+
+    /// Pressing Cmd over a link highlights it without the pointer moving, and releasing it clears the
+    /// highlight. The modifier event is delivered through the application, as the system does, while the
+    /// pane is not the first responder: the pane under the pointer is not necessarily the focused one.
+    func testPressingAndReleasingCommandOverALabelTogglesTheHoverWithoutMovingThePointer() throws {
+        let snapshot = Self.osc8Snapshot(mouseReportingActive: false)
+        let view = try attachedView(snapshot: snapshot, modifierFlags: [])
+        defer { view.removeFromSuperview() }
+        let windowNumber = window?.windowNumber ?? 0
+        XCTAssertTrue(window?.firstResponder !== view, "the hovered pane is not focused")
+
+        view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: windowNumber, modifierFlags: []))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertNil(view.hoveredLinkDisplayString, "without Cmd the label is plain text")
+
+        NSApplication.shared.sendEvent(flagsChangedEvent(windowNumber: windowNumber, modifierFlags: [.command]))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertEqual(view.hoveredLinkDisplayString, Self.osc8Target)
+        XCTAssertEqual(view.debugLinkTooltip?.text, Self.osc8Target)
+
+        NSApplication.shared.sendEvent(flagsChangedEvent(windowNumber: windowNumber, modifierFlags: []))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertNil(view.hoveredLinkDisplayString)
+        XCTAssertNil(view.debugLinkTooltip, "the tooltip goes as soon as the hover clears")
+    }
+
+    /// Once the pointer has left the pane, Cmd changes no longer reach it.
+    func testCommandPressedAfterThePointerLeavesDoesNotHighlightTheLabel() throws {
+        let view = try attachedView(snapshot: Self.osc8Snapshot(mouseReportingActive: false), modifierFlags: [])
+        defer { view.removeFromSuperview() }
+        let windowNumber = window?.windowNumber ?? 0
+
+        view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: windowNumber, modifierFlags: []))
+        view.mouseExited(
+            with: try XCTUnwrap(
+                NSEvent.enterExitEvent(
+                    with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: windowNumber, context: nil, eventNumber: 2,
+                    trackingNumber: 0, userData: nil)))
+        NSApplication.shared.sendEvent(flagsChangedEvent(windowNumber: windowNumber, modifierFlags: [.command]))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        XCTAssertNil(view.hoveredLinkDisplayString)
+    }
+
     // MARK: - Harness
+
+    private static let osc8Target = "https://example.com/docs"
+
+    /// A label that is not its target, linked to `osc8Target` across all of its cells.
+    private static func osc8Snapshot(mouseReportingActive: Bool) -> GhosttyTerminalSnapshot {
+        let label = "Documentation"
+        let cells = label.unicodeScalars.map { scalar in
+            GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xFF_FFFF, backgroundRGB: 0, flags: 0)
+        }
+        var linkURLs: [Int: String] = [:]
+        for index in 0..<cells.count { linkURLs[index] = osc8Target }
+        return GhosttyTerminalSnapshot(
+            columns: cells.count, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFF_FFFF,
+            defaultBackgroundRGB: 0, cells: cells, linkURLs: linkURLs, mouseTrackingLevel: mouseReportingActive ? .clicks : .none)
+    }
+
+    /// A view that has applied `snapshot`; the caller removes it.
+    private func attachedView(snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags) throws -> GhosttyMirrorTerminalView {
+        let view = makeAttachedView(sessionID: "link-\(snapshot.columns)x\(snapshot.rows)-\(modifierFlags.rawValue)")
+        view.update(snapshot: snapshot, renderStateKey: "link|\(snapshot.columns)x\(snapshot.rows)|\(modifierFlags.rawValue)")
+        _ = try waitForSnapshot(view) { $0.columns == snapshot.columns && $0.rows == snapshot.rows }
+        return view
+    }
+
+    private func click(_ view: GhosttyMirrorTerminalView, modifierFlags: NSEvent.ModifierFlags) {
+        let windowNumber = window?.windowNumber ?? 0
+        view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: windowNumber, modifierFlags: modifierFlags))
+        view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: windowNumber, modifierFlags: modifierFlags))
+        view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: windowNumber, modifierFlags: modifierFlags))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+    }
+
+    private func flagsChangedEvent(windowNumber: Int, modifierFlags: NSEvent.ModifierFlags) -> NSEvent {
+        try! XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .flagsChanged, location: .zero, modifierFlags: modifierFlags, timestamp: 0, windowNumber: windowNumber, context: nil,
+                characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 55))
+    }
 
     private func openedLinks(mouseReportingActive: Bool, modifierFlags: NSEvent.ModifierFlags) throws -> [String] {
         try openedLinks(snapshot: Self.snapshot(text: Self.url, mouseReportingActive: mouseReportingActive), modifierFlags: modifierFlags)
@@ -72,13 +193,8 @@ import spacesterminalcore
         _ = try waitForSnapshot(view) { $0.columns == snapshot.columns && $0.rows == snapshot.rows }
 
         var opened: [String] = []
-        view.onOpenLink = { opened.append($0) }
-
-        let windowNumber = window?.windowNumber ?? 0
-        view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: windowNumber, modifierFlags: modifierFlags))
-        view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: windowNumber, modifierFlags: modifierFlags))
-        view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: windowNumber, modifierFlags: modifierFlags))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        view.onOpenLink = { link, _ in opened.append(link) }
+        click(view, modifierFlags: modifierFlags)
         return opened
     }
 
