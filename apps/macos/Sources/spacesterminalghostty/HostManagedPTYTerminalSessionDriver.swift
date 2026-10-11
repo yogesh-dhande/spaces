@@ -42,6 +42,9 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     // inside it. Guarded by `lock`.
     private var collectedWrites: [TerminalInputWriteAcknowledgement]?
     private let handoffWriteAction: @Sendable (Int32, Data) -> HandoffWriteResult
+    /// Delivers a signal to a `kill(2)` target (a pid, or a negated process group id). Injected so tests can
+    /// observe which targets escalation signals.
+    private let signalAction: @Sendable (Int32, Int32) -> Void
     private let lock = NSLock()
     private var masterFD: Int32 = -1
     private var masterFDGeneration: UInt64 = 0
@@ -101,11 +104,12 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
 
     init(
         launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default,
-        handoffWriteAction: (@Sendable (Int32, Data) -> HandoffWriteResult)? = nil
+        handoffWriteAction: (@Sendable (Int32, Data) -> HandoffWriteResult)? = nil, signalAction: (@Sendable (Int32, Int32) -> Void)? = nil
     ) {
         self.launchConfiguration = launchConfiguration
         self.terminationEscalationIntervals = terminationEscalationIntervals
         self.handoffWriteAction = handoffWriteAction ?? Self.writeAll
+        self.signalAction = signalAction ?? { target, signal in _ = kill(target, signal) }
         readQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.read.\(launchConfiguration.sessionID)")
         writeQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.write.\(launchConfiguration.sessionID)")
     }
@@ -394,8 +398,8 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
                 "spaces: pty_terminate pid=\(pid) group=\(resolvedProcessGroupID) current_group=\(getpgrp()) signal_group=\(shouldSignalProcessGroup ? 1 : 0)\n"
             )
         }
-        Self.signalTerminatedPTYProcess(
-            childPID: pid, processGroupID: resolvedProcessGroupID, signal: SIGHUP, signalProcessGroup: shouldSignalProcessGroup)
+        signalTerminatedPTYProcess(
+            childPID: pid, processGroupID: resolvedProcessGroupID, signal: SIGHUP, signalProcessGroup: shouldSignalProcessGroup, leaderReaped: false)
         escalateUntilLeaderIsCollected(childPID: pid, processGroupID: resolvedProcessGroupID)
     }
 
@@ -709,13 +713,16 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             // AND the leader was collected — because either alone can hold while the other does not (see
             // `escalationWaitForTeardown`). Each stage signals the child's PROCESS GROUP so descendants
             // holding the slave die too.
-            if self.escalationWaitForTeardown(reapingLeader: childPID, timeout: intervals.hupGrace) { return }
-            Self.signalTerminatedPTYProcess(
-                childPID: childPID, processGroupID: processGroupID, signal: SIGTERM, signalProcessGroup: shouldSignalProcessGroup)
-            if self.escalationWaitForTeardown(reapingLeader: childPID, timeout: intervals.termGrace) { return }
-            Self.signalTerminatedPTYProcess(
-                childPID: childPID, processGroupID: processGroupID, signal: SIGKILL, signalProcessGroup: shouldSignalProcessGroup)
-            _ = self.escalationWaitForTeardown(reapingLeader: childPID, timeout: intervals.killGrace)
+            var leaderReaped = false
+            if self.escalationWaitForTeardown(reapingLeader: childPID, leaderCollected: &leaderReaped, timeout: intervals.hupGrace) { return }
+            self.signalTerminatedPTYProcess(
+                childPID: childPID, processGroupID: processGroupID, signal: SIGTERM, signalProcessGroup: shouldSignalProcessGroup,
+                leaderReaped: leaderReaped)
+            if self.escalationWaitForTeardown(reapingLeader: childPID, leaderCollected: &leaderReaped, timeout: intervals.termGrace) { return }
+            self.signalTerminatedPTYProcess(
+                childPID: childPID, processGroupID: processGroupID, signal: SIGKILL, signalProcessGroup: shouldSignalProcessGroup,
+                leaderReaped: leaderReaped)
+            _ = self.escalationWaitForTeardown(reapingLeader: childPID, leaderCollected: &leaderReaped, timeout: intervals.killGrace)
             // A group SIGKILL releases the slave from every process still in the child's group, which unblocks
             // read(). We deliberately do NOT force-close the master as a further bound: the read loop owns the
             // fd's close (guarded by `masterFDGeneration`), and closing it from here would race that read/close
@@ -751,9 +758,11 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     ///
     /// Because `escalationOwnsLeader` admits one escalation per child, these `waitpid` calls cannot
     /// double-reap.
-    private func escalationWaitForTeardown(reapingLeader childPID: Int32, timeout: TimeInterval) -> Bool {
+    ///
+    /// `leaderCollected` carries across stages so the caller knows, when it picks the next signal, whether
+    /// the leader's pid has been released.
+    private func escalationWaitForTeardown(reapingLeader childPID: Int32, leaderCollected: inout Bool, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        var leaderCollected = false
         while true {
             // Reap on every pass, not just once the read loop has exited, so a leader that dies while a
             // descendant still holds the slave does not sit as a zombie for the rest of the wait.
@@ -767,9 +776,15 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         }
     }
 
-    private static func signalTerminatedPTYProcess(childPID: Int32, processGroupID: Int32, signal: Int32, signalProcessGroup: Bool) {
-        if signalProcessGroup { kill(-processGroupID, signal) }
-        kill(childPID, signal)
+    /// Once the leader is reaped its pid is free for the kernel to reuse, so it is never signalled again.
+    /// The group is still signalled: while any member (a descendant holding the slave) lives, POSIX keeps
+    /// the group id from being reused, so the signal reaches only this session's own processes. Accepted
+    /// risk (#214): the group has fully exited while the read loop stays open (a descendant re-sessioned
+    /// away with the slave) AND an unrelated process takes that exact id as a new group inside the grace
+    /// window, far below 1:1,000,000.
+    private func signalTerminatedPTYProcess(childPID: Int32, processGroupID: Int32, signal: Int32, signalProcessGroup: Bool, leaderReaped: Bool) {
+        if signalProcessGroup { signalAction(-processGroupID, signal) }
+        if !leaderReaped { signalAction(childPID, signal) }
     }
 
     static func readLoopOwnsDescriptor(currentFD: Int32, currentGeneration: UInt64, readFD: Int32, readGeneration: UInt64) -> Bool {
