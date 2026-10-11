@@ -896,6 +896,49 @@ extension OrchestratorTests {
         }
     }
 
+    /// An exit that keeps the row as `.exited` (its terminal is still live) finalizes it just as a delete
+    /// does: a status that read the row while it was live must not turn it back into `done`. A status whose
+    /// read already saw `.exited` still applies, which is how an agent restarting in the terminal comes back.
+    func testStatusUpdateThatReadALiveRowKeptExitedByExitIsDropped() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "kept-exited-stale-status"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "claude", workingDirectory: workspace.dir))
+            XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+            let staleRead = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: sessionID, status: .spinning)
+
+            try orchestrator.finalizeAgentRow(staleRead, reason: .exited(eventType: "exit", eventSource: "spaces_agent_signal", environmentKeys: nil))
+            XCTAssertEqual(try store.agentWindow(id: staleRead.id)?.status, .exited, "The live terminal keeps the row as exited.")
+
+            XCTAssertThrowsError(
+                try orchestrator.updateAgentWindowStatus(
+                    workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .done, eventType: "done",
+                    readAgent: staleRead)
+            ) { XCTAssertEqual($0 as? AgentRowFinalizedError, AgentRowFinalizedError(agentID: staleRead.id)) }
+            XCTAssertEqual(try store.agentWindow(id: staleRead.id)?.status, .exited, "A late status never revives an exited agent.")
+
+            let exitedRead = try XCTUnwrap(store.agentWindow(id: staleRead.id))
+            _ = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .spinning, eventType: "working",
+                readAgent: exitedRead)
+            XCTAssertEqual(try store.agentWindow(id: staleRead.id)?.status, .spinning, "A signal that saw the exit may restart the agent.")
+        }
+    }
+
     /// A foreground-detected ad-hoc agent whose `.shell` terminal then EXITS is finalized by the unified
     /// session-backed sweep: the row is deleted (not left as a phantom `.done` that would raise a spurious
     /// "finished" alert), matching the spawned-agent sweep. A dead-terminal row disappears from listings,
