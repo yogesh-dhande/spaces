@@ -80,27 +80,10 @@ if [[ $require_notarization -eq 1 ]]; then
 fi
 
 echo "Mounting DMG to inspect bundled apps..."
-# GitHub-hosted macOS runners occasionally hit hdiutil resource contention ("Resource temporarily
-# unavailable") from other jobs sharing the host (#599); this has been observed after the full
-# test suite and every signing check already passed. hdiutil already retries internally within a
-# single invocation (its own failure reports "attach failed after N attempts"), so a failure here
-# means the whole runner was contended for that entire internal retry window, not that hdiutil
-# simply needs one more of its own attempts. Retry the whole `attach` call with backoff on top of
-# that: worst case is the sum of the sleeps below (5+10+20+40=75s) plus five hdiutil invocations.
-attach_max_attempts=5
-attach_backoff_seconds=5
-for (( attach_attempt = 1; attach_attempt <= attach_max_attempts; attach_attempt++ )); do
-  if hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$DMG_PATH" >/dev/null; then
-    break
-  fi
-  if (( attach_attempt == attach_max_attempts )); then
-    echo "Error: hdiutil attach failed after $attach_max_attempts attempts" >&2
-    exit 1
-  fi
-  echo "hdiutil attach failed (attempt $attach_attempt/$attach_max_attempts); retrying in ${attach_backoff_seconds}s..." >&2
-  sleep "$attach_backoff_seconds"
-  attach_backoff_seconds=$(( attach_backoff_seconds * 2 ))
-done
+if ! spaces_release_hdiutil_retrying "" attach -nobrowse -readonly -mountpoint "$mountpoint" "$DMG_PATH" >/dev/null; then
+  echo "Error: hdiutil attach failed" >&2
+  exit 1
+fi
 
 for app_path in "$mountpoint/Install Spaces.app" "$mountpoint/Spaces.app"; do
   if [[ ! -d "$app_path" ]]; then
