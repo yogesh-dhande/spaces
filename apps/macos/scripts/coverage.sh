@@ -158,7 +158,7 @@ echo "Building SwiftPM tests with coverage..."
 
 echo "Running SwiftPM coverage tests..."
 # The mirror-surface suites (GhosttyMirrorForwardedClickTests, GhosttyMirrorGraphemeClusterTests,
-# GhosttyMirrorLinkActivationTests, GhosttyMirrorSelectionAcrossFramesTests,
+# GhosttyMirrorHyperlinkRoundTripTests, GhosttyMirrorLinkActivationTests, GhosttyMirrorSelectionAcrossFramesTests,
 # GhosttyMirrorSurfaceMRUTests, GhosttyMirrorSurfacePresentationTests, GhosttyMirrorStyleCapacityTests) drive a REAL mirror-owned
 # ghostty app, and only one embedded ghostty app may be live per process
 # (GhosttyProcessAppRuntime.initializeOnce). Every test class in the package shares one
@@ -169,7 +169,7 @@ echo "Running SwiftPM coverage tests..."
 # waits for a real embedded-terminal write acknowledgement; parallel coverage workers can delay that
 # write beyond its 5-second assertion timeout, so it also runs in a dedicated serial process below.
 set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path "$coverage_scratch_path" \
-    --skip GhosttyMirrorForwardedClickTests --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorLinkActivationTests \
+    --skip GhosttyMirrorForwardedClickTests --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorHyperlinkRoundTripTests --skip GhosttyMirrorLinkActivationTests \
     --skip GhosttyMirrorSelectionAcrossFramesTests --skip GhosttyMirrorSurfaceMRUTests \
     --skip GhosttyMirrorSurfacePresentationTests --skip GhosttyMirrorStyleCapacityTests \
     --skip GhosttyEmbeddedSubmitOrderingTests \
@@ -277,7 +277,7 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then
 else
     echo "Running mirror-surface coverage tests in their own process..."
     run_filtered_coverage_pass mirror-surface \
-        "GhosttyMirrorForwardedClickTests|GhosttyMirrorGraphemeClusterTests|GhosttyMirrorLinkActivationTests|GhosttyMirrorSelectionAcrossFramesTests|GhosttyMirrorSurfaceMRUTests|GhosttyMirrorSurfacePresentationTests|GhosttyMirrorStyleCapacityTests"
+        "GhosttyMirrorForwardedClickTests|GhosttyMirrorGraphemeClusterTests|GhosttyMirrorHyperlinkRoundTripTests|GhosttyMirrorLinkActivationTests|GhosttyMirrorSelectionAcrossFramesTests|GhosttyMirrorSurfaceMRUTests|GhosttyMirrorSurfacePresentationTests|GhosttyMirrorStyleCapacityTests"
     stage_profiles mirror-surface
 fi
 
