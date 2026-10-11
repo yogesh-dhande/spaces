@@ -129,6 +129,11 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
           Spaces remembers the machine&apos;s identity at pairing and refuses to connect to a machine
           that does not match it, even if something else answers on the same address.
         </p>
+        <p className={paragraphClass}>
+          A device cannot be paired with itself: pairing a device&apos;s own link or SSH address from
+          that device is refused. Another Spaces profile on the same Mac is a separate daemon and pairs
+          normally.
+        </p>
       </Section>
 
       <Section id="tailscale" title="Tailscale">

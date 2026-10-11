@@ -33,6 +33,79 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertEqual(try database.pairedDevice(id: "device-redeemed")?.hosts, expected)
     }
 
+    // MARK: Pairing with this client's own daemon
+
+    private func makeProfile() -> SpacesProfile {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return SpacesProfile(
+            source: .explicitDatabasePath, databasePath: root.appendingPathComponent("spaces.db").path, rootDirectory: root.path,
+            isInstalledProfile: false, runtimeDirectory: root.appendingPathComponent("runtime").path, ipcNotificationObject: "test",
+            developmentContext: nil, branchSlug: nil, worktreeHash: nil)
+    }
+
+    private func link(fingerprint: String, protocolVersion: Int = SpacesWireProtocol.version) throws -> SpacesDevicePairingLink {
+        try SpacesDevicePairingLink.parse(
+            "spaces://pair?v=4&host=127.0.0.1&port=1&nonce=NONCE&code=12345678&fp=\(fingerprint)&name=Mac&pv=\(protocolVersion)&av=0.1.0")
+    }
+
+    /// A link from a newer daemon: once past the self check it stops at the wire-version gate, before any
+    /// request, so a "not self" outcome is observable without a network timeout.
+    private func newerDaemonLink(fingerprint: String) throws -> SpacesDevicePairingLink {
+        try link(fingerprint: fingerprint, protocolVersion: SpacesWireProtocol.version + 1)
+    }
+
+    private func assertPassedTheSelfCheck(_ error: Error, file: StaticString = #filePath, line: UInt = #line) {
+        guard case SpacesRemoteDevicePairingError.pairingVersionIncompatible = error else {
+            return XCTFail("Expected the next gate (wire version) to refuse the link, got \(error).", file: file, line: line)
+        }
+    }
+
+    private func pair(_ link: SpacesDevicePairingLink, profile: SpacesProfile) throws {
+        _ = try SpacesDevicePairingClient.pairDevice(
+            link: link, clientInstallationID: "client", clientBundleID: "test.bundle", clientDeviceName: "Test", clientAppVersion: nil,
+            profile: profile)
+    }
+
+    func testPairingALinkForThisProfilesOwnDaemonIsRefusedBeforeAnyRequest() throws {
+        let profile = makeProfile()
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(
+            root: TerminalServicePaths.terminalRootDirectory(profile: profile).appendingPathComponent("daemon-tls", isDirectory: true))
+        let ownLink = try link(fingerprint: identity.certificateFingerprint)
+
+        XCTAssertThrowsError(try pair(ownLink, profile: profile)) { error in
+            XCTAssertEqual(error as? SpacesRemoteDevicePairingError, .pairingWithSelf)
+        }
+        let deviceID = SpacesDevicePairingClient.stablePairedDeviceID(certificateFingerprint: ownLink.certificateFingerprint, port: ownLink.port)
+        XCTAssertNil(try SpacesDeviceCredentialStore.token(deviceID: deviceID, profile: profile))
+    }
+
+    func testPairingALinkForAnotherDaemonIsNotTreatedAsSelf() throws {
+        let profile = makeProfile()
+        _ = try TerminalServiceTLSIdentityStore.loadOrCreate(
+            root: TerminalServicePaths.terminalRootDirectory(profile: profile).appendingPathComponent("daemon-tls", isDirectory: true))
+        // A different profile's daemon, as when a development profile pairs with the installed one.
+        let otherProfile = makeProfile()
+        let otherIdentity = try TerminalServiceTLSIdentityStore.loadOrCreate(
+            root: TerminalServicePaths.terminalRootDirectory(profile: otherProfile).appendingPathComponent("daemon-tls", isDirectory: true))
+
+        XCTAssertThrowsError(try pair(try newerDaemonLink(fingerprint: otherIdentity.certificateFingerprint), profile: profile)) {
+            assertPassedTheSelfCheck($0)
+        }
+    }
+
+    func testProfileWithoutADaemonIdentityIsNotTreatedAsSelfAndCreatesNone() throws {
+        let profile = makeProfile()
+
+        XCTAssertThrowsError(try pair(try newerDaemonLink(fingerprint: "SHA256:" + String(repeating: "ab", count: 32)), profile: profile)) {
+            assertPassedTheSelfCheck($0)
+        }
+        XCTAssertNil(TerminalServiceTLSIdentityStore.existingCertificateFingerprint(profile: profile))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: TerminalServicePaths.terminalRootDirectory(profile: profile).appendingPathComponent("daemon-tls").path))
+    }
+
     private func makeDatabase() throws -> SpacesClientDatabase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

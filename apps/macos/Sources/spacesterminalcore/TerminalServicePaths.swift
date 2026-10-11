@@ -123,6 +123,9 @@ public enum TerminalServicePaths {
         return root.appendingPathComponent("daemon-handoff.json", isDirectory: false).path
     }
 
+    /// The terminal root of `profile`, which need not be the profile this process resolved for itself.
+    public static func terminalRootDirectory(profile: SpacesProfile) -> URL { terminalRootDirectory(runtimeDirectory: profile.runtimeDirectory) }
+
     public static func terminalRootDirectory(fileManager: FileManager = .default) throws -> URL {
         let sessionsRoot = URL(fileURLWithPath: try TerminalSessionPaths.sessionsRootDirectory(fileManager: fileManager), isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL
