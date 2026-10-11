@@ -85,6 +85,8 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
     case pairingVersionIncompatible(String)
     case pairingRejected(String)
     case missingAuthToken
+    /// The target is this client's own profile daemon (same TLS identity).
+    case pairingWithSelf
     case remoteInstallTimedOut(String)
     case remoteInstallFailed(String)
 
@@ -113,6 +115,7 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
         case .pairingVersionIncompatible(let message): message
         case .pairingRejected(let message): "The remote device rejected pairing. \(message)"
         case .missingAuthToken: "The remote device accepted pairing but did not issue an auth token."
+        case .pairingWithSelf: "This is this device's own Spaces daemon, which cannot be paired with itself. Pair it from another device instead."
         case .remoteInstallTimedOut(let destination):
             "Installing Spaces on \(destination) timed out after 10 minutes. Check the device's network and try again."
         case .remoteInstallFailed(let message): message
@@ -148,6 +151,9 @@ public enum SpacesDevicePairingClient {
         let metadata = try loadRemotePairingMetadata(
             destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion, profile: request.profile)
 
+        // The fingerprint is only known once the device has answered over SSH, so this runs before the
+        // Device API redemption, the first request that would consume the pairing window.
+        try assertNotOwnDaemon(certificateFingerprint: metadata.certificateFingerprint, profile: request.profile)
         try assertPairingCompatible(deviceProtocolVersion: metadata.protocolVersion, deviceAppVersion: metadata.appVersion, deviceName: metadata.name)
         let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, port: metadata.port)
         // Redeemed against the address SSH just proved reachable, not the daemon's advertised list: this
@@ -260,6 +266,7 @@ public enum SpacesDevicePairingClient {
         guard !link.hosts.isEmpty else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Pairing link is missing a Device API host.")
         }
+        try assertNotOwnDaemon(certificateFingerprint: link.certificateFingerprint, profile: profile)
         try assertPairingCompatible(deviceProtocolVersion: link.protocolVersion, deviceAppVersion: link.appVersion, deviceName: link.name)
         let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, port: link.port)
         let resolver = SpacesDeviceEndpointResolver(hosts: link.hosts, port: link.port, certificateFingerprint: link.certificateFingerprint)
@@ -297,6 +304,18 @@ public enum SpacesDevicePairingClient {
         #else
             "macos"
         #endif
+    }
+
+    /// Refuses a daemon that is this client's own profile daemon, identified by its TLS certificate
+    /// fingerprint. A record for it would route remote-device commands back to the local daemon, and
+    /// anything keyed to local state (an automation run id, for one) would name rows that daemon does not
+    /// hold under that route. Only the same daemon counts: another profile's daemon on this Mac has its own
+    /// identity and database, so pairing with it stays valid. A profile whose daemon never created an
+    /// identity cannot be the target.
+    private static func assertNotOwnDaemon(certificateFingerprint: String, profile: SpacesProfile?) throws {
+        let resolvedProfile = try profile ?? SpacesProfile.current()
+        guard let ownFingerprint = TerminalServiceTLSIdentityStore.existingCertificateFingerprint(profile: resolvedProfile) else { return }
+        if TerminalServiceTLSFingerprint.matches(ownFingerprint, certificateFingerprint) { throw SpacesRemoteDevicePairingError.pairingWithSelf }
     }
 
     /// Refuses to redeem against a daemon whose wire-protocol version does not match this client's,
