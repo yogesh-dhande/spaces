@@ -58,7 +58,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// transcript so their resulting output cannot arrive after the handoff boundary.
     private var handlerDeliveriesInFlight = 0
     private var handlerDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
-    private var onSessionClosed: (@TerminalEngineActor () -> Void)?
+    private var onSessionClosed: (@Sendable () -> Void)?
     /// Reports the grid ghostty finished reflowing the terminal to; see `applyGhosttyGridResize`.
     private var onGridResizeApplied: (@TerminalEngineActor (Int, Int) -> Void)?
     private var cellSize: (columns: Int, rows: Int) = (80, 24)
@@ -120,7 +120,9 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.unlock()
     }
 
-    func setSessionClosedHandler(_ handler: (@TerminalEngineActor () -> Void)?) {
+    /// The handler runs on the driver's read queue, never on an actor or the cooperative pool, so a session's
+    /// close report cannot be delayed by unrelated work. A handler that needs the engine actor hops there itself.
+    func setSessionClosedHandler(_ handler: (@Sendable () -> Void)?) {
         lock.lock()
         onSessionClosed = handler
         lock.unlock()
@@ -366,7 +368,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// - The master fd's read-loop ownership (`masterFD`/`masterFDGeneration`) is left INTACT. The read
     ///   loop closes the fd from `finishAfterReadLoop` the moment `read()` returns (once the slave is fully
     ///   closed) — a close with no pending read, so it never blocks.
-    /// - `escalateUntilLeaderIsCollected` runs the TERM→KILL escalation on a detached task; its SIGKILL of
+    /// - `escalateUntilLeaderIsCollected` runs the TERM→KILL escalation on a dedicated thread; its SIGKILL of
     ///   the child process group forces the child dead — and thus the read to return — if SIGHUP is ignored,
     ///   and it owns the `waitpid`.
     ///
@@ -658,7 +660,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             // from here, and does not need to.
             escalateUntilLeaderIsCollected(childPID: childPID, processGroupID: getpgid(childPID))
         }
-        if shouldNotify { Task { @TerminalEngineActor in closeHandler?() } }
+        if shouldNotify { closeHandler?() }
     }
 
     /// Non-blocking attempt to collect the PTY leader's exit status. Never waits, so callers can invoke
@@ -693,7 +695,8 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         return leaderIsGone
     }
 
-    /// Drives the leader dead and collects it, on a detached task so no caller ever blocks on a `waitpid`.
+    /// Drives the leader dead and collects it, on a dedicated thread so no caller ever blocks on a `waitpid`
+    /// and the teardown never waits for a free cooperative-pool worker.
     /// Entered from `terminate()` (which has already sent the graceful SIGHUP) and from the read loop when
     /// its own reap found the leader still uncollected; `escalationOwnsLeader` guarantees exactly one of
     /// them runs it for a given child.
@@ -706,7 +709,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let shouldSignalProcessGroup = Self.shouldSignalProcessGroup(
             childPID: childPID, processGroupID: processGroupID, currentProcessGroupID: getpgrp())
         let intervals = terminationEscalationIntervals
-        Task.detached(priority: .utility) { [self] in
+        let escalation = Thread { [self] in
             // The first stage sends nothing: it is the grace window for a leader that is already on its way
             // out — the SIGHUP terminate() just sent, or the exit that ended the read loop. Escalate from
             // there to SIGTERM then SIGKILL, keying each stage on the full teardown — the read loop exited
@@ -730,6 +733,9 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             // detached into its own session (setsid) AND re-opened the controlling tty — is beyond a group
             // signal's reach; leaving read() blocked there is safer than an fd-reuse crash and is accepted.
         }
+        escalation.name = "spaces.terminal.host-managed-pty.escalation"
+        escalation.qualityOfService = .utility
+        escalation.start()
     }
 
     /// Polls until this session's teardown is complete within `timeout`, which takes BOTH:

@@ -223,9 +223,9 @@ Codex 0.157+ shares one app-server per `CODEX_HOME`, started with the first term
 
 `HostManagedPTYTerminalSessionDriver` forks each session's child, whose pre-exec body is C (the no-Swift-after-fork invariant is under [System Overview](#system-overview)). Sessions run the account's login shell, falling back to `/bin/zsh` on macOS and `/bin/bash` on Linux; `forkpty` needs `libutil` linked on Linux only. The driver tracks two lifetimes:
 
-- **Session.** EOF on the PTY master ends the session: the master fd is released, input is refused, and the closed handler fires.
+- **Session.** EOF on the PTY master ends the session: the master fd is released, input is refused, and the closed handler fires. The handler runs on the driver's read queue, so a busy engine actor or cooperative pool cannot delay the report; consumers that need the engine actor hop there themselves.
 - **Leader.** EOF does not mean the leader exited. It may still be exiting, or it may have closed its stdio and kept running. Only a successful `waitpid` clears the recorded child pid.
-- **One escalation task.** A single task ends and collects the leader.
+- **One escalation thread.** A single dedicated thread (not a cooperative-pool task, which saturation can leave unscheduled) ends and collects the leader.
   - It starts from `terminate()` (after SIGHUP) or from the read loop when a non-blocking reap comes up empty. One flag allows one escalation per child, so there is never a double `waitpid` or a signal to a reused pid.
   - Each stage waits for both the read-loop exit and the reap. If either is missing, it escalates to SIGTERM, then SIGKILL, on the process group.
 - **Targeted reaping.** The daemon installs no `SIGCHLD` handler and never calls `waitpid(-1)`. The daemon also spawns processes, agents, automations, and Caddy, and their owners wait on their own exit statuses.

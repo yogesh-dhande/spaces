@@ -286,7 +286,7 @@
             terminating = false
             writeRuntimeState(state: .starting)
             installOutputHandler()
-            ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
+            ptyDriver.setSessionClosedHandler { [weak self] in Task { @TerminalEngineActor in self?.handleSessionClosed() } }
             do {
                 try ptyDriver.startIfNeeded()
                 try startControlServer()
@@ -645,7 +645,7 @@
             terminating = false
             suppressBroadcastsForHandoff = false
             installOutputHandler()
-            ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
+            ptyDriver.setSessionClosedHandler { [weak self] in Task { @TerminalEngineActor in self?.handleSessionClosed() } }
 
             // Seed the title/cwd cache from the row the pre-exec image wrote: this core is a fresh
             // object, and the replay below cannot always recover them (a trimmed transcript's state
@@ -1123,8 +1123,7 @@
             let result = spaces_ghostty_vt_session_clear_screen_sequence(vtSession, &sequence, sequence.count, &length)
             switch result {
             case SPACES_GHOSTTY_VT_CLEAR_SCREEN_CLEARED, SPACES_GHOSTTY_VT_CLEAR_SCREEN_AT_PROMPT: break
-            case SPACES_GHOSTTY_VT_CLEAR_SCREEN_NOTHING:
-                return TerminalControlResponse(ok: false, message: "Unable to clear terminal screen.")
+            case SPACES_GHOSTTY_VT_CLEAR_SCREEN_NOTHING: return TerminalControlResponse(ok: false, message: "Unable to clear terminal screen.")
             default: return TerminalControlResponse(ok: false, message: "Unable to build the terminal clear operation.")
             }
             let mutation = Data(sequence[..<length])
@@ -2106,10 +2105,7 @@
                 renderUpdateValue =
                     readerHoldsCurrentFrame
                     ? nil
-                    : capturedFrame.map {
-                        makeRenderUpdate(
-                            for: $0.frame, reason: reason, nativeScrollRects: $0.scrollRects, exportMode: exportMode)
-                    }
+                    : capturedFrame.map { makeRenderUpdate(for: $0.frame, reason: reason, nativeScrollRects: $0.scrollRects, exportMode: exportMode) }
                 if performanceLoggingEnabled, let snapshotExportStartedAt, let renderUpdateConstructionStartedAt {
                     let renderUpdateConstructionMS = TerminalPerformance.elapsedMS(since: renderUpdateConstructionStartedAt)
                     var attributes = GhosttyRenderFrameMetrics.attributes(
@@ -2177,12 +2173,10 @@
             for frame: GhosttyRenderFrame, reason: TerminalRemoteSessionStateReason, nativeScrollRects: [GhosttyRenderScrollRectOperation] = [],
             exportMode: RenderStateExportMode
         ) -> GhosttyRenderUpdate {
-            renderUpdateProducer.makeUpdate(
-                for: frame, reason: reason, nativeScrollRects: nativeScrollRects, exportMode: exportMode)
+            renderUpdateProducer.makeUpdate(for: frame, reason: reason, nativeScrollRects: nativeScrollRects, exportMode: exportMode)
         }
 
-        private func renderFrame() throws -> (frame: GhosttyRenderFrame, scrollRects: [GhosttyRenderScrollRectOperation])
-        {
+        private func renderFrame() throws -> (frame: GhosttyRenderFrame, scrollRects: [GhosttyRenderScrollRectOperation]) {
             guard let vtSession else { throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable }
             var rawSnapshot = SpacesGhosttyVtSnapshot()
             guard spaces_ghostty_vt_session_copy_snapshot(vtSession, &rawSnapshot) else { throw GhosttyLinuxHeadlessSessionError.snapshotUnavailable }
@@ -2193,9 +2187,8 @@
             let scrollbarOffset = hasPosition ? UInt32(clamping: position.offset) : 0
             let snapshot = GhosttyVtSessionBridge.snapshot(
                 from: rawSnapshot, mouseTrackingLevel: GhosttyLinuxMouseEncoder.trackingLevel(session: vtSession),
-                alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: vtSession),
-                scrollbarTotal: scrollbarTotal, scrollbarOffset: scrollbarOffset,
-                historyRowBase: hasPosition ? position.rows_pruned &+ position.offset : 0,
+                alternateScreenActive: GhosttyVtSessionBridge.alternateScreenActive(session: vtSession), scrollbarTotal: scrollbarTotal,
+                scrollbarOffset: scrollbarOffset, historyRowBase: hasPosition ? position.rows_pruned &+ position.offset : 0,
                 historyEpoch: terminalIncarnation &+ (hasPosition ? position.history_epoch : 0))
             let scrollRects = takeScrollRects(session: vtSession)
             let frame = GhosttyRenderFrame(
