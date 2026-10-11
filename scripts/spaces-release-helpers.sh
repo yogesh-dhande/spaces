@@ -117,6 +117,48 @@ spaces_release_create_dmg() {
   local dmg_path="$3"
   local apparent_mb
   apparent_mb="$(du -sAm "$source_dir" | cut -f1)"
-  hdiutil create -volname "$volume_name" -srcfolder "$source_dir" \
+  spaces_release_hdiutil_retrying "$dmg_path" create -volname "$volume_name" -srcfolder "$source_dir" \
     -size "$((apparent_mb + apparent_mb / 5 + 32))m" -ov -format UDZO "$dmg_path"
+}
+
+# Runs `hdiutil "${@:2}"`, retrying only when it fails with host resource contention. $1 is a
+# partial output path to remove before each retry so a retry never starts from a half-written image
+# (create's -ov would overwrite it anyway), or "" when the call writes nothing (attach).
+#
+# GitHub-hosted macOS runners and parallel local verify runs occasionally make hdiutil fail with
+# "Resource busy" (create) or "Resource temporarily unavailable" (attach) because other jobs share
+# the host (#599); this has hit after the full test suite and every signing check already passed.
+# hdiutil already retries internally within one invocation, so a failure here means the host was
+# contended for that whole window. Retry the whole call with backoff on top of that: 5 attempts,
+# sleeping 5+10+20+40 = 75s in the worst case plus five hdiutil invocations.
+#
+# Only those two contention errors are retried. A deterministic failure (for example the image-size
+# overflow "No space left on device" that create_dmg_sparse_file.sh guards) must fail at once rather
+# than after 75s of retries. hdiutil's stderr always reaches the caller's stderr; stdout is untouched.
+spaces_release_hdiutil_retrying() {
+  local partial_output_path="$1"
+  shift
+  local max_attempts=5
+  local backoff_seconds=5
+  local attempt status stderr_file
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/spaces-hdiutil-stderr.XXXXXX")"
+  for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+    status=0
+    hdiutil "$@" 2>"$stderr_file" || status=$?
+    cat "$stderr_file" >&2
+    if (( status == 0 )); then
+      rm -f "$stderr_file"
+      return 0
+    fi
+    if (( attempt == max_attempts )) || ! grep -Eq 'Resource busy|Resource temporarily unavailable' "$stderr_file"; then
+      rm -f "$stderr_file"
+      return "$status"
+    fi
+    echo "hdiutil $1 hit resource contention (attempt $attempt/$max_attempts); retrying in ${backoff_seconds}s..." >&2
+    if [[ -n "$partial_output_path" ]]; then
+      rm -f "$partial_output_path"
+    fi
+    sleep "$backoff_seconds"
+    backoff_seconds=$(( backoff_seconds * 2 ))
+  done
 }
