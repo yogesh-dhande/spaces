@@ -8,14 +8,16 @@ import Testing
 /// The launch gate for the coding-agents setup step. Spaces never writes an agent's config without
 /// being asked, so this decides only whether to *offer* the install.
 @Suite @MainActor struct SetupFlowControllerTests {
-    private let currentVersion = 7
+    private let currentRevision = "7:claudeCode,codex,opencode,copilot"
+
+    private let staleRevision = "6:claudeCode,codex,opencode,copilot"
 
     private func agent(_ kind: CodingAgent, available: Bool, installState: AgentHookInstallState) -> AgentHookStatus {
         AgentHookStatus(kind: kind, displayName: kind.displayName, available: available, installState: installState)
     }
 
-    private func requires(_ localAgents: [AgentHookStatus]?, dismissed: Int?) -> Bool {
-        SetupFlowController.requiresCodingAgentsSetup(localAgents: localAgents, dismissedHookVersion: dismissed, currentHookVersion: currentVersion)
+    private func requires(_ localAgents: [AgentHookStatus]?, dismissed: String?) -> Bool {
+        SetupFlowController.requiresCodingAgentsSetup(localAgents: localAgents, dismissedRevision: dismissed, currentRevision: currentRevision)
     }
 
     @Test func launchWaitExceedsTheAgentStatusRequestTimeout() {
@@ -39,14 +41,23 @@ import Testing
         #expect(!requires([agent(.opencode, available: false, installState: .notInstalled)], dismissed: nil))
     }
 
-    /// A dismissal is scoped to the hook version it was made against. Skipping is respected until a
-    /// Spaces release actually changes the hooks it wants to write — then the user is asked once more.
-    @Test func dismissalSuppressesOnlyTheHookVersionItWasMadeAgainst() {
+    /// A dismissal is scoped to the setup revision it was made against. Skipping is respected until a
+    /// Spaces release changes the hooks it wants to write or the agents it supports; then the user is asked once more.
+    @Test func dismissalSuppressesOnlyTheRevisionItWasMadeAgainst() {
         let needsHooks = [agent(.claudeCode, available: true, installState: .notInstalled)]
 
-        #expect(!requires(needsHooks, dismissed: currentVersion))
-        #expect(requires(needsHooks, dismissed: currentVersion - 1))
+        #expect(!requires(needsHooks, dismissed: currentRevision))
+        #expect(requires(needsHooks, dismissed: staleRevision))
         #expect(requires(needsHooks, dismissed: nil))
+    }
+
+    /// A release that supports a new agent re-offers the step even when the hooks are unchanged.
+    @Test func dismissalMadeBeforeAnAgentWasSupportedDoesNotSuppressTheStep() {
+        let withoutCopilot = "7:claudeCode,codex,opencode"
+        let needsHooks = [agent(.copilot, available: true, installState: .notInstalled)]
+
+        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedRevision: withoutCopilot, currentRevision: currentRevision))
+        #expect(requires(needsHooks, dismissed: withoutCopilot))
     }
 
     /// An unreachable local daemon reports nothing, not "nothing to do". The step is omitted so launch
@@ -54,14 +65,14 @@ import Testing
     /// at first launch would suppress the step forever.
     @Test func anUnreachableDaemonOmitsTheStepWithoutDismissingIt() {
         #expect(!requires(nil, dismissed: nil))
-        #expect(!requires(nil, dismissed: currentVersion - 1))
+        #expect(!requires(nil, dismissed: staleRevision))
     }
 
     /// Only a dismissal skips the probe, because it is the only answer a probe could not overturn.
-    @Test func theProbeIsSkippedOnceDismissedForThisHookVersion() {
-        #expect(!SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: currentVersion, currentHookVersion: currentVersion))
-        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: currentVersion - 1, currentHookVersion: currentVersion))
-        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: nil, currentHookVersion: currentVersion))
+    @Test func theProbeIsSkippedOnceDismissedForThisRevision() {
+        #expect(!SetupFlowController.shouldProbeLocalAgents(dismissedRevision: currentRevision, currentRevision: currentRevision))
+        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedRevision: staleRevision, currentRevision: currentRevision))
+        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedRevision: nil, currentRevision: currentRevision))
     }
 
     /// "Nothing to install today" must never harden into "never ask again". A launch that finds no
@@ -70,20 +81,20 @@ import Testing
     /// only agents already carrying current hooks, the next launch must still probe and still offer.
     @Test func aLaunchWithNothingToInstallStillOffersTheStepAfterAnAgentArrives() {
         for quietLaunch in [[], [agent(.claudeCode, available: true, installState: .current)]] {
-            #expect(SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: nil, currentHookVersion: currentVersion))
+            #expect(SetupFlowController.shouldProbeLocalAgents(dismissedRevision: nil, currentRevision: currentRevision))
             #expect(!requires(quietLaunch, dismissed: nil))
         }
 
         // The user has since installed Codex. Nothing was ever dismissed, so the step is offered.
-        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: nil, currentHookVersion: currentVersion))
+        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedRevision: nil, currentRevision: currentRevision))
         #expect(requires([agent(.codex, available: true, installState: .notInstalled)], dismissed: nil))
     }
 
-    /// Skip means skip. A dismissal covers the hook version, not the set of agents installed when it
+    /// Skip means skip. A dismissal covers the setup revision, not the set of agents installed when it
     /// was made, so an agent installed afterwards does not reopen the step — Settings still offers it.
     @Test func aDismissalIsNotReopenedByANewlyInstalledAgent() {
-        #expect(!SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: currentVersion, currentHookVersion: currentVersion))
-        #expect(!requires([agent(.codex, available: true, installState: .notInstalled)], dismissed: currentVersion))
+        #expect(!SetupFlowController.shouldProbeLocalAgents(dismissedRevision: currentRevision, currentRevision: currentRevision))
+        #expect(!requires([agent(.codex, available: true, installState: .notInstalled)], dismissed: currentRevision))
     }
 
     // MARK: - Local summary

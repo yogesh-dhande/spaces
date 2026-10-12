@@ -56,9 +56,9 @@ public enum ClientSettingsKey {
     /// Whether the app updates from the pre-release Sparkle feed ("1") instead of the stable feed.
     /// An unset value resolves to off, so an install only sees promoted releases until the user opts in.
     public static let appPrereleaseUpdates = "app_prerelease_updates"
-    /// The `AgentHookCommand.hookVersion` the user last dismissed the launch coding-agents setup step
-    /// for, as a decimal string. The step reappears only when a Spaces release bumps the hook version,
-    /// so skipping it is respected until the hooks Spaces wants to write actually change.
+    /// The `AgentHookCommand.setupRevision` the user last dismissed the launch coding-agents setup step
+    /// for. The step reappears only when a Spaces release changes the hooks or adds a supported agent,
+    /// so skipping it is respected until what Spaces offers to install actually changes.
     public static let agentHooksSetupDismissedVersion = "agent_hooks_setup_dismissed_version"
     /// The restorable-session record this client has already answered on each device, as a JSON object
     /// mapping device id to the record's generation. A device keeps its record until some client answers

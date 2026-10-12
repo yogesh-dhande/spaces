@@ -231,10 +231,7 @@
             try makeAgentsAvailable(CodingAgent.allCases, home: home)
 
             try install(CodingAgent.allCases, home: home)
-            let files = [
-                home.appendingPathComponent(".claude/settings.json"), home.appendingPathComponent(".codex/hooks.json"),
-                home.appendingPathComponent(".codex/config.toml"), home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"),
-            ]
+            let files = hookFiles(home: home)
             let firstPass = files.map(read)
 
             let replayOutcome = try install(CodingAgent.allCases, home: home)
@@ -1211,6 +1208,7 @@
             [
                 home.appendingPathComponent(".claude/settings.json"), home.appendingPathComponent(".codex/hooks.json"),
                 home.appendingPathComponent(".codex/config.toml"), home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"),
+                home.appendingPathComponent(".copilot/hooks/spaces.json"),
             ]
         }
 
@@ -1232,7 +1230,9 @@
             #expect(claude.contains("'\(installed)' agent signal"))
             #expect(codex.contains("'\(installed)' agent signal"))
             #expect(opencode.contains("const SPACES_CLI = \"\(installed)\""))
-            for contents in [claude, codex, opencode] { #expect(!contents.contains(dev.path)) }
+            let copilot = read(copilotHooksFile(home: home))
+            #expect(copilot.contains("'\(installed)' agent signal"))
+            for contents in [claude, codex, opencode, copilot] { #expect(!contents.contains(dev.path)) }
             #expect(codexMCPEntry(home: home)?["command"] as? String == installed)
         }
 
@@ -1256,7 +1256,7 @@
             let dev = try makeDevBuildCLI(home: home)
             try FileManager.default.removeItem(at: installedCLILink(home: home))
             let files = hookFiles(home: home)
-            let userConfigs = ["{ \"model\": \"opus\" }\n", "{}\n", "[features]\nhooks = true\n", "// user plugin\n"]
+            let userConfigs = ["{ \"model\": \"opus\" }\n", "{}\n", "[features]\nhooks = true\n", "// user plugin\n", "{ \"version\": 1 }\n"]
             for (file, contents) in zip(files, userConfigs) {
                 try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try contents.write(to: file, atomically: true, encoding: .utf8)
@@ -1288,7 +1288,7 @@
             }
 
             let poisoned = status(home: home, environment: dev.environment)
-            #expect(poisoned.map(\.installState) == [.outdated, .outdated, .outdated])
+            #expect(poisoned.map(\.installState) == [.outdated, .outdated, .outdated, .outdated])
 
             try install(CodingAgent.allCases, home: home, environment: dev.environment)
             try trust(.codex, home: home)
@@ -1595,5 +1595,88 @@
             #expect(outcome.agents.first { $0.kind == .codex }?.installState == .awaitingTrust)
         }
 
+        // MARK: - Copilot
+
+        private func copilotHooksFile(home: URL) -> URL { home.appendingPathComponent(".copilot/hooks/spaces.json") }
+
+        @Test func copilotInstallWritesItsOwnHooksFileAndStatusReadsItCurrent() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.copilot], home: home)
+            #expect(status(home: home).first { $0.kind == .copilot }?.installState == .notInstalled)
+
+            let outcome = try install([.copilot], home: home)
+
+            #expect(outcome.failures.isEmpty)
+            #expect(outcome.agents.first { $0.kind == .copilot }?.installState == .current)
+            let root = try JSONSerialization.jsonObject(with: Data(contentsOf: copilotHooksFile(home: home))) as! [String: Any]
+            #expect(root["version"] as? Int == 1)
+            let hooks = root["hooks"] as! [String: [[String: Any]]]
+            #expect(Set(hooks.keys) == Set(CodingAgent.copilot.jsonEventBindings.map(\.eventName)))
+            let agentStop = try #require(hooks["agentStop"]?.first)
+            #expect(agentStop["type"] as? String == "command")
+            #expect(agentStop["timeoutSec"] as? Int == 10)
+            #expect(
+                agentStop["bash"] as? String
+                    == "'\(spacesCLIPath(home: home))' agent signal done --agent copilot >/dev/null 2>&1 || true # \(AgentHookCommand.versionedMarker())")
+        }
+
+        @Test func copilotHooksAreOutdatedWhenTheyNameAnotherSpacesCLI() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.copilot], home: home)
+            try install([.copilot], home: home)
+            let file = copilotHooksFile(home: home)
+            try read(file).replacingOccurrences(of: spacesCLIPath(home: home), with: "/elsewhere/spaces").write(
+                to: file, atomically: true, encoding: .utf8)
+
+            #expect(status(home: home).first { $0.kind == .copilot }?.installState == .outdated)
+        }
+
+        @Test func copilotInstallDoesNotOverwriteAnUnmanagedHooksFile() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.copilot], home: home)
+            let file = copilotHooksFile(home: home)
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let existing = "{\"version\":1,\"hooks\":{}}\n"
+            try existing.write(to: file, atomically: true, encoding: .utf8)
+
+            let outcome = try install([.copilot], home: home)
+
+            #expect(outcome.failures.map(\.kind) == [.copilot])
+            #expect(outcome.failures.first?.message.localizedStandardContains("not managed by Spaces") == true)
+            #expect(read(file) == existing)
+        }
+
+        @Test func copilotInstallLeavesTheUsersOtherHookFilesAlone() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.copilot], home: home)
+            let other = home.appendingPathComponent(".copilot/hooks/mine.json")
+            try FileManager.default.createDirectory(at: other.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let existing = "{\"version\":1,\"hooks\":{\"agentStop\":[{\"type\":\"command\",\"bash\":\"echo mine\"}]}}\n"
+            try existing.write(to: other, atomically: true, encoding: .utf8)
+
+            try install([.copilot], home: home)
+
+            #expect(read(other) == existing)
+        }
+
+        /// `copilot config disableAllHooks true` writes `settings.json` in the Copilot home, and Copilot runs
+        /// no hook while it is set, so the row reads as switched off in the agent and offers no action.
+        @Test func copilotHooksSwitchedOffInCopilotReadAsDisabledByAgent() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.copilot], home: home)
+            try install([.copilot], home: home)
+            let settings = home.appendingPathComponent(".copilot/settings.json")
+
+            try "{\"disableAllHooks\": true}\n".write(to: settings, atomically: true, encoding: .utf8)
+            #expect(status(home: home).first { $0.kind == .copilot }?.installState == .disabledByAgent)
+
+            try "{\"disableAllHooks\": false}\n".write(to: settings, atomically: true, encoding: .utf8)
+            #expect(status(home: home).first { $0.kind == .copilot }?.installState == .current)
+        }
     }
 #endif

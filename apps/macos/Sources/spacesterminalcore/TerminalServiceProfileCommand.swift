@@ -159,16 +159,21 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
     /// The signaling process, set only when the terminal came from the environment rather than a flag.
     /// The daemon drops the signal unless that terminal's shell is an ancestor of this process.
     public let callerProcessID: Int32?
+    /// The agent whose hook sent the signal, named only by agents whose signals need agent-specific
+    /// handling in the daemon (see `CodingAgent.countsExitOnlyForLearnedConversation`). A raw value this
+    /// build does not know reads as nil, like a signal from an agent that names itself on no command.
+    public let agent: CodingAgent?
 
     public init(
         workspaceID: String, terminalSessionID: String, event: String, agentSessionKey: AgentHookSessionKeyReport = .unreported,
-        callerProcessID: Int32? = nil
+        callerProcessID: Int32? = nil, agent: CodingAgent? = nil
     ) {
         self.workspaceID = workspaceID
         self.terminalSessionID = terminalSessionID
         self.event = event
         self.agentSessionKey = agentSessionKey
         self.callerProcessID = callerProcessID
+        self.agent = agent
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -178,6 +183,7 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         case agentSessionKey
         case agentSessionKeyPending
         case callerProcessID
+        case agent
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -186,6 +192,7 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         try container.encode(terminalSessionID, forKey: .terminalSessionID)
         try container.encode(event, forKey: .event)
         try container.encodeIfPresent(callerProcessID, forKey: .callerProcessID)
+        try container.encodeIfPresent(agent, forKey: .agent)
         switch agentSessionKey {
         case .unreported: break
         case .pending: try container.encode(true, forKey: .agentSessionKeyPending)
@@ -199,6 +206,7 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
         terminalSessionID = try container.decodeRequiredNonEmpty(forKey: .terminalSessionID)
         event = try container.decodeRequiredNonEmpty(forKey: .event)
         callerProcessID = try container.decodeIfPresent(Int32.self, forKey: .callerProcessID)
+        agent = (try? container.decodeIfPresent(CodingAgent.self, forKey: .agent)) ?? nil
         // The pending flag is read first so the three states stay total over anything that decodes: the
         // encoder above writes at most one of the two keys, and a blank id is the same as no id at all.
         if try container.decodeIfPresent(Bool.self, forKey: .agentSessionKeyPending) == true {

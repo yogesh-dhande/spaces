@@ -4,7 +4,7 @@ import spacesterminalcore
 /// Builds the copyable MCP client configuration shown in Settings → MCP.
 ///
 /// Spaces exposes its MCP server over stdio: an MCP client (Claude Code, Codex,
-/// opencode) spawns `spaces mcp`, which forwards every tool call to the running
+/// opencode, Copilot) spawns `spaces mcp`, which forwards every tool call to the running
 /// `spacesd` daemon. The settings pane only needs to surface the resolved CLI
 /// path and the snippets a user pastes into their client.
 enum MCPClientConfiguration {
@@ -28,7 +28,19 @@ enum MCPClientConfiguration {
 
     /// One-shot command that registers the stdio server with Claude Code at user scope so the tools are
     /// available in every directory rather than only the one the command ran in.
-    static func claudeCodeAddCommand(cliPath: String) -> String { "claude mcp add \(serverName) -s user -- \(cliPath) mcp" }
+    static func claudeCodeAddCommand(cliPath: String) -> String { "claude mcp add \(serverName) -s user -- \(shellWord(cliPath)) mcp" }
+
+    /// `path` as one shell word for a command the user pastes into a terminal. A path made only of
+    /// characters the shell reads literally is left bare so the common snippet stays readable; any other
+    /// (an app bundle path with a space, say) is single-quoted, or the shell would split it and the agent
+    /// would register the wrong executable.
+    static func shellWord(_ path: String) -> String {
+        let literal = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+@%:,=")
+        guard !path.isEmpty, path.unicodeScalars.allSatisfy(literal.contains) else {
+            return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        return path
+    }
 
     /// `mcp_servers` table for the Codex CLI `~/.codex/config.toml`. Codex passes an MCP server only the
     /// variables named in `env_vars`, which is how the server learns which terminal is calling.
@@ -58,6 +70,13 @@ enum MCPClientConfiguration {
         """
     }
 
+    /// `copilot mcp add` registers the server for the Copilot CLI. The command writes the
+    /// `mcpServers.spaces` entry into `~/.copilot/mcp-config.json` (a `type: "local"` server with
+    /// `command`, `args` and `tools: ["*"]`, verified against copilot 1.0.95). Copilot passes the calling
+    /// terminal's environment to MCP servers, so unlike Codex the entry names no variables (verified live:
+    /// a Copilot session's `spaces_agent_brief_write` call wrote the brief of the terminal it ran in).
+    static func copilotAddCommand(cliPath: String) -> String { "copilot mcp add \(serverName) -- \(shellWord(cliPath)) mcp" }
+
     /// The CLI bundled at `Contents/Resources/spaces` when running from an app
     /// bundle; `nil` for non-bundled (test/dev tooling) executables.
     static func defaultBundleResourceCLIPath() -> String? {
@@ -78,6 +97,7 @@ extension CodingAgent {
         case .claudeCode: "Claude Code"
         case .codex: "Codex CLI"
         case .opencode: "opencode"
+        case .copilot: "Copilot CLI"
         }
     }
 
@@ -86,6 +106,7 @@ extension CodingAgent {
         case .claudeCode: "Run once in your terminal."
         case .codex: "Add to the mcp_servers table in ~/.codex/config.toml."
         case .opencode: "Add to the mcp block in ~/.config/opencode/opencode.json."
+        case .copilot: "Run once in your terminal."
         }
     }
 
@@ -94,6 +115,7 @@ extension CodingAgent {
         case .claudeCode: MCPClientConfiguration.claudeCodeAddCommand(cliPath: cliPath)
         case .codex: MCPClientConfiguration.codexConfigTOML(cliPath: cliPath)
         case .opencode: MCPClientConfiguration.opencodeConfigJSON(cliPath: cliPath)
+        case .copilot: MCPClientConfiguration.copilotAddCommand(cliPath: cliPath)
         }
     }
 }

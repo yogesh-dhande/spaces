@@ -17,6 +17,7 @@ extension CodingAgent {
     ///    Codex's own flags belong after it.
     ///  - opencode: `-s <key>` at the end of the agent's own segment, which is where its session option is
     ///    accepted.
+    ///  - Copilot: `--resume <key>` immediately after the executable, like Claude Code.
     ///
     /// Every rewrite stays inside the command's first segment (see `firstCommandSegmentRange(inCommand:)`),
     /// so a chained command such as `opencode && notify` hands the selector to the agent rather than to
@@ -32,13 +33,17 @@ extension CodingAgent {
         // Claude Code's `--session-id` names the id a NEW conversation is to be created under, and Claude
         // refuses it alongside `--resume`, so a command carrying one has it dropped: the relaunch is
         // resuming the conversation the capture named, not starting the one the original command asked for.
-        let withoutSessionID = agent == .claudeCode ? removingSessionIDOption(inCommand: launchCommand) : launchCommand
+        // Copilot's `--session-id` is the same option, and its `--continue` (resume the most recent
+        // session) names a conversation of its own, so both go for the same reason.
+        var withoutSessionID = launchCommand
+        if agent == .claudeCode || agent == .copilot { withoutSessionID = removingSessionIDOption(inCommand: withoutSessionID) }
+        if agent == .copilot { withoutSessionID = removingBareFlag("--continue", inCommand: withoutSessionID) }
         let command = agent.removingPrompt(inCommand: withoutSessionID)
         if let named = agent.namedConversation(inCommand: command) {
             return command.replacingCharacters(in: named.range, with: named.separator + key)
         }
         switch agent {
-        case .claudeCode: return insert("--resume \(key)", afterExecutableTokenIn: command)
+        case .claudeCode, .copilot: return insert("--resume \(key)", afterExecutableTokenIn: command)
         case .codex: return insert("resume \(key)", afterExecutableTokenIn: command)
         case .opencode:
             let segment = CodingAgent.firstCommandSegmentRange(inCommand: command)
@@ -62,7 +67,8 @@ extension CodingAgent {
     /// Whether the command launches a run this rewrite must leave exactly as written rather than a
     /// conversation it can rejoin: `claude -p`/`--print`, a Claude Code subcommand run (`claude attach
     /// <id>`, `claude mcp ...`, `claude update`, and the rest of its `Commands:` list), `codex exec` (and
-    /// its `e` alias), `codex review`, `codex fork`, and `opencode run` without `-i`/`--interactive`.
+    /// its `e` alias), `codex review`, `codex fork`, `opencode run` without `-i`/`--interactive`, and the Copilot runs
+    /// named in `oneShotLaunchMarkers`.
     ///
     /// Most of those are jobs rather than sessions: they print an answer and exit. Codex additionally takes
     /// a one-shot run's conversation as `codex exec resume <key>`, after options whose arity only Codex
@@ -164,8 +170,21 @@ extension CodingAgent {
         // opencode writes its subcommand first (`opencode run "fix lint"`), which is where the scan reads
         // it; the TUI's own positional in that place is a project path and matches nothing.
         case .opencode: OneShotLaunchMarkers(subcommands: ["run": ["-i", "--interactive"]])
+        // Copilot's `-p`/`--prompt` prints an answer and exits, `--acp` serves the Agent Client Protocol and
+        // `--connect` attaches to a remote session; none is a conversation `--resume` can rejoin. Its
+        // interactive prompt option is `-i`, which is not a marker. Subcommands are its `copilot --help`
+        // command list.
+        case .copilot: OneShotLaunchMarkers(options: ["-p", "--prompt", "--acp", "--connect"], subcommands: Self.copilotSubcommands)
         }
     }
+
+    /// Copilot's own subcommands, its `Commands:` list plus `logout` (copilot 1.0.95). A subcommand run
+    /// manages the installation or an account rather than talking to a model, and a name in the list is
+    /// never a prompt, since Copilot takes its prompt through `-i`/`-p` and no positional.
+    private static let copilotSubcommands: Set<String> = [
+        "app", "completion", "config", "help", "init", "instruction", "login", "logout", "lsp", "memories", "plugin", "mcp", "sandbox", "sessions",
+        "skill", "update", "version", "workflow",
+    ]
 
     /// Claude Code's own subcommands, its `Commands:` list with each alias (claude 2.1.270).
     ///
@@ -191,7 +210,7 @@ extension CodingAgent {
     /// conversation, with the conversation either attached by `=` or standing as the next word.
     private var conversationSelectors: [String] {
         switch self {
-        case .claudeCode: ["--resume", "-r"]
+        case .claudeCode, .copilot: ["--resume", "-r"]
         case .codex: ["resume"]
         case .opencode: ["--session", "-s"]
         }
@@ -408,6 +427,9 @@ extension CodingAgent {
         /// Only a positional written after this subcommand is the prompt; the subcommand word itself is
         /// not, and a positional in its place when the subcommand is absent is not either.
         case afterSubcommand(String)
+        /// No positional is a prompt: the agent takes its prompt through a named option only (Copilot's
+        /// `-i`), so a positional is a subcommand and never reaches a resume rewrite as one.
+        case none
 
         /// Whether the prompt is every positional the rule admits rather than a single one. It is under
         /// `.afterSubcommand`, because the subcommand that takes a prompt takes it variadically (`opencode
@@ -417,7 +439,7 @@ extension CodingAgent {
         /// only the last of them is the prompt (see `removingPrompt(inCommand:)`).
         var promptSpansEveryAdmittedPositional: Bool {
             switch self {
-            case .everyPositional: false
+            case .everyPositional, .none: false
             case .afterSubcommand: true
             }
         }
@@ -437,6 +459,7 @@ extension CodingAgent {
         switch self {
         case .claudeCode, .codex: .everyPositional
         case .opencode: .afterSubcommand("run")
+        case .copilot: .none
         }
     }
 
@@ -447,11 +470,14 @@ extension CodingAgent {
     /// Only opencode has one: `--prompt <string>`, with no short alias. Claude Code and Codex take the
     /// prompt as their positional argument and offer no option for it, so their tables are empty; Claude
     /// Code's `--system-prompt`, `--append-system-prompt`, and `--prompt-suggestions` configure the session
-    /// rather than sending an instruction, and belong with the ordinary value-taking options.
+    /// rather than sending an instruction, and belong with the ordinary value-taking options. Copilot's is
+    /// `-i`/`--interactive <prompt>` (copilot 1.0.95), which starts the interactive session on the prompt;
+    /// its `-p`/`--prompt` is a one-shot run that never reaches a resume rewrite.
     private var promptOptions: Set<String> {
         switch self {
         case .claudeCode, .codex: []
         case .opencode: ["--prompt"]
+        case .copilot: ["-i", "--interactive"]
         }
     }
 
@@ -496,6 +522,17 @@ extension CodingAgent {
                 "--agent", "--attach", "--command", "--dir", "--format", "--hostname", "--log-level", "--mdns-domain", "-m", "--model", "-p",
                 "--password", "--port", "--replay-limit", "--title", "-u", "--username", "--variant",
             ]
+        case .copilot:
+            // Read from copilot 1.0.95's `--help`. The options help marks `[<value>]` as optional-valued
+            // (`--connect`, `--share`, `--bash-env`, `--mouse`) are here for the same reason Claude Code's
+            // are: the parser takes the next word whenever it is not itself an option.
+            [
+                "--add-dir", "--add-github-mcp-tool", "--add-github-mcp-toolset", "--additional-mcp-config", "--agent", "--attachment", "--auto-tier",
+                "--bash-env", "-C", "--context", "--disable-mcp-server", "--dynamic-retrieval", "--enable-mcp-server", "--extension-sdk-path",
+                "--log-dir", "--log-level", "--max-ai-credits", "--max-autopilot-continues", "--mcp-github-auth", "--mode", "--model", "-n",
+                "--name", "--mouse", "--output-format", "--plugin-dir", "--reasoning-effort", "--session-id", "--share", "--stream",
+                "--usage-output-file",
+            ]
         }
     }
 
@@ -512,10 +549,11 @@ extension CodingAgent {
             ]
         case .codex: ["-i", "--image"]
         case .opencode: ["--cors", "-f", "--file"]
+        case .copilot: ["--allow-tool", "--allow-url", "--available-tools", "--deny-tool", "--deny-url", "--excluded-tools", "--secret-env-vars"]
         }
     }
 
-    /// The command without Claude Code's `--session-id <uuid>` (or `--session-id=<uuid>`) option, read from
+    /// The command without the `--session-id <uuid>` (or `--session-id=<uuid>`) option Claude Code and Copilot share, read from
     /// the agent's own segment with the same tokenizer the selector scan uses. One separating space goes
     /// with it, so removing the option does not leave a double space behind.
     private static func removingSessionIDOption(inCommand command: String) -> String {
@@ -534,6 +572,17 @@ extension CodingAgent {
             return removing(span: token.lowerBound..<end, inCommand: command)
         }
         return command
+    }
+
+    /// The command without the value-less flag `flag`, read from the agent's own segment like
+    /// `removingSessionIDOption(inCommand:)`.
+    private static func removingBareFlag(_ flag: String, inCommand command: String) -> String {
+        let tokens = firstSegmentTokenRanges(inCommand: command)
+        guard let executable = executableTokenRange(inCommand: command), let executableIndex = tokens.firstIndex(of: executable) else {
+            return command
+        }
+        guard let token = tokens[tokens.index(after: executableIndex)...].first(where: { command[$0] == flag }) else { return command }
+        return removing(span: token, inCommand: command)
     }
 
     /// The command with `span` cut out of it, taking one separating space with it so the removal does not

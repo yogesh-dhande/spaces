@@ -60,8 +60,8 @@ export default function GettingStartedDocsPage() {
       <Section id="open-an-agent" title="Open a terminal and start an agent">
         <Prose>
           Press <Cmd>⌘⌥T</Cmd> to open a terminal in the workspace, then run{" "}
-          <InlineCode>claude</InlineCode>, <InlineCode>codex</InlineCode>, or{" "}
-          <InlineCode>opencode</InlineCode>. Its status shows on its sidebar row. See{" "}
+          <InlineCode>claude</InlineCode>, <InlineCode>codex</InlineCode>,{" "}
+          <InlineCode>opencode</InlineCode>, or <InlineCode>copilot</InlineCode>. Its status shows on its sidebar row. See{" "}
           <DocLink href="/docs/coding-agents">Agent status</DocLink>.
         </Prose>
       </Section>

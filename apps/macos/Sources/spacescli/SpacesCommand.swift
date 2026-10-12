@@ -1010,6 +1010,10 @@ struct AgentSignalCommand: ParsableCommand {
         name: .long,
         help: "The signaling agent's own conversation ID, for agents whose hooks pass it as an argument. Defaults to the ID in the hook payload.")
     var agentSession: String?
+    @Option(
+        name: .long,
+        help: "The coding agent whose hook is signaling (\(CodingAgent.allCases.map(\.rawValue).joined(separator: ", "))), for agents whose hook payload needs agent-specific handling.")
+    var agent: String?
     @Argument(
         help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
     var type: AgentEventType
@@ -1022,6 +1026,10 @@ struct AgentSignalCommand: ParsableCommand {
         guard let context = try Self.resolvedSignalContext(workspace: workspace, session: session, environment: ProcessInfo.processInfo.environment)
         else { return }
         let cliContext = CLIContext()
+        let signalingAgent = try normalizedNonEmpty(agent).map { raw in
+            guard let known = CodingAgent(rawValue: raw) else { throw ValidationError("Unknown coding agent '\(raw)'.") }
+            return known
+        }
         // An explicit `--agent-session` is how the opencode plugin reports the id, since a plugin runs
         // inside opencode and receives a JavaScript event rather than a payload on stdin. It also means
         // stdin holds nothing to read, so the payload is only consulted when the option is absent. The
@@ -1030,13 +1038,17 @@ struct AgentSignalCommand: ParsableCommand {
         if let explicit = normalizedNonEmpty(agentSession) {
             agentSessionKey = .resumable(explicit)
         } else {
-            agentSessionKey = AgentHookSessionKey.report(inHookPayload: Self.hookPayloadFromStandardInput())
+            let payload = Self.hookPayloadFromStandardInput()
+            // Copilot's `notification` hook has no matcher, so every notification type reaches here; only
+            // the ones that mean a dialog is about to wait for the human are a block.
+            if signalingAgent == .copilot, type == .blocked, !AgentHookCopilotPayload.reportsBlock(inHookPayload: payload) { return }
+            agentSessionKey = AgentHookSessionKey.report(inHookPayload: payload, agent: signalingAgent)
         }
         _ = try TerminalService.sendProfileCommand(
             .agentSignal(
                 .init(
                     workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue, agentSessionKey: agentSessionKey,
-                    callerProcessID: environmentCallerProcessID(explicit: session))))
+                    callerProcessID: environmentCallerProcessID(explicit: session), agent: signalingAgent)))
         cliContext.output.emit("Agent \(type.rawValue): workspace=\(context.workspaceID)")
     }
 

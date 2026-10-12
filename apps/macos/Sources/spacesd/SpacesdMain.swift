@@ -2795,6 +2795,11 @@ enum SpacesDaemonErrorClassification {
             shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
+            // Copilot's phantom `sessionEnd` for a session that never started is not this agent's exit
+            // (see `CodingAgent.countsExitOnlyForLearnedConversation`).
+            if let signalingAgent = payload.agent,
+                !signalingAgent.exitSignalCounts(reportedKey: payload.agentSessionKey, rowSessionKey: existingAgent.sessionKey)
+            { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
             // The exit routes through the orchestrator's finalization chokepoint, which renders/enqueues the
             // exited notice to subscribers before finalizing the row (delegating the delete-vs-`.exited`
             // decision to `handleAgentExit`), then tears down the signaling terminal's own subscriber state:

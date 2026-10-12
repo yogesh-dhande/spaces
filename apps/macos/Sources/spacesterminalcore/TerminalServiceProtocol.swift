@@ -820,23 +820,8 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     /// tell the user the two builds do not match. Dropping the unreadable row keeps the status landing, and
     /// costs nothing the client could have used: an offer row it cannot describe is one it must not show.
     private static func decodeRestorableSessions(from container: KeyedDecodingContainer<CodingKeys>) throws -> [RestorableSessionSummary] {
-        guard container.contains(.restorableSessions) else { return [] }
-        var rows = try container.nestedUnkeyedContainer(forKey: .restorableSessions)
-        var summaries: [RestorableSessionSummary] = []
-        while !rows.isAtEnd {
-            let position = rows.currentIndex
-            if let summary = try? rows.decode(RestorableSessionSummary.self) { summaries.append(summary) }
-            // A row that failed to decode may or may not have moved the cursor, depending on the decoder, and
-            // `SkippedStatusRow` reads nothing and so consumes whatever is there. Stepping only when the
-            // cursor has not moved steps over each unreadable row exactly once, without swallowing the next.
-            if rows.currentIndex == position { _ = try? rows.decode(SkippedStatusRow.self) }
-        }
-        return summaries
+        try container.decodeSkippingUnreadable(RestorableSessionSummary.self, forKey: .restorableSessions)
     }
-
-    /// Consumes one element of a status array without reading it, so a row this build cannot decode can be
-    /// stepped over rather than failing the handshake.
-    private struct SkippedStatusRow: Decodable { init(from decoder: any Decoder) throws {} }
 
     /// The OS of the process building this status (the daemon's own host).
     public static var currentOperatingSystem: String {

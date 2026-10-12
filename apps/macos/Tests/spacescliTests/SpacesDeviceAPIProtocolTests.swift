@@ -75,6 +75,38 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.agentHooksStatus, payload)
     }
 
+    /// A newer daemon can report an agent this build lacks. Its row is dropped and the rest still land,
+    /// rather than the whole status failing to decode.
+    func testAgentHooksStatusDropsAnAgentThisBuildDoesNotKnow() throws {
+        let json = """
+            {"agents":[
+              {"kind":"claudeCode","displayName":"Claude Code","available":true,"installState":"current","untrustedEntries":[]},
+              {"kind":"futureagent","displayName":"Future","available":true,"installState":"current","untrustedEntries":[]},
+              {"kind":"copilot","displayName":"Copilot","available":false,"installState":"notInstalled","untrustedEntries":[]}
+            ]}
+            """
+        let payload = try JSONDecoder().decode(SpacesAgentHooksStatusPayload.self, from: Data(json.utf8))
+        XCTAssertEqual(payload.agents.map(\.kind), [.claudeCode, .copilot])
+    }
+
+    func testInstallOutcomeDropsStatusesAndFailuresForAnUnknownAgent() throws {
+        let json = """
+            {"agents":[
+              {"kind":"futureagent","displayName":"Future","available":true,"installState":"current","untrustedEntries":[]},
+              {"kind":"codex","displayName":"Codex","available":true,"installState":"notInstalled","untrustedEntries":[]}
+            ],"failures":[{"kind":"futureagent","message":"no"},{"kind":"codex","message":"refused"}]}
+            """
+        let outcome = try JSONDecoder().decode(AgentHookInstallOutcome.self, from: Data(json.utf8))
+        XCTAssertEqual(outcome.agents.map(\.kind), [.codex])
+        XCTAssertEqual(outcome.failures, [AgentHookInstallFailure(kind: .codex, message: "refused")])
+    }
+
+    /// A newer client asking an older daemon to install an agent it lacks still gets the others installed.
+    func testInstallRequestDropsAKindThisBuildDoesNotKnow() throws {
+        let request = try JSONDecoder().decode(SpacesDeviceInstallAgentHooksRequest.self, from: Data(#"{"kinds":["codex","futureagent","opencode"]}"#.utf8))
+        XCTAssertEqual(request.kinds, [.codex, .opencode])
+    }
+
     /// An install answers `ok` even when one agent failed, so the per-agent failures have to survive the
     /// wire: they are the only way the client learns which agents to record and which to retry.
     func testAgentHooksInstallResultCarriesPerAgentFailuresThroughResponse() throws {

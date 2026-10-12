@@ -197,7 +197,9 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         foregroundExecutablePath = try container.decodeIfPresent(String.self, forKey: .foregroundExecutablePath)
         foregroundExecutableName = try container.decodeIfPresent(String.self, forKey: .foregroundExecutableName)
         foregroundArgv = try container.decodeIfPresent([String].self, forKey: .foregroundArgv)
-        foregroundDetectedAgentKind = try container.decodeIfPresent(TerminalDetectedAgentKind.self, forKey: .foregroundDetectedAgentKind)
+        // A kind this build does not know reads as no detected agent: a newer daemon's session still
+        // lands, shown as the plain terminal this build can describe.
+        foregroundDetectedAgentKind = (try? container.decodeIfPresent(TerminalDetectedAgentKind.self, forKey: .foregroundDetectedAgentKind)) ?? nil
         foregroundDisplayLabel = try container.decodeIfPresent(String.self, forKey: .foregroundDisplayLabel)
         foregroundDisplayCommand = try container.decodeIfPresent(String.self, forKey: .foregroundDisplayCommand)
         // Never on the wire, so never off it: a decoded state is one that arrived from another process, and

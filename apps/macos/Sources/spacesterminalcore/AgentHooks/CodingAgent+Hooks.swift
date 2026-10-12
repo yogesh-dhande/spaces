@@ -3,8 +3,9 @@ import Foundation
 /// Per-agent hook mechanics: the event → signal bindings, and the idempotent install/status logic that
 /// wires them into each agent's config so its lifecycle reaches `spaces agent signal`.
 extension CodingAgent {
-    /// Claude and Codex use the same JSON hook shape; these are their event → signal bindings.
-    /// opencode uses a plugin file instead and returns an empty list.
+    /// Claude and Codex use the same JSON hook shape; these are their event → signal bindings. Copilot's
+    /// file shape differs (flat entries, see `AgentHookCopilotHooksWriter`) but binds events the same way,
+    /// so its table lives here too. opencode uses a plugin file instead and returns an empty list.
     ///
     /// **The post-tool events are what end a block.** Neither agent emits anything at the instant a
     /// permission prompt is answered, and both fire `PreToolUse` *before* the permission decision, so a
@@ -70,8 +71,56 @@ extension CodingAgent {
                 .init(eventName: "PermissionRequest", event: .blocked), .init(eventName: "Stop", event: .done),
                 .init(eventName: "SessionEnd", event: .exit),
             ]
+        case .copilot:
+            // Verified against copilot 1.0.91 to 1.0.95. Copilot fires `sessionStart` only when the first
+            // prompt of the process is sent, not at launch, so a Copilot that has had no prompt reports
+            // nothing and relies on foreground detection, like a promptless Codex.
+            //
+            // `notification` is bound for the two dialogs Copilot draws: `permission_prompt` (a gated
+            // tool) and `elicitation_dialog` (the `ask_user` tool). Copilot's entries carry no matcher, so
+            // the other notification types (`agent_idle`, `agent_completed`, `shell_completed`,
+            // `shell_detached_completed`) are filtered where the payload is read
+            // (`AgentHookCopilotPayload.reportsBlock`). `permissionRequest` is deliberately not bound: it
+            // runs before Copilot's permission service decides, so it fires for requests that are never
+            // shown, and a block raised for a dialog that never draws would never end.
+            //
+            // The post-tool events end a block exactly as they do for Claude: an approval fires no hook,
+            // and the approved tool having run is the evidence. A deny with feedback ends in `agentStop`,
+            // and `Esc` on the dialog fires nothing (the same accepted silent denial as Claude Code).
+            //
+            // `subagentStart`, `subagentStop` and `userPromptTransformed` are not bound: a subagent's
+            // lifecycle is not the main agent's turn, and `userPromptSubmitted` already marks the prompt.
+            [
+                .init(eventName: "sessionStart", event: .initialize), .init(eventName: "userPromptSubmitted", event: .working),
+                .init(eventName: "preToolUse", event: .working), .init(eventName: "postToolUse", event: .working),
+                .init(eventName: "postToolUseFailure", event: .working), .init(eventName: "notification", event: .blocked),
+                .init(eventName: "agentStop", event: .done), .init(eventName: "sessionEnd", event: .exit),
+            ]
         case .opencode: []
         }
+    }
+
+    /// Whether this agent's `exit` hook signal counts only when it names the conversation the agent's
+    /// row already learned from an earlier signal.
+    ///
+    /// Copilot is the one: `copilot --resume <id>` creates and tears down a throwaway session while it
+    /// starts, so a phantom `sessionEnd` fires carrying the `sessionId` of a session that never started.
+    /// Taking it as an exit would finalize the row of an agent that is still starting. A real exit names
+    /// the conversation the row learned. An exit the filter drops costs nothing, since process-exit
+    /// detection still catches a real one.
+    public var countsExitOnlyForLearnedConversation: Bool {
+        switch self {
+        case .copilot: true
+        case .claudeCode, .codex, .opencode: false
+        }
+    }
+
+    /// Whether an `exit` signal from this agent finalizes its row, given the conversation the signal names
+    /// and the one the row holds (see `countsExitOnlyForLearnedConversation`).
+    public func exitSignalCounts(reportedKey: AgentHookSessionKeyReport, rowSessionKey: String?) -> Bool {
+        guard countsExitOnlyForLearnedConversation else { return true }
+        guard case .resumable(let reported) = reportedKey, let rowSessionKey else { return false }
+        return reported == rowSessionKey
     }
 
     // MARK: - Per-agent install / status
@@ -105,6 +154,10 @@ extension CodingAgent {
         case .opencode:
             try AgentHookOpencodePluginWriter.install(
                 pluginURL: opencodePluginURL(home: home), spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
+        case .copilot:
+            try AgentHookCopilotHooksWriter.install(
+                fileURL: AgentHookCopilotHooksWriter.hooksFileURL(copilotHome: configDirectoryURL(home: home)), bindings: jsonEventBindings,
+                spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         }
     }
 
@@ -137,6 +190,15 @@ extension CodingAgent {
         case .opencode:
             return AgentHookOpencodePluginWriter.installState(
                 pluginURL: opencodePluginURL(home: home), spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
+        case .copilot:
+            let hooksFileURL = AgentHookCopilotHooksWriter.hooksFileURL(copilotHome: configDirectoryURL(home: home))
+            let state = AgentHookCopilotHooksWriter.installState(
+                fileURL: hooksFileURL, bindings: jsonEventBindings, spacesExecutablePath: spacesExecutablePath)
+            guard state == .current else { return state }
+            // Copilot runs no hook while `disableAllHooks` is set, whatever the file carries, and Spaces
+            // never edits the user's settings, so the user is sent to Copilot to turn hooks back on.
+            let settingsURL = configDirectoryURL(home: home).appendingPathComponent("settings.json")
+            return AgentHookCopilotHooksWriter.hooksDisabled(settingsURL: settingsURL) ? .disabledByAgent : .current
         }
     }
 

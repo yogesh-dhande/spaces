@@ -53,9 +53,9 @@ export default function RestartsDocsPage() {
         <Prose>
           Restoring relaunches each agent in the workspace and pane it was in, resuming its conversation
           when the agent supports that. An agent started as a one-shot run, such as{" "}
-          <InlineCode>claude -p</InlineCode>, <InlineCode>codex exec</InlineCode>, or{" "}
-          <InlineCode>opencode run</InlineCode> (but not <InlineCode>opencode run -i</InlineCode>, which
-          resumes), has no conversation to resume, so it comes back as another run of the same command
+          <InlineCode>claude -p</InlineCode>, <InlineCode>codex exec</InlineCode>,{" "}
+          <InlineCode>opencode run</InlineCode>, or <InlineCode>copilot -p</InlineCode> (but not{" "}
+          <InlineCode>opencode run -i</InlineCode>, which resumes), has no conversation to resume, so it comes back as another run of the same command
           instead.
         </Prose>
         <Prose>

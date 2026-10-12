@@ -46,9 +46,17 @@ public enum AgentHookSessionKeyReport: Equatable, Sendable {
 /// is consistent under the same rule: its rollout file is what `codex resume` reads. A payload
 /// carrying no transcript path is reported `resumable` as it stands, as is an id passed explicitly as
 /// `--agent-session`: opencode's plugin reports an id only once opencode holds a session for it.
+///
+/// Copilot's payload is camelCase JSON on stdin with the id as `sessionId` (verified against copilot
+/// 1.0.91 to 1.0.95), equal to the id `copilot --resume` takes, and carries no transcript path, so its id
+/// reports `resumable` as it stands. Copilot fires its first hook at the first prompt, by which point
+/// the session exists.
 public enum AgentHookSessionKey {
-    /// The top-level JSON key both stdin-delivering agents use.
+    /// The top-level JSON key Claude Code and Codex use.
     static let payloadKey = "session_id"
+
+    /// The top-level JSON key Copilot uses.
+    static let copilotPayloadKey = "sessionId"
 
     /// The top-level JSON key naming the file the reported conversation is persisted to.
     static let transcriptPathKey = "transcript_path"
@@ -56,11 +64,13 @@ public enum AgentHookSessionKey {
     /// What a hook's stdin `payload` reports about the agent's conversation. An absent, empty,
     /// non-JSON, or non-object payload is `unreported`: the signal it accompanies must still be
     /// recorded, so nothing here throws. `transcriptExists` is the file probe, injectable for tests.
-    public static func report(inHookPayload payload: Data?, transcriptExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) })
-        -> AgentHookSessionKeyReport
-    {
+    /// `agent` selects the payload's key naming; nil reads the Claude Code and Codex shape.
+    public static func report(
+        inHookPayload payload: Data?, agent: CodingAgent? = nil,
+        transcriptExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> AgentHookSessionKeyReport {
         guard let payload, !payload.isEmpty, let object = try? JSONSerialization.jsonObject(with: payload), let fields = object as? [String: Any],
-            let value = fields[payloadKey] as? String
+            let value = fields[agent == .copilot ? copilotPayloadKey : payloadKey] as? String
         else { return .unreported }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .unreported }

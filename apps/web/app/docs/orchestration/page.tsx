@@ -38,7 +38,7 @@ those children to a verified finish. You work through the Spaces MCP tools.
 - spaces_workspace_create(project, branch): new worktree on a new branch.
   spaces_workspace_start(workspace) ensures it is running before you spawn into it.
 - spaces_agent_spawn(command, workspace[, device, title]): start a child coding
-  agent (claude, codex, or opencode) in a workspace. Returns once the child is
+  agent (claude, codex, opencode, or copilot) in a workspace. Returns once the child is
   ready for input. It does not send a prompt. It subscribes you to the child
   when it can; the result's subscribed field says whether it did.
 - spaces_terminal_send(session, text[, submit]): send the child its prompt,
@@ -152,8 +152,8 @@ export default function OrchestrationDocsPage() {
           spaces agent spawn &middot; spaces_agent_spawn
         </p>
         <Prose>
-          Starts a supported agent (<InlineCode>claude</InlineCode>, <InlineCode>codex</InlineCode>, or{" "}
-          <InlineCode>opencode</InlineCode>) in a fresh terminal and waits until it is ready for input
+          Starts a supported agent (<InlineCode>claude</InlineCode>, <InlineCode>codex</InlineCode>,{" "}
+          <InlineCode>opencode</InlineCode>, or <InlineCode>copilot</InlineCode>) in a fresh terminal and waits until it is ready for input
           before returning. It sends no prompt; deliver the first one with{" "}
           <Cmd>spaces terminal send</Cmd>. Flags: <InlineCode>--command</InlineCode> (required),{" "}
           <InlineCode>--workspace</InlineCode> (defaults to the workspace containing the current
