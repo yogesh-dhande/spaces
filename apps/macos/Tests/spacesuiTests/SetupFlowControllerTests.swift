@@ -8,9 +8,9 @@ import Testing
 /// The launch gate for the coding-agents setup step. Spaces never writes an agent's config without
 /// being asked, so this decides only whether to *offer* the install.
 @Suite @MainActor struct SetupFlowControllerTests {
-    private let currentRevision = "7:claudeCode,codex,opencode,copilot"
+    private let currentRevision = "7:claudeCode,codex,opencode,copilot,pi"
 
-    private let staleRevision = "6:claudeCode,codex,opencode,copilot"
+    private let staleRevision = "6:claudeCode,codex,opencode,copilot,pi"
 
     private func agent(_ kind: CodingAgent, available: Bool, installState: AgentHookInstallState) -> AgentHookStatus {
         AgentHookStatus(kind: kind, displayName: kind.displayName, available: available, installState: installState)
@@ -53,11 +53,11 @@ import Testing
 
     /// A release that supports a new agent re-offers the step even when the hooks are unchanged.
     @Test func dismissalMadeBeforeAnAgentWasSupportedDoesNotSuppressTheStep() {
-        let withoutCopilot = "7:claudeCode,codex,opencode"
-        let needsHooks = [agent(.copilot, available: true, installState: .notInstalled)]
+        let withoutPi = "7:claudeCode,codex,opencode,copilot"
+        let needsHooks = [agent(.pi, available: true, installState: .notInstalled)]
 
-        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedRevision: withoutCopilot, currentRevision: currentRevision))
-        #expect(requires(needsHooks, dismissed: withoutCopilot))
+        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedRevision: withoutPi, currentRevision: currentRevision))
+        #expect(requires(needsHooks, dismissed: withoutPi))
     }
 
     /// An unreachable local daemon reports nothing, not "nothing to do". The step is omitted so launch

@@ -165,6 +165,40 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
         XCTAssertNil(TerminalForegroundProcessInspector.classify(language))
     }
 
+    /// An npm install runs `node .../@earendil-works/pi-coding-agent/dist/bundle/cli.js`, which sets
+    /// `process.title = "pi"`; on macOS that overwrites the argv area, so the inspector sees argv `["pi"]`
+    /// under the node executable (verified against pi 1.1.0). A bun-compiled standalone binary is named `pi`.
+    func testClassifiesPiNodeAndNativeShapes() {
+        let titledNode = TerminalForegroundProcessSnapshot(pid: 120, executablePath: "/opt/homebrew/bin/node", argv: ["pi"])
+        let native = TerminalForegroundProcessSnapshot(pid: 121, executablePath: "/Users/me/.local/bin/pi", argv: ["pi", "--model", "sonnet"])
+        let untitledNode = TerminalForegroundProcessSnapshot(
+            pid: 122, executablePath: "/opt/homebrew/bin/node",
+            argv: ["node", "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"])
+
+        for process in [titledNode, native, untitledNode] {
+            XCTAssertEqual(TerminalForegroundProcessInspector.classify(process)?.detectedAgentKind, .pi, "pid \(process.pid)")
+            XCTAssertEqual(TerminalForegroundProcessInspector.classify(process)?.displayLabel, "pi", "pid \(process.pid)")
+        }
+    }
+
+    /// `process.title` keeps argc, so `pi --model x "fix it"` reads back as argv[0] plus empty words. The
+    /// relaunch must be the bare command, not one that hands pi empty prompts.
+    func testTitleOverwrittenArgumentsRelaunchAsTheBareCommand() {
+        let titled = TerminalForegroundProcessSnapshot(pid: 124, executablePath: "/opt/homebrew/bin/node", argv: ["pi", "", "", ""])
+        let snapshot = TerminalForegroundProcessInspector.classify(titled)
+        XCTAssertEqual(snapshot?.detectedAgentKind, .pi)
+        XCTAssertEqual(snapshot?.agentCommand, "pi")
+        XCTAssertEqual(snapshot?.displayCommand, "pi")
+    }
+
+    /// The deprecated 0.73.x package lacks the extension events the integration needs, so it is not pi.
+    func testDoesNotClassifyTheDeprecatedPiPackageAsPi() {
+        let deprecated = TerminalForegroundProcessSnapshot(
+            pid: 123, executablePath: "/opt/homebrew/bin/node",
+            argv: ["node", "/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"])
+        XCTAssertNil(TerminalForegroundProcessInspector.classify(deprecated))
+    }
+
     func testDoesNotClassifyShellOrUnknownProcess() {
         let shell = TerminalForegroundProcessSnapshot(pid: 106, executablePath: "/bin/zsh", argv: ["zsh"])
         let unknown = TerminalForegroundProcessSnapshot(pid: 107, executablePath: "/usr/bin/vim", argv: ["vim", "README.md"])

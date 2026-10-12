@@ -57,6 +57,20 @@ extension CodingAgent {
                     kind: .copilot, executableNames: ["copilot"], nodeScriptNames: ["copilot", "copilot.js"],
                     nodePathFragments: ["/@github/copilot/"])
             ]
+        case .pi:
+            // An npm install runs `node .../@earendil-works/pi-coding-agent/dist/bundle/cli.js`, which sets
+            // `process.title = "pi"`. On macOS that overwrites the whole argv area, so `ps` shows comm and
+            // args `pi` and the inspector sees argv `["pi"]` under a node executable; its argv[0] candidate
+            // is what matches `executableNames` (verified against pi 1.1.0). A bun-compiled standalone
+            // binary is named `pi`. The deprecated `@mariozechner/pi-coding-agent` package (0.73.x) lacks the
+            // extension events the integration needs, so its path is not matched; once it sets its title it
+            // still reads as `pi`, and its row gets no status because the Spaces extension registers nothing
+            // below pi 1.1.0.
+            return [
+                CodingAgentDetectionVariant(
+                    kind: .pi, executableNames: ["pi"], nodeScriptNames: ["pi"],
+                    nodePathFragments: ["/@earendil-works/pi-coding-agent/"])
+            ]
         }
     }
 }
@@ -69,6 +83,7 @@ extension TerminalDetectedAgentKind {
         case .codex: .codex
         case .opencode: .opencode
         case .copilot: .copilot
+        case .pi: .pi
         }
     }
 }

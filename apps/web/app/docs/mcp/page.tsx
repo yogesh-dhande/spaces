@@ -8,7 +8,7 @@ import { RefTable } from "../components/ref-table";
 export const metadata: Metadata = {
   title: "MCP tools",
   description:
-    "Connect Claude Code, Codex, opencode, or GitHub Copilot CLI to Spaces and see the tools they get.",
+    "Connect Claude Code, Codex, opencode, GitHub Copilot CLI, or pi to Spaces and see the tools they get.",
 };
 
 const TOOL_ROWS: [string, string][] = [
@@ -34,7 +34,7 @@ const TOOL_ROWS: [string, string][] = [
   ["spaces_agent_status", "Read one agent session's status, brief summary, and context."],
   [
     "spaces_agent_spawn",
-    "Start a supported agent (claude, codex, opencode, or copilot) in a workspace and wait until it is ready for input.",
+    "Start a supported agent (claude, codex, opencode, copilot, or pi) in a workspace and wait until it is ready for input.",
   ],
   ["spaces_agent_kill", "End a coding-agent session and its terminal."],
   ["spaces_agent_subscribe", "Watch an agent from this terminal; get told when it goes blocked, done, or exits."],
@@ -58,7 +58,7 @@ export default function McpReferencePage() {
       <Section title="What it is">
         <Prose>
           <Cmd>spaces mcp</Cmd> starts a Model Context Protocol server: an MCP client (a coding agent
-          such as Claude Code, Codex, opencode, or GitHub Copilot CLI) launches it as a subprocess and calls its tools
+          such as Claude Code, Codex, opencode, GitHub Copilot CLI, or pi) launches it as a subprocess and calls its tools
           directly, over standard input and output. Every call runs against the same Spaces service on
           this machine that the app and the CLI use, so an agent sees the same projects, workspaces, and
           terminals you do.
@@ -104,6 +104,9 @@ env_vars = ["SPACES_TERMINAL_TRACKING_ID", "SPACES_AUTOMATION_RUN_ID"]`}</CodeBl
         <p className="mt-4 text-sm font-semibold text-foreground">GitHub Copilot CLI</p>
         <Prose>Run once in your terminal.</Prose>
         <CodeBlock>{`copilot mcp add spaces -- spaces mcp`}</CodeBlock>
+        <p className="mt-4 text-sm font-semibold text-foreground">pi</p>
+        <Prose>Run once in your terminal.</Prose>
+        <CodeBlock>{`pi mcp add spaces -- spaces mcp`}</CodeBlock>
       </Section>
 
       <Section id="tools" title="Tools">

@@ -47,6 +47,66 @@ final class CodingAgentResumeCommandTests: XCTestCase {
         XCTAssertFalse(both.contains("--session-id"))
     }
 
+    // MARK: - pi: --session <key> after the executable
+
+    func testPiInsertsSessionSelectorAfterTheExecutable() {
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi", sessionKey: "K"), "pi --session K")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi --model sonnet --verbose", sessionKey: "K"), "pi --session K --model sonnet --verbose")
+    }
+
+    /// A pi command naming another conversation has it swapped for the captured one rather than gaining a
+    /// second selector: `--session` is replaced in place, and the options that pick a conversation some
+    /// other way (`--fork`, `--session-id`, `-c`/`--continue`, `-r`/`--resume`) are dropped.
+    /// pi's key is its session file's path, which is passed to the shell as one word.
+    func testPiQuotesASessionFilePathKey() {
+        let path = "/Users/me/My Sessions/--repo--/2026-10-12_abc.jsonl"
+        XCTAssertEqual(
+            CodingAgent.resumeCommand(launchCommand: "pi", sessionKey: path), "pi --session '/Users/me/My Sessions/--repo--/2026-10-12_abc.jsonl'")
+        XCTAssertEqual(
+            CodingAgent.resumeCommand(launchCommand: "pi --session OLD", sessionKey: path),
+            "pi --session '/Users/me/My Sessions/--repo--/2026-10-12_abc.jsonl'")
+        XCTAssertEqual(
+            CodingAgent.resumeCommand(launchCommand: "pi", sessionKey: "/Users/me/.pi/agent/sessions/x.jsonl"),
+            "pi --session /Users/me/.pi/agent/sessions/x.jsonl")
+    }
+
+    func testPiReplacesOrDropsOptionsThatNameADifferentConversation() {
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi --session OLD", sessionKey: "K"), "pi --session K")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi --session=OLD --verbose", sessionKey: "K"), "pi --session=K --verbose")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi -c", sessionKey: "K"), "pi --session K")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi --continue --verbose", sessionKey: "K"), "pi --session K --verbose")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi -r --verbose", sessionKey: "K"), "pi --session K --verbose")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi --resume", sessionKey: "K"), "pi --session K")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi --fork X", sessionKey: "K"), "pi --session K")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "pi --session-id 1111 --verbose", sessionKey: "K"), "pi --session K --verbose")
+    }
+
+    /// A resumed conversation already holds the prompt it started with, so the positional prompt is not
+    /// sent again; an option's value is never mistaken for it.
+    func testPiStripsThePositionalPromptButNotAnOptionValue() {
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: #"pi "fix the build""#, sessionKey: "K"), "pi --session K")
+        XCTAssertEqual(
+            CodingAgent.resumeCommand(launchCommand: #"pi --model sonnet:high "fix the build""#, sessionKey: "K"),
+            "pi --session K --model sonnet:high")
+    }
+
+    /// Runs that print and exit, serve a protocol, leave no session, or manage pi itself have no
+    /// conversation to rejoin and come back exactly as typed.
+    func testPiOneShotRunsAreRelaunchedExactlyAsTyped() {
+        let oneShots = [
+            #"pi -p "summarise the diff""#, #"pi --print "x""#, "pi --mode json", "pi --mode rpc", "pi --no-session", "pi --export session.jsonl",
+            "pi --list-models", "pi --version", "pi --help", "pi install npm:some-extension", "pi update", "pi auth print-api-key",
+            "pi mcp list", "pi config",
+        ]
+        for command in oneShots {
+            XCTAssertTrue(CodingAgent.launchIsOneShotJob(launchCommand: command), command)
+            XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: command, sessionKey: "K"), command)
+        }
+        XCTAssertFalse(CodingAgent.launchIsOneShotJob(launchCommand: "pi"))
+        XCTAssertFalse(CodingAgent.launchIsOneShotJob(launchCommand: #"pi "install the dependencies""#), "a prompt is not a subcommand")
+        XCTAssertFalse(CodingAgent.launchIsOneShotJob(launchCommand: "pi --model sonnet:high --thinking high"))
+    }
+
     /// A relaunch command keeps the executable the agent was invoked with, so every name a detection
     /// variant matches has to reach an agent here, and so does each agent's own canonical name for the node
     /// wrapper that is rewritten to it. A name this scan does not know silently skips the rewrite, and the
