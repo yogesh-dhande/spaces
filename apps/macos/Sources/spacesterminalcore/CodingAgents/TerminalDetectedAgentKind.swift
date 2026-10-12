@@ -10,12 +10,16 @@ import Foundation
 ///
 /// Raw values are load-bearing: they are persisted in the SQLite `foreground_detected_agent_kind`
 /// column (see `TerminalSessionPersistence`) and decoded off the device-overview wire in
-/// `spacescli/SpacesCommand.swift`. Never rename a case or change its raw value.
+/// `spacescli/SpacesCommand.swift`. Never rename a case or change its raw value. A client decoding a
+/// wire field typed by this enum must tolerate raw values it does not know (a newer daemon can detect an
+/// agent an older client lacks): a list drops the element (see `SkippingUnreadableList`) and an optional
+/// field reads as nil.
 public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable, CaseIterable {
     case codex
     case claude
     case claudeCode = "claude-code"
     case opencode
+    case copilot
 
     public var displayLabel: String {
         switch self {
@@ -23,6 +27,7 @@ public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable, Cas
         case .claude: "claude"
         case .claudeCode: "claude-code"
         case .opencode: "opencode"
+        case .copilot: "copilot"
         }
     }
 
@@ -32,6 +37,7 @@ public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable, Cas
         case .claude: "claude"
         case .claudeCode: "claude-code"
         case .opencode: "opencode"
+        case .copilot: "copilot"
         }
     }
 }

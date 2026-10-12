@@ -149,7 +149,7 @@ export const faqItems: FaqItem[] = [
     question: "How does Spaces know what each agent is doing?",
     answer: (
       <>
-        Spaces installs status hooks for Claude Code, Codex, and opencode, so
+        Spaces installs status hooks for Claude Code, Codex, opencode, and GitHub Copilot CLI, so
         the sidebar shows whether each agent is working, waiting on you, or
         done. An agent you start in a Spaces terminal is also recognized
         without hooks. Each agent can also keep a brief, a short status page

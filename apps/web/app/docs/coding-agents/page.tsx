@@ -7,7 +7,7 @@ import { Prose, Section } from "../components/section";
 export const metadata: Metadata = {
   title: "Agent status",
   description:
-    "How Spaces knows whether Claude Code, Codex, or opencode is working, waiting for you, or done.",
+    "How Spaces knows whether Claude Code, Codex, opencode, or GitHub Copilot CLI is working, waiting for you, or done.",
 };
 
 export default function CodingAgentsDocsPage() {
@@ -19,8 +19,9 @@ export default function CodingAgentsDocsPage() {
     >
       <Section id="supported-agents" title="Supported agents">
         <Prose>
-          Spaces tracks Claude Code, Codex, and opencode. Start any of them in a Spaces terminal and it
-          shows up as its own row, listed under Coding Agents in that terminal&apos;s workspace.
+          Spaces tracks Claude Code, Codex, opencode, and GitHub Copilot CLI. Start any of them in a
+          Spaces terminal and it shows up as its own row, listed under Coding Agents in that
+          terminal&apos;s workspace.
         </Prose>
       </Section>
 
@@ -33,14 +34,34 @@ export default function CodingAgentsDocsPage() {
           <InlineCode>~/.claude/settings.json</InlineCode> for Claude Code,{" "}
           <InlineCode>~/.codex/hooks.json</InlineCode> for Codex (which also turns on Codex&apos;s hooks
           feature), and a plugin file under{" "}
-          <InlineCode>~/.config/opencode/plugin/</InlineCode> for opencode.
+          <InlineCode>~/.config/opencode/plugin/</InlineCode> for opencode. For Copilot it writes
+          its own file, <InlineCode>~/.copilot/hooks/spaces.json</InlineCode>, and leaves your other
+          Copilot hook files alone.
         </Prose>
         <Prose>
           Settings &rarr; Coding Agents shows, per agent, one of five states: not installed, out of
           date, switched off in the agent, not yet trusted in Codex, or installed. A row shows a button
           only when there is something to do: <strong>Install</strong>, <strong>Update</strong>, or, for
           Codex hooks waiting for trust, <strong>Trust in Codex</strong>. Hooks switched off in the
-          agent are turned back on in the agent itself.
+          agent are turned back on in the agent itself; for Copilot that means the{" "}
+          <InlineCode>disableAllHooks</InlineCode> setting in{" "}
+          <InlineCode>~/.copilot/settings.json</InlineCode> (<InlineCode>copilot config disableAllHooks false</InlineCode>).
+        </Prose>
+        <Prose>
+          Copilot reports nothing until you send its first prompt, so a Copilot you just launched shows
+          as a row once Spaces sees it running, and its status follows from the first prompt on. Copilot
+          shows as blocked only while a permission prompt or a question from the agent is waiting for
+          you. Pressing Esc on a permission prompt ends the turn without a hook, so that row stays
+          blocked until your next prompt.
+        </Prose>
+        <Prose>
+          Copilot asks whether you trust a folder each time you start it in one it has not
+          remembered, and runs nothing until you answer. The first time it asks in a project, choose{" "}
+          <strong>Yes, and remember this folder</strong>, or trust <InlineCode>~/spaces</InlineCode>{" "}
+          (where Spaces keeps its workspaces) and your project folders in Copilot; trusting a folder
+          covers the folders under it. Otherwise an agent Spaces spawns or an automation answers the
+          question with its prompt and does nothing, so trust the folders first and spawned agents and
+          automations can start without a person at the keyboard.
         </Prose>
         <Prose>
           Codex runs no hook until you trust it. <strong>Trust in Codex</strong> first lists the exact

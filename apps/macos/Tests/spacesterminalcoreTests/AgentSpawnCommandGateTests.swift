@@ -8,7 +8,8 @@ final class AgentSpawnCommandGateTests: XCTestCase {
     func testMatchingResolvesSupportedAgentsAcrossCommandShapes() {
         let cases: [(command: String, expected: CodingAgent?)] = [
             ("claude", .claudeCode), ("codex --yolo", .codex), ("FOO=1 claude", .claudeCode), ("env FOO=1 codex", .codex),
-            ("/usr/local/bin/claude -c", .claudeCode), ("opencode", .opencode), ("vim", nil), ("", nil), ("env", nil),
+            ("/usr/local/bin/claude -c", .claudeCode), ("opencode", .opencode), ("copilot -i hi", .copilot), ("/opt/homebrew/bin/copilot", .copilot),
+            ("vim", nil), ("", nil), ("env", nil),
         ]
         for testCase in cases {
             XCTAssertEqual(CodingAgent.matching(command: testCase.command), testCase.expected, "matching(command: \"\(testCase.command)\")")
@@ -24,6 +25,7 @@ final class AgentSpawnCommandGateTests: XCTestCase {
         XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "claude"), .claudeCode)
         XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "codex --yolo"), .codex)
         XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "env FOO=1 opencode"), .opencode)
+        XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "copilot --allow-all-tools"), .copilot)
     }
 
     /// Registry-completeness check: every agent's own `primaryCommandName` must resolve through the

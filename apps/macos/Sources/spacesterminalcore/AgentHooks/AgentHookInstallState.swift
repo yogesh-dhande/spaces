@@ -13,10 +13,11 @@ public enum AgentHookInstallState: String, Sendable, Equatable, Codable {
     /// `spaces` other than the one this device resolves or hooks the agent's own config has not enabled.
     /// Reinstalling brings them current.
     case outdated
-    /// Codex only: entries this build wrote that the user switched off in Codex. Codex runs no hook it
-    /// was told to stop running, whatever its trust says, and Spaces never switches one back on, so the
-    /// user is sent to Codex to turn it on again. Reported ahead of `awaitingTrust` when both apply,
-    /// since a hook that is switched off stays switched off however the trust goes.
+    /// Codex and Copilot only: entries this build wrote that the user switched off in the agent. Codex
+    /// runs no hook it was told to stop running, whatever its trust says; Copilot runs none while its
+    /// own `disableAllHooks` setting is on. Spaces never switches one back on, so the user is sent to
+    /// the agent to turn it on again. Reported ahead of `awaitingTrust` when both apply, since a hook
+    /// that is switched off stays switched off however the trust goes.
     case disabledByAgent
     /// Codex only: every bound event carries this build's exact Spaces entry and the `hooks` feature is
     /// on, but Codex has not trusted those entries at their current text, so it runs none of them.

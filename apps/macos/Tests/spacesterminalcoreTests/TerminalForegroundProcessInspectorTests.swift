@@ -136,6 +136,35 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
         XCTAssertEqual(TerminalForegroundProcessInspector.classify(npmOpencode)?.displayCommand, "opencode tui")
     }
 
+    /// Homebrew and standalone installs run the native binary directly, and auto-update runs a newer build
+    /// from a package cache under the same name; an npm install runs `npm-loader.js` under node, which
+    /// spawns the native `copilot` from the platform package with inherited stdio.
+    func testClassifiesCopilotNativeAndNpmShapes() {
+        let native = TerminalForegroundProcessSnapshot(pid: 110, executablePath: "/opt/homebrew/bin/copilot", argv: ["copilot", "-i", "fix lint"])
+        let cached = TerminalForegroundProcessSnapshot(
+            pid: 111, executablePath: "/Users/me/Library/Caches/copilot/pkg/universal/1.0.95/copilot", argv: ["copilot"])
+        let npmLoader = TerminalForegroundProcessSnapshot(
+            pid: 112, executablePath: "/opt/homebrew/bin/node",
+            argv: ["node", "/opt/homebrew/lib/node_modules/@github/copilot/npm-loader.js", "--resume", "abc"])
+        let npmNative = TerminalForegroundProcessSnapshot(
+            pid: 113, executablePath: "/opt/homebrew/lib/node_modules/@github/copilot/node_modules/@github/copilot-darwin-arm64/copilot",
+            argv: ["copilot"])
+
+        for process in [native, cached, npmLoader, npmNative] {
+            XCTAssertEqual(TerminalForegroundProcessInspector.classify(process)?.detectedAgentKind, .copilot, "pid \(process.pid)")
+            XCTAssertEqual(TerminalForegroundProcessInspector.classify(process)?.displayLabel, "copilot", "pid \(process.pid)")
+        }
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(native)?.displayCommand, "copilot -i 'fix lint'")
+        XCTAssertEqual(TerminalForegroundProcessInspector.classify(npmLoader)?.displayCommand, "copilot --resume abc")
+    }
+
+    func testDoesNotClassifyAnotherGitHubNpmPackageAsCopilot() {
+        let language = TerminalForegroundProcessSnapshot(
+            pid: 114, executablePath: "/opt/homebrew/bin/node",
+            argv: ["node", "/opt/homebrew/lib/node_modules/@github/copilot-language-server/dist/language-server.js", "--stdio"])
+        XCTAssertNil(TerminalForegroundProcessInspector.classify(language))
+    }
+
     func testDoesNotClassifyShellOrUnknownProcess() {
         let shell = TerminalForegroundProcessSnapshot(pid: 106, executablePath: "/bin/zsh", argv: ["zsh"])
         let unknown = TerminalForegroundProcessSnapshot(pid: 107, executablePath: "/usr/bin/vim", argv: ["vim", "README.md"])

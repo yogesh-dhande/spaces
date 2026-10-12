@@ -36,6 +36,15 @@ public enum AgentHookCommand {
     /// are read from its own config, which the rewrite this version performs re-enters.
     public static let hookVersion = 5
 
+    /// What the launch coding-agents setup step's dismissal is remembered against: the hook version and
+    /// the agents Spaces supports, e.g. `5:claudeCode,codex,opencode,copilot`. The step returns when a
+    /// release changes the hooks or supports a new agent. It is separate from `hookVersion` because a
+    /// new agent must re-offer the step without marking every installed hook out of date; install state
+    /// still reads `hookVersion` alone, so an existing installed hook is unaffected.
+    public static var setupRevision: String {
+        "\(hookVersion):" + CodingAgent.allCases.map(\.rawValue).joined(separator: ",")
+    }
+
     /// Version-less ownership token. Every Spaces-owned entry, of every version, contains it.
     ///
     /// Never embed the version here. Stripping on reinstall matches on this token, and that is exactly
@@ -48,8 +57,16 @@ public enum AgentHookCommand {
     static func versionedMarker(_ version: Int = hookVersion) -> String { "\(marker) v\(version)" }
 
     /// Builds the `spaces agent signal` invocation for `event`.
-    public static func signalCommand(event: AgentHookLifecycleEvent, spacesExecutablePath: String) -> String {
-        "\(shellQuoted(spacesExecutablePath)) agent signal \(event.rawValue) >/dev/null 2>&1 || true # \(versionedMarker())"
+    ///
+    /// `agent` is named on the command only by agents whose hook payload or lifecycle needs agent-specific
+    /// handling in the CLI and daemon (Copilot: its payload field names, its notification filter, its
+    /// phantom `sessionEnd`). Claude Code and Codex omit it, so their entries read as they always have.
+    ///
+    /// The `|| true` and discarded output are load-bearing for Copilot beyond tidiness: a non-zero exit
+    /// from one of its `preToolUse` hooks denies the tool.
+    public static func signalCommand(event: AgentHookLifecycleEvent, spacesExecutablePath: String, agent: CodingAgent? = nil) -> String {
+        let agentOption = agent.map { " --agent \($0.rawValue)" } ?? ""
+        return "\(shellQuoted(spacesExecutablePath)) agent signal \(event.rawValue)\(agentOption) >/dev/null 2>&1 || true # \(versionedMarker())"
     }
 
     /// True when `command` is a Spaces-owned hook command (carries the marker), whatever its version.

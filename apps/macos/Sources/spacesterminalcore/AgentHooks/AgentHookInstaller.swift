@@ -61,6 +61,14 @@ public struct AgentHookInstallOutcome: Sendable, Equatable, Codable {
         self.agents = agents
         self.failures = failures
     }
+
+    /// Entries naming an agent this build does not know are dropped (see `SkippingUnreadableList`), so a
+    /// newer daemon's install result still lands for the agents this client can show.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        agents = try container.decodeSkippingUnreadable(AgentHookStatus.self, forKey: .agents)
+        failures = try container.decodeSkippingUnreadable(AgentHookInstallFailure.self, forKey: .failures)
+    }
 }
 
 /// A failure that stops the whole install request rather than one agent's share of it.

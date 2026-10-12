@@ -46,6 +46,17 @@ extension CodingAgent {
                     kind: .opencode, executableNames: ["opencode", "opencode.exe"], nodeScriptNames: ["opencode", "opencode.js"],
                     nodePathFragments: ["/opencode-ai/", "/opencode/bin/opencode"])
             ]
+        case .copilot:
+            // Homebrew and standalone installs run the native `copilot` binary directly (and keep that
+            // name when auto-update runs a newer build from its package cache). An npm install runs
+            // `node .../@github/copilot/npm-loader.js`, which spawns the native `copilot` child from
+            // `@github/copilot-<platform>-<arch>/` with inherited stdio; either process classifies as
+            // Copilot, the script by its package path since `npm-loader.js` alone says nothing.
+            return [
+                CodingAgentDetectionVariant(
+                    kind: .copilot, executableNames: ["copilot"], nodeScriptNames: ["copilot", "copilot.js"],
+                    nodePathFragments: ["/@github/copilot/"])
+            ]
         }
     }
 }
@@ -57,6 +68,7 @@ extension TerminalDetectedAgentKind {
         case .claude, .claudeCode: .claudeCode
         case .codex: .codex
         case .opencode: .opencode
+        case .copilot: .copilot
         }
     }
 }

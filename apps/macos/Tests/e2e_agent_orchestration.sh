@@ -40,7 +40,7 @@ source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 
 MATRIX_ENABLED="${SPACES_E2E_AGENT_MATRIX:-0}"
 # Providers probed by Part B: <CodingAgent display> maps to the PATH executable name.
-MATRIX_PROVIDERS=(claude codex opencode)
+MATRIX_PROVIDERS=(claude codex opencode copilot)
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2

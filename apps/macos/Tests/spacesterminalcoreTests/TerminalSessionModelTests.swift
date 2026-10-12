@@ -227,6 +227,20 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertNil(decoded.workingDirectory)
     }
 
+    /// A newer daemon can detect an agent this build has no kind for. The session still decodes, reading
+    /// as a plain terminal, instead of the whole runtime state failing.
+    func testRuntimeStateReadsAnUnknownDetectedAgentKindAsNoAgent() throws {
+        func decode(kind: String) throws -> TerminalSessionRuntimeState {
+            let json = """
+                {"sessionID":"s","servicePID":1,"state":"running","updatedAt":"2026-05-08T00:00:00Z","foregroundDetectedAgentKind":"\(kind)"}
+                """
+            return try JSONDecoder().decode(TerminalSessionRuntimeState.self, from: Data(json.utf8))
+        }
+
+        XCTAssertEqual(try decode(kind: "copilot").foregroundDetectedAgentKind, .copilot)
+        XCTAssertNil(try decode(kind: "futureagent").foregroundDetectedAgentKind)
+    }
+
     func testRuntimeStatePersistenceRoundTripsForegroundMetadata() throws {
         let sessionID = "session-foreground-runtime"
         let paths = try TerminalSessionPaths.forSession(id: sessionID)

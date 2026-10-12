@@ -89,11 +89,11 @@ import workspacecore
 
     /// Whether launch should even ask the daemon for agent status. A dismissal is the only thing that
     /// can suppress the probe, because it is the only thing a probe could not overturn: the user has
-    /// said no for this hook version. Every other launch must ask, since the answer is exactly what
+    /// said no for this setup revision. Every other launch must ask, since the answer is exactly what
     /// this cannot know locally — whether the user has since installed a coding agent whose hooks are
     /// missing. Suppressing the probe on "nothing to install right now" would freeze that answer
     /// forever and silently retire the step for a user who installs Claude or Codex tomorrow.
-    static func shouldProbeLocalAgents(dismissedHookVersion: Int?, currentHookVersion: Int) -> Bool { dismissedHookVersion != currentHookVersion }
+    static func shouldProbeLocalAgents(dismissedRevision: String?, currentRevision: String) -> Bool { dismissedRevision != currentRevision }
 
     /// Whether the coding-agents step should be shown.
     ///
@@ -102,8 +102,8 @@ import workspacecore
     ///
     /// The decision reads This Mac only. A paired remote may be asleep or unreachable, and blocking
     /// launch on its round trip would hang the app; the step's device picker still installs on remotes.
-    static func requiresCodingAgentsSetup(localAgents: [AgentHookStatus]?, dismissedHookVersion: Int?, currentHookVersion: Int) -> Bool {
-        guard let localAgents, shouldProbeLocalAgents(dismissedHookVersion: dismissedHookVersion, currentHookVersion: currentHookVersion) else {
+    static func requiresCodingAgentsSetup(localAgents: [AgentHookStatus]?, dismissedRevision: String?, currentRevision: String) -> Bool {
+        guard let localAgents, shouldProbeLocalAgents(dismissedRevision: dismissedRevision, currentRevision: currentRevision) else {
             return false
         }
         // Anything short of `current` keeps the step, including hooks an agent has not trusted and
@@ -137,7 +137,7 @@ import workspacecore
                 guard let context = await connection.value else { return nil }
                 return Self.probe("the daemon status") { try SpacesDeviceClient.daemonStatus(context: context) }
             })
-        if Self.shouldProbeLocalAgents(dismissedHookVersion: dismissedHookVersion(), currentHookVersion: AgentHookCommand.hookVersion) {
+        if Self.shouldProbeLocalAgents(dismissedRevision: dismissedRevision(), currentRevision: AgentHookCommand.setupRevision) {
             agentStatusWait = LaunchProbeWait(
                 description: "the launch coding-agents step", deadline: deadline,
                 task: Task.detached(priority: .userInitiated) {
@@ -199,8 +199,8 @@ import workspacecore
     /// the workspace UI. The status probe runs here rather than inside `CodingAgentsView` because the
     /// answer decides whether the step exists at all.
     private func enterCodingAgentsStepIfNeeded() {
-        let currentVersion = AgentHookCommand.hookVersion
-        guard Self.shouldProbeLocalAgents(dismissedHookVersion: dismissedHookVersion(), currentHookVersion: currentVersion) else {
+        let currentRevision = AgentHookCommand.setupRevision
+        guard Self.shouldProbeLocalAgents(dismissedRevision: dismissedRevision(), currentRevision: currentRevision) else {
             enterRestoreSessionsStepIfNeeded()
             return
         }
@@ -209,7 +209,7 @@ import workspacecore
             guard let self else { return }
             let agents = await agentStatusWait?.value()
             guard
-                Self.requiresCodingAgentsSetup(localAgents: agents, dismissedHookVersion: dismissedHookVersion(), currentHookVersion: currentVersion)
+                Self.requiresCodingAgentsSetup(localAgents: agents, dismissedRevision: dismissedRevision(), currentRevision: currentRevision)
             else {
                 // Nothing to install right now: either no detected agent needs hooks, or the daemon
                 // never answered. Do not record a dismissal: the user has not seen the step, and
@@ -278,7 +278,7 @@ import workspacecore
     /// hook version". The user has seen the step and decided, whether or not they installed anything.
     /// A later Spaces release that changes the hooks bumps `hookVersion` and asks once more.
     @objc private func dismissCodingAgentsStep() {
-        recordDismissedHookVersion()
+        recordDismissedRevision()
         stopCodingAgentsStep()
         enterRestoreSessionsStepIfNeeded()
     }
@@ -430,17 +430,19 @@ import workspacecore
 
     // MARK: - Dismissal marker
 
-    private func dismissedHookVersion() -> Int? {
+    /// A value stored by an older build (a bare hook version such as `"5"`) never equals a current
+    /// revision, so the step is offered once more when a detected agent needs hooks.
+    private func dismissedRevision() -> String? {
         guard let database, let stored = try? database.setting(key: ClientSettingsKey.agentHooksSetupDismissedVersion) else { return nil }
-        return Int(stored)
+        return stored
     }
 
     /// Records that the user saw the step and decided. Called only from `dismissCodingAgentsStep`, the
-    /// Skip/Continue action: the marker means "the user said no to this hook version", never "Spaces
+    /// Skip/Continue action: the marker means "the user said no to this setup revision", never "Spaces
     /// found nothing to install", and writing it from anywhere else would suppress a step the user was
     /// never offered.
-    private func recordDismissedHookVersion() {
-        try? database?.setSetting(key: ClientSettingsKey.agentHooksSetupDismissedVersion, value: String(AgentHookCommand.hookVersion))
+    private func recordDismissedRevision() {
+        try? database?.setSetting(key: ClientSettingsKey.agentHooksSetupDismissedVersion, value: AgentHookCommand.setupRevision)
     }
 
     // MARK: - Layout

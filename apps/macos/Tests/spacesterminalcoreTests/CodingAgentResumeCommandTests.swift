@@ -553,6 +553,53 @@ final class CodingAgentResumeCommandTests: XCTestCase {
         XCTAssertEqual(result, "AGENT=claude claude --resume abc -c")
     }
 
+    // MARK: - Copilot: --resume <key> right after the executable
+
+    /// Copilot takes its prompt through `-i`, which a resumed conversation already contains, so the
+    /// relaunch drops it together with its value and keeps every other flag.
+    func testCopilotInsertsResumeAfterTheExecutableAndDropsTheInteractivePrompt() {
+        XCTAssertEqual(
+            CodingAgent.resumeCommand(launchCommand: #"copilot --model gpt-5.4 -i "fix the bug""#, sessionKey: "abc"),
+            "copilot --resume abc --model gpt-5.4")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "copilot --allow-all-tools", sessionKey: "abc"), "copilot --resume abc --allow-all-tools")
+    }
+
+    /// `--session-id` creates a new conversation under the given id and `--continue` resumes the most
+    /// recent one, so a command carrying either would name a second conversation beside the captured one.
+    func testCopilotDropsSessionIDAndContinueWhenItResumes() {
+        XCTAssertEqual(
+            CodingAgent.resumeCommand(launchCommand: "copilot --session-id 1111 --allow-all-tools", sessionKey: "abc"),
+            "copilot --resume abc --allow-all-tools")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "copilot --continue --yolo", sessionKey: "abc"), "copilot --resume abc --yolo")
+    }
+
+    func testCopilotReplacesAConversationTheCommandAlreadyNames() {
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "copilot --resume old --yolo", sessionKey: "abc"), "copilot --resume abc --yolo")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "copilot --resume=old", sessionKey: "abc"), "copilot --resume=abc")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "copilot --resume", sessionKey: "abc"), "copilot --resume abc")
+    }
+
+    /// A one-shot or non-session invocation has no conversation `--resume` can rejoin, so it comes back as
+    /// the command it was launched with.
+    func testCopilotOneShotAndSubcommandRunsAreNotResumed() {
+        for command in [
+            #"copilot -p "summarize" --allow-all-tools"#, #"copilot --prompt "summarize""#, "copilot --acp", "copilot --connect abc", "copilot mcp list",
+            "copilot config disableAllHooks true", "copilot login", "copilot update", "copilot help", "copilot version", "copilot workflow run x",
+        ] {
+            XCTAssertTrue(CodingAgent.launchIsOneShotJob(launchCommand: command), command)
+            XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: command, sessionKey: "abc"), command, command)
+            XCTAssertNil(CodingAgent.resumableSessionKey(launchCommand: command, sessionKey: "abc"), command)
+        }
+    }
+
+    func testCopilotInteractiveLaunchesAreSessions() {
+        for command in [
+            "copilot", #"copilot -i "fix it""#, "copilot --model mcp", "copilot --resume abc", "copilot --continue", "copilot --allow-tool shell mcp",
+        ] {
+            XCTAssertFalse(CodingAgent.launchIsOneShotJob(launchCommand: command), command)
+        }
+    }
+
     // MARK: - No key, or no supported agent, returns the command unchanged
 
     func testNilSessionKeyReturnsCommandUnchanged() {

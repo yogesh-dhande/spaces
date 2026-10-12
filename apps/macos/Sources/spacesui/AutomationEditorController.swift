@@ -150,7 +150,7 @@ import workspacecore
         addRow(workspaceRow, to: stack)
         self.workspaceRow = workspaceRow
         let agentCommandRow = host.settingsLabeledField(
-            name: "Agent command", hint: "Launches a supported coding agent (claude, codex, opencode); may carry flags.",
+            name: "Agent command", hint: "Launches a supported coding agent (\(CodingAgent.commandListText)); may carry flags.",
             control: makeAgentCommandField(seed: seed))
         addRow(agentCommandRow, to: stack)
         self.agentCommandRow = agentCommandRow
