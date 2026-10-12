@@ -18,6 +18,9 @@ extension CodingAgent {
     ///  - opencode: `-s <key>` at the end of the agent's own segment, which is where its session option is
     ///    accepted.
     ///  - Copilot: `--resume <key>` immediately after the executable, like Claude Code.
+    ///  - pi: `--session <key>` immediately after the executable, the key being the session file's path. A terminal pi's argv is usually just `pi`
+    ///    (it sets `process.title`, which hides the user's options from the process inspector), so most
+    ///    rewrites see a bare command; a Spaces-spawned pi carries the command Spaces built.
     ///
     /// Every rewrite stays inside the command's first segment (see `firstCommandSegmentRange(inCommand:)`),
     /// so a chained command such as `opencode && notify` hands the selector to the agent rather than to
@@ -36,14 +39,26 @@ extension CodingAgent {
         // Copilot's `--session-id` is the same option, and its `--continue` (resume the most recent
         // session) names a conversation of its own, so both go for the same reason.
         var withoutSessionID = launchCommand
-        if agent == .claudeCode || agent == .copilot { withoutSessionID = removingSessionIDOption(inCommand: withoutSessionID) }
+        if agent == .claudeCode || agent == .copilot { withoutSessionID = removingValueOption("--session-id", inCommand: withoutSessionID) }
         if agent == .copilot { withoutSessionID = removingBareFlag("--continue", inCommand: withoutSessionID) }
+        // pi names a conversation through four options besides `--session` (which the named-conversation
+        // swap below replaces in place): `--session-id` (create under this id), `--fork` (copy this session
+        // into a new one) and the bare `-c`/`--continue` and `-r`/`--resume` (latest session, pick one). Any
+        // of them next to the spliced `--session <key>` would open a conversation other than the captured one.
+        if agent == .pi {
+            for option in ["--session-id", "--fork"] { withoutSessionID = removingValueOption(option, inCommand: withoutSessionID) }
+            for flag in ["-c", "--continue", "-r", "--resume"] { withoutSessionID = removingBareFlag(flag, inCommand: withoutSessionID) }
+        }
         let command = agent.removingPrompt(inCommand: withoutSessionID)
+        // pi's key is its session file's path (see `AgentHookPiExtensionWriter`), which can carry any
+        // character a path can, so it is quoted as one shell word; every other agent's key is an id.
+        let selector = agent == .pi ? TerminalForegroundProcessInspector.posixQuoted(key) : key
         if let named = agent.namedConversation(inCommand: command) {
-            return command.replacingCharacters(in: named.range, with: named.separator + key)
+            return command.replacingCharacters(in: named.range, with: named.separator + selector)
         }
         switch agent {
         case .claudeCode, .copilot: return insert("--resume \(key)", afterExecutableTokenIn: command)
+        case .pi: return insert("--session \(selector)", afterExecutableTokenIn: command)
         case .codex: return insert("resume \(key)", afterExecutableTokenIn: command)
         case .opencode:
             let segment = CodingAgent.firstCommandSegmentRange(inCommand: command)
@@ -67,8 +82,8 @@ extension CodingAgent {
     /// Whether the command launches a run this rewrite must leave exactly as written rather than a
     /// conversation it can rejoin: `claude -p`/`--print`, a Claude Code subcommand run (`claude attach
     /// <id>`, `claude mcp ...`, `claude update`, and the rest of its `Commands:` list), `codex exec` (and
-    /// its `e` alias), `codex review`, `codex fork`, `opencode run` without `-i`/`--interactive`, and the Copilot runs
-    /// named in `oneShotLaunchMarkers`.
+    /// its `e` alias), `codex review`, `codex fork`, `opencode run` without `-i`/`--interactive`, and the Copilot
+    /// and pi runs named in `oneShotLaunchMarkers`.
     ///
     /// Most of those are jobs rather than sessions: they print an answer and exit. Codex additionally takes
     /// a one-shot run's conversation as `codex exec resume <key>`, after options whose arity only Codex
@@ -175,8 +190,22 @@ extension CodingAgent {
         // interactive prompt option is `-i`, which is not a marker. Subcommands are its `copilot --help`
         // command list.
         case .copilot: OneShotLaunchMarkers(options: ["-p", "--prompt", "--acp", "--connect"], subcommands: Self.copilotSubcommands)
+        // pi's `-p`/`--print` prints an answer and exits, `--mode` selects the json and rpc output modes
+        // (neither is the interactive TUI; `--mode text`, the interactive default, is caught too and
+        // relaunched without its conversation, accepted because markers carry no values and only commands
+        // Spaces built reach here, see `positionalPromptRule`), `--export` and `--list-models` print and exit, `--no-session`
+        // leaves no conversation to resume, and `--version`/`--help` print and exit. Subcommands are the
+        // `Commands:` list of pi 1.1.0's `--help`.
+        case .pi:
+            OneShotLaunchMarkers(
+                options: ["-p", "--print", "--mode", "--export", "--no-session", "--list-models", "-v", "--version", "-h", "--help"],
+                subcommands: Self.piSubcommands)
         }
     }
+
+    /// pi's own subcommands, its `Commands:` list including the `uninstall` alias (pi 1.1.0). A subcommand
+    /// run manages extensions, configuration or credentials rather than talking to a model.
+    private static let piSubcommands: Set<String> = ["install", "remove", "uninstall", "update", "list", "config", "auth", "mcp"]
 
     /// Copilot's own subcommands, its `Commands:` list plus `logout` (copilot 1.0.95). A subcommand run
     /// manages the installation or an account rather than talking to a model, and a name in the list is
@@ -211,6 +240,9 @@ extension CodingAgent {
     private var conversationSelectors: [String] {
         switch self {
         case .claudeCode, .copilot: ["--resume", "-r"]
+        // pi's `--resume`/`-r` takes no value (it opens a picker), so it is a bare flag removed before
+        // this scan rather than a selector.
+        case .pi: ["--session"]
         case .codex: ["resume"]
         case .opencode: ["--session", "-s"]
         }
@@ -457,7 +489,10 @@ extension CodingAgent {
     /// message is read out of the same place whichever spelling made the run interactive.
     private var positionalPromptRule: PositionalPromptRule {
         switch self {
-        case .claudeCode, .codex: .everyPositional
+        // pi takes `[@files...] [messages...]`, so `pi @spec.md "a" "b"` keeps all but the last on resume
+        // and sends them again. Accepted: a pi started by hand shows only `pi` in argv (it sets
+        // `process.title`), so the rewrite only ever sees commands Spaces built, which carry one prompt.
+        case .claudeCode, .codex, .pi: .everyPositional
         case .opencode: .afterSubcommand("run")
         case .copilot: .none
         }
@@ -475,7 +510,7 @@ extension CodingAgent {
     /// its `-p`/`--prompt` is a one-shot run that never reaches a resume rewrite.
     private var promptOptions: Set<String> {
         switch self {
-        case .claudeCode, .codex: []
+        case .claudeCode, .codex, .pi: []
         case .opencode: ["--prompt"]
         case .copilot: ["-i", "--interactive"]
         }
@@ -533,6 +568,16 @@ extension CodingAgent {
                 "--name", "--mouse", "--output-format", "--plugin-dir", "--reasoning-effort", "--session-id", "--share", "--stream",
                 "--usage-output-file",
             ]
+        case .pi:
+            // Read from pi 1.1.0's `--help`. `--append-system-prompt`, `--extension`, `--skill`,
+            // `--prompt-template` and `--theme` may repeat but each occurrence takes one value, so they are
+            // here rather than variadic. `--list-models [search]` is optional-valued and one-shot, so it
+            // never reaches the prompt scan.
+            [
+                "--provider", "--model", "--api-key", "--system-prompt", "--append-system-prompt", "--mode", "--session-id", "--fork", "--session-dir",
+                "-n", "--name", "--models", "-t", "--tools", "-xt", "--exclude-tools", "--thinking", "-e", "--extension", "--skill",
+                "--prompt-template", "--theme", "--use-theme", "--export", "--tui-mode",
+            ]
         }
     }
 
@@ -550,13 +595,16 @@ extension CodingAgent {
         case .codex: ["-i", "--image"]
         case .opencode: ["--cors", "-f", "--file"]
         case .copilot: ["--allow-tool", "--allow-url", "--available-tools", "--deny-tool", "--deny-url", "--excluded-tools", "--secret-env-vars"]
+        // pi's repeatable options take one value per occurrence, and `[@files...] [messages...]` are
+        // positionals; none of its options is variadic.
+        case .pi: []
         }
     }
 
-    /// The command without the `--session-id <uuid>` (or `--session-id=<uuid>`) option Claude Code and Copilot share, read from
-    /// the agent's own segment with the same tokenizer the selector scan uses. One separating space goes
-    /// with it, so removing the option does not leave a double space behind.
-    private static func removingSessionIDOption(inCommand command: String) -> String {
+    /// The command without the value-taking option `name` (`--session-id <uuid>` or `--session-id=<uuid>`,
+    /// for instance), read from the agent's own segment with the same tokenizer the selector scan uses.
+    /// One separating space goes with it, so removing the option does not leave a double space behind.
+    private static func removingValueOption(_ name: String, inCommand command: String) -> String {
         let tokens = firstSegmentTokenRanges(inCommand: command)
         guard let executable = executableTokenRange(inCommand: command), let executableIndex = tokens.firstIndex(of: executable) else {
             return command
@@ -564,18 +612,18 @@ extension CodingAgent {
         let arguments = Array(tokens[tokens.index(after: executableIndex)...])
         for (offset, token) in arguments.enumerated() {
             let text = command[token]
-            guard text == "--session-id" || text.hasPrefix("--session-id=") else { continue }
+            guard text == name || text.hasPrefix("\(name)=") else { continue }
             var end = token.upperBound
-            // The separated form takes the id as the next word; a flag there means the option was written
+            // The separated form takes the value as the next word; a flag there means the option was written
             // without one, and only the option itself goes.
-            if text == "--session-id", let next = arguments[(offset + 1)...].first, !command[next].hasPrefix("-") { end = next.upperBound }
+            if text == name, let next = arguments[(offset + 1)...].first, !command[next].hasPrefix("-") { end = next.upperBound }
             return removing(span: token.lowerBound..<end, inCommand: command)
         }
         return command
     }
 
     /// The command without the value-less flag `flag`, read from the agent's own segment like
-    /// `removingSessionIDOption(inCommand:)`.
+    /// `removingValueOption(_:inCommand:)`.
     private static func removingBareFlag(_ flag: String, inCommand command: String) -> String {
         let tokens = firstSegmentTokenRanges(inCommand: command)
         guard let executable = executableTokenRange(inCommand: command), let executableIndex = tokens.firstIndex(of: executable) else {

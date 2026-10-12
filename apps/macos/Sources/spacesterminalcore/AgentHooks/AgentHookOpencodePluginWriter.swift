@@ -48,7 +48,7 @@ enum AgentHookOpencodePluginWriter {
     static func installState(pluginURL: URL, spacesExecutablePath: String?, fileManager: FileManager = .default) -> AgentHookInstallState {
         guard let contents = try? String(contentsOf: pluginURL, encoding: .utf8), isSpacesOwned(contents) else { return .notInstalled }
         guard AgentHookCommand.isCurrent(contents) else { return .outdated }
-        guard let spacesExecutablePath, embeddedExecutablePath(in: contents) == spacesExecutablePath else { return .outdated }
+        guard let spacesExecutablePath, AgentHookEmbeddedCLIPath.path(in: contents) == spacesExecutablePath else { return .outdated }
         return .current
     }
 
@@ -61,7 +61,7 @@ enum AgentHookOpencodePluginWriter {
         return """
             \(ownershipHeaderPrefix)\(AgentHookCommand.versionedMarker())). Do not edit; reinstall from Spaces settings.
 
-            const SPACES_CLI = \(javaScriptStringLiteral(spacesExecutablePath))
+            \(AgentHookEmbeddedCLIPath.declaration(for: spacesExecutablePath))
 
             export const SpacesAgentSignal = async ({ $ }) => {
               const signal = async (event, sessionID) => {
@@ -91,36 +91,6 @@ enum AgentHookOpencodePluginWriter {
             }
 
             """
-    }
-
-    /// Renders `value` as a double-quoted JavaScript string literal.
-    private static func javaScriptStringLiteral(_ value: String) -> String {
-        let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        return "\"\(escaped)\""
-    }
-
-    /// The `spaces` path baked into the plugin's `const SPACES_CLI = "..."` line, read back out of the
-    /// double-quoted JavaScript string literal `javaScriptStringLiteral` writes: any character following
-    /// a backslash is taken literally, and the first quote not preceded by one closes the string. Nil
-    /// when the marker line, or its closing quote, is missing.
-    private static func embeddedExecutablePath(in contents: String) -> String? {
-        guard let markerRange = contents.range(of: "const SPACES_CLI = \"") else { return nil }
-        var path = ""
-        var index = markerRange.upperBound
-        while index < contents.endIndex {
-            let character = contents[index]
-            if character == "\\" {
-                let next = contents.index(after: index)
-                guard next < contents.endIndex else { return nil }
-                path.append(contents[next])
-                index = contents.index(after: next)
-                continue
-            }
-            if character == "\"" { return path }
-            path.append(character)
-            index = contents.index(after: index)
-        }
-        return nil  // no closing quote: not a well-formed string literal
     }
 
     private static func isSpacesOwned(_ contents: String) -> Bool {

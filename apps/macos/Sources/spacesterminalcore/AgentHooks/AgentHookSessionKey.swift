@@ -51,6 +51,12 @@ public enum AgentHookSessionKeyReport: Equatable, Sendable {
 /// 1.0.91 to 1.0.95), equal to the id `copilot --resume` takes, and carries no transcript path, so its id
 /// reports `resumable` as it stands. Copilot fires its first hook at the first prompt, by which point
 /// the session exists.
+///
+/// pi's extension writes the Claude Code shape (`session_id`, `transcript_path`) to the CLI's stdin, with
+/// pi's session file as both (a path resumes wherever the file lives, an id only inside one session
+/// directory): pi creates that file at the first prompt, and `pi --session`
+/// cannot open a session without one, so the same exists-or-pending rule applies (verified against
+/// pi 1.1.0). A `--no-session` run sends no payload.
 public enum AgentHookSessionKey {
     /// The top-level JSON key Claude Code and Codex use.
     static let payloadKey = "session_id"

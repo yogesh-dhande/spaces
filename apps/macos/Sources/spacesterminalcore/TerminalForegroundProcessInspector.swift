@@ -160,7 +160,8 @@ public enum TerminalForegroundProcessInspector {
         #endif
     }
 
-    public static func classify(_ process: TerminalForegroundProcessSnapshot) -> TerminalForegroundAgentSnapshot? {
+    public static func classify(_ observed: TerminalForegroundProcessSnapshot) -> TerminalForegroundAgentSnapshot? {
+        let process = droppingTitleOverwrittenArguments(observed)
         // Matching runs on the unbounded argv so the matched index addresses the same argument in both
         // command builds below; bounding only ever drops arguments the executable token sits ahead of.
         let argv = process.fullArgv
@@ -180,6 +181,21 @@ public enum TerminalForegroundProcessInspector {
             }
         }
         return nil
+    }
+
+    /// `process` with an argv a `process.title` assignment overwrote read as the bare command.
+    ///
+    /// A Node CLI that sets `process.title` (pi sets it to `pi`) overwrites the whole argument area on
+    /// macOS: argv[0] reads back as the title and every later argument as an empty string, while the
+    /// count is kept (verified against pi 1.1.0, where `pi --model x` reads as `["pi", "", ""]`). Those
+    /// empty words are not arguments the agent was given, and a relaunch passing them would hand pi
+    /// empty prompts, so an argv whose every argument after the first is empty keeps only its first.
+    static func droppingTitleOverwrittenArguments(_ process: TerminalForegroundProcessSnapshot) -> TerminalForegroundProcessSnapshot {
+        guard let first = process.fullArgv.first, process.fullArgv.count > 1, process.fullArgv.dropFirst().allSatisfy(\.isEmpty) else {
+            return process
+        }
+        return TerminalForegroundProcessSnapshot(
+            pid: process.pid, executablePath: process.executablePath, executableName: process.executableName, argv: [first])
     }
 
     public static func boundedArguments(_ argv: [String]) -> [String] {
@@ -318,7 +334,7 @@ public enum TerminalForegroundProcessInspector {
     /// or executed rather than passed on. Only characters no shell treats specially stay unquoted;
     /// everything else is wrapped in single quotes, which suppress every expansion, with an embedded single
     /// quote spliced back in as `'\''` (close, escaped quote, reopen) since single quotes cannot nest.
-    private static func posixQuoted(_ argument: String) -> String {
+    static func posixQuoted(_ argument: String) -> String {
         guard !argument.isEmpty else { return "''" }
         guard argument.unicodeScalars.contains(where: { !shellSafeArgumentScalars.contains($0) }) else { return argument }
         return "'\(argument.replacingOccurrences(of: "'", with: "'\\''"))'"

@@ -7,7 +7,7 @@ import { Prose, Section } from "../components/section";
 export const metadata: Metadata = {
   title: "Agent status",
   description:
-    "How Spaces knows whether Claude Code, Codex, opencode, or GitHub Copilot CLI is working, waiting for you, or done.",
+    "How Spaces knows whether Claude Code, Codex, opencode, GitHub Copilot CLI, or pi is working, waiting for you, or done.",
 };
 
 export default function CodingAgentsDocsPage() {
@@ -19,7 +19,7 @@ export default function CodingAgentsDocsPage() {
     >
       <Section id="supported-agents" title="Supported agents">
         <Prose>
-          Spaces tracks Claude Code, Codex, opencode, and GitHub Copilot CLI. Start any of them in a
+          Spaces tracks Claude Code, Codex, opencode, GitHub Copilot CLI, and pi (1.1.0 or later). Start any of them in a
           Spaces terminal and it shows up as its own row, listed under Coding Agents in that
           terminal&apos;s workspace.
         </Prose>
@@ -36,7 +36,9 @@ export default function CodingAgentsDocsPage() {
           feature), and a plugin file under{" "}
           <InlineCode>~/.config/opencode/plugin/</InlineCode> for opencode. For Copilot it writes
           its own file, <InlineCode>~/.copilot/hooks/spaces.json</InlineCode>, and leaves your other
-          Copilot hook files alone.
+          Copilot hook files alone. For pi it writes its own extension,{" "}
+          <InlineCode>~/.pi/agent/extensions/spaces.ts</InlineCode>, and leaves your other pi
+          extensions alone.
         </Prose>
         <Prose>
           Settings &rarr; Coding Agents shows, per agent, one of five states: not installed, out of
@@ -45,7 +47,8 @@ export default function CodingAgentsDocsPage() {
           Codex hooks waiting for trust, <strong>Trust in Codex</strong>. Hooks switched off in the
           agent are turned back on in the agent itself; for Copilot that means the{" "}
           <InlineCode>disableAllHooks</InlineCode> setting in{" "}
-          <InlineCode>~/.copilot/settings.json</InlineCode> (<InlineCode>copilot config disableAllHooks false</InlineCode>).
+          <InlineCode>~/.copilot/settings.json</InlineCode> (<InlineCode>copilot config disableAllHooks false</InlineCode>),
+          and for pi it means checking <InlineCode>spaces.ts</InlineCode> again in <InlineCode>pi config</InlineCode>.
         </Prose>
         <Prose>
           Copilot reports nothing until you send its first prompt, so a Copilot you just launched shows
@@ -53,6 +56,16 @@ export default function CodingAgentsDocsPage() {
           shows as blocked only while a permission prompt or a question from the agent is waiting for
           you. Pressing Esc on a permission prompt ends the turn without a hook, so that row stays
           blocked until your next prompt.
+        </Prose>
+        <Prose>
+          pi has no permission prompts, so a pi row shows as blocked only while a dialog opened by one
+          of your pi extensions (a confirmation, a choice, or an input) is waiting for you during a
+          turn. pi&apos;s own startup trust prompt and its <InlineCode>/login</InlineCode> picker
+          don&apos;t show as blocked. A pi row shows done when the turn has fully settled, after any
+          retries, and it follows the conversation when you start another with{" "}
+          <InlineCode>/new</InlineCode> or resume one. pi older than 1.1.0 isn&apos;t tracked, and
+          Spaces reports only from pi&apos;s interactive terminal, not from{" "}
+          <InlineCode>pi -p</InlineCode> or the json and rpc modes.
         </Prose>
         <Prose>
           Copilot asks whether you trust a folder each time you start it in one it has not

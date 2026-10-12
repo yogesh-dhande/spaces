@@ -1208,7 +1208,7 @@
             [
                 home.appendingPathComponent(".claude/settings.json"), home.appendingPathComponent(".codex/hooks.json"),
                 home.appendingPathComponent(".codex/config.toml"), home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"),
-                home.appendingPathComponent(".copilot/hooks/spaces.json"),
+                home.appendingPathComponent(".copilot/hooks/spaces.json"), piExtensionFile(home: home),
             ]
         }
 
@@ -1232,7 +1232,9 @@
             #expect(opencode.contains("const SPACES_CLI = \"\(installed)\""))
             let copilot = read(copilotHooksFile(home: home))
             #expect(copilot.contains("'\(installed)' agent signal"))
-            for contents in [claude, codex, opencode, copilot] { #expect(!contents.contains(dev.path)) }
+            let pi = read(piExtensionFile(home: home))
+            #expect(pi.contains("const SPACES_CLI = \"\(installed)\""))
+            for contents in [claude, codex, opencode, copilot, pi] { #expect(!contents.contains(dev.path)) }
             #expect(codexMCPEntry(home: home)?["command"] as? String == installed)
         }
 
@@ -1256,7 +1258,7 @@
             let dev = try makeDevBuildCLI(home: home)
             try FileManager.default.removeItem(at: installedCLILink(home: home))
             let files = hookFiles(home: home)
-            let userConfigs = ["{ \"model\": \"opus\" }\n", "{}\n", "[features]\nhooks = true\n", "// user plugin\n", "{ \"version\": 1 }\n"]
+            let userConfigs = ["{ \"model\": \"opus\" }\n", "{}\n", "[features]\nhooks = true\n", "// user plugin\n", "{ \"version\": 1 }\n", "// user extension\n"]
             for (file, contents) in zip(files, userConfigs) {
                 try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try contents.write(to: file, atomically: true, encoding: .utf8)
@@ -1288,7 +1290,7 @@
             }
 
             let poisoned = status(home: home, environment: dev.environment)
-            #expect(poisoned.map(\.installState) == [.outdated, .outdated, .outdated, .outdated])
+            #expect(poisoned.map(\.installState) == [.outdated, .outdated, .outdated, .outdated, .outdated])
 
             try install(CodingAgent.allCases, home: home, environment: dev.environment)
             try trust(.codex, home: home)
@@ -1677,6 +1679,81 @@
 
             try "{\"disableAllHooks\": false}\n".write(to: settings, atomically: true, encoding: .utf8)
             #expect(status(home: home).first { $0.kind == .copilot }?.installState == .current)
+        }
+
+        // MARK: - pi
+
+        /// Unchecking the Spaces extension in `pi config` adds its exclusion to the user `settings.json`,
+        /// and pi then stops loading the file, so the row reads as switched off in the agent.
+        @Test func piExtensionUncheckedInPiConfigReadsAsDisabledByAgent() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.pi], home: home)
+            try install([.pi], home: home)
+            let settings = home.appendingPathComponent(".pi/agent/settings.json")
+
+            try "{\"extensions\": [\"-extensions/spaces.ts\"]}\n".write(to: settings, atomically: true, encoding: .utf8)
+            #expect(status(home: home).first { $0.kind == .pi }?.installState == .disabledByAgent)
+
+            try "{\"extensions\": [\"-extensions/other.ts\"]}\n".write(to: settings, atomically: true, encoding: .utf8)
+            #expect(status(home: home).first { $0.kind == .pi }?.installState == .current)
+        }
+
+        private func piExtensionFile(home: URL) -> URL { home.appendingPathComponent(".pi/agent/extensions/spaces.ts") }
+
+        @Test func piInstallWritesItsOwnExtensionAndStatusReadsItCurrent() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.pi], home: home)
+            #expect(status(home: home).first { $0.kind == .pi }?.installState == .notInstalled)
+
+            let outcome = try install([.pi], home: home)
+
+            #expect(outcome.failures.isEmpty)
+            #expect(outcome.agents.first { $0.kind == .pi }?.installState == .current)
+            #expect(read(piExtensionFile(home: home)).contains("const SPACES_CLI = \"\(spacesCLIPath(home: home))\""))
+        }
+
+        @Test func piExtensionIsOutdatedWhenItNamesAnotherSpacesCLI() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.pi], home: home)
+            try install([.pi], home: home)
+            let file = piExtensionFile(home: home)
+            try read(file).replacingOccurrences(of: spacesCLIPath(home: home), with: "/elsewhere/spaces").write(
+                to: file, atomically: true, encoding: .utf8)
+
+            #expect(status(home: home).first { $0.kind == .pi }?.installState == .outdated)
+        }
+
+        @Test func piInstallDoesNotOverwriteAnUnmanagedExtension() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.pi], home: home)
+            let file = piExtensionFile(home: home)
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let existing = "export default function () {}\n"
+            try existing.write(to: file, atomically: true, encoding: .utf8)
+
+            let outcome = try install([.pi], home: home)
+
+            #expect(outcome.failures.map(\.kind) == [.pi])
+            #expect(outcome.failures.first?.message.localizedStandardContains("not managed by Spaces") == true)
+            #expect(read(file) == existing)
+        }
+
+        @Test func piInstallLeavesTheUsersOtherExtensionsAlone() throws {
+            let home = try makeHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            try makeAgentsAvailable([.pi], home: home)
+            let other = home.appendingPathComponent(".pi/agent/extensions/mine.ts")
+            try FileManager.default.createDirectory(at: other.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let existing = "export default function () {}\n"
+            try existing.write(to: other, atomically: true, encoding: .utf8)
+
+            try install([.pi], home: home)
+
+            #expect(read(other) == existing)
         }
     }
 #endif

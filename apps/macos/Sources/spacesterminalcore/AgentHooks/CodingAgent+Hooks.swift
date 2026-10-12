@@ -5,7 +5,8 @@ import Foundation
 extension CodingAgent {
     /// Claude and Codex use the same JSON hook shape; these are their event → signal bindings. Copilot's
     /// file shape differs (flat entries, see `AgentHookCopilotHooksWriter`) but binds events the same way,
-    /// so its table lives here too. opencode uses a plugin file instead and returns an empty list.
+    /// so its table lives here too. opencode (a plugin file) and pi (an extension file) carry their mapping in
+    /// the script they write instead and return an empty list.
     ///
     /// **The post-tool events are what end a block.** Neither agent emits anything at the instant a
     /// permission prompt is answered, and both fire `PreToolUse` *before* the permission decision, so a
@@ -96,7 +97,7 @@ extension CodingAgent {
                 .init(eventName: "postToolUseFailure", event: .working), .init(eventName: "notification", event: .blocked),
                 .init(eventName: "agentStop", event: .done), .init(eventName: "sessionEnd", event: .exit),
             ]
-        case .opencode: []
+        case .opencode, .pi: []
         }
     }
 
@@ -111,7 +112,9 @@ extension CodingAgent {
     public var countsExitOnlyForLearnedConversation: Bool {
         switch self {
         case .copilot: true
-        case .claudeCode, .codex, .opencode: false
+        // pi signals `exit` only for a `quit` shutdown, never for the `new`, `resume`, `fork` or
+        // `reload` shutdowns that keep the process, so its exit needs no further filtering.
+        case .claudeCode, .codex, .opencode, .pi: false
         }
     }
 
@@ -158,6 +161,10 @@ extension CodingAgent {
             try AgentHookCopilotHooksWriter.install(
                 fileURL: AgentHookCopilotHooksWriter.hooksFileURL(copilotHome: configDirectoryURL(home: home)), bindings: jsonEventBindings,
                 spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
+        case .pi:
+            try AgentHookPiExtensionWriter.install(
+                extensionURL: AgentHookPiExtensionWriter.extensionURL(piHome: configDirectoryURL(home: home)),
+                spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         }
     }
 
@@ -199,6 +206,15 @@ extension CodingAgent {
             // never edits the user's settings, so the user is sent to Copilot to turn hooks back on.
             let settingsURL = configDirectoryURL(home: home).appendingPathComponent("settings.json")
             return AgentHookCopilotHooksWriter.hooksDisabled(settingsURL: settingsURL) ? .disabledByAgent : .current
+        case .pi:
+            let piHome = configDirectoryURL(home: home)
+            let state = AgentHookPiExtensionWriter.installState(
+                extensionURL: AgentHookPiExtensionWriter.extensionURL(piHome: piHome), spacesExecutablePath: spacesExecutablePath)
+            guard state == .current else { return state }
+            // Unchecking the extension in `pi config` keeps the file and stops pi loading it, and Spaces never
+            // edits the user's settings, so the user is sent to pi to turn it back on.
+            let settingsURL = piHome.appendingPathComponent("settings.json")
+            return AgentHookPiExtensionWriter.extensionExcluded(settingsURL: settingsURL) ? .disabledByAgent : .current
         }
     }
 

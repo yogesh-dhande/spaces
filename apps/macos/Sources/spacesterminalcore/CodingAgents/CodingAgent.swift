@@ -16,6 +16,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
     case codex
     case opencode
     case copilot
+    case pi
 
     public var displayName: String {
         switch self {
@@ -23,6 +24,8 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         case .codex: "Codex"
         case .opencode: "opencode"
         case .copilot: "Copilot"
+        // Lowercase is the product's own styling.
+        case .pi: "pi"
         }
     }
 
@@ -33,6 +36,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         case .codex: "CX"
         case .opencode: "OC"
         case .copilot: "CP"
+        case .pi: "PI"
         }
     }
 
@@ -45,6 +49,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         case .codex: ["codex"]
         case .opencode: ["opencode"]
         case .copilot: ["copilot"]
+        case .pi: ["pi"]
         }
     }
 
@@ -52,7 +57,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
     public var primaryCommandName: String { executableNames[0] }
 
     /// All agents' `primaryCommandName`s joined in prose, Oxford-comma style: "claude, codex,
-    /// opencode, or copilot". Derived from `allCases` so a new agent appears automatically in help/error text that
+    /// opencode, copilot, or pi". Derived from `allCases` so a new agent appears automatically in help/error text that
     /// enumerates supported commands.
     public static var commandListText: String {
         let names = allCases.map(\.primaryCommandName)
@@ -73,6 +78,8 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         // Copilot's `COPILOT_HOME` override is not read: like `CODEX_HOME`, it names a home the user's
         // shell chose, which the daemon's environment need not share.
         case .copilot: home.appendingPathComponent(".copilot", isDirectory: true)
+        // pi's `PI_CODING_AGENT_DIR` override is not read, for the same reason as `COPILOT_HOME`.
+        case .pi: home.appendingPathComponent(".pi/agent", isDirectory: true)
         }
     }
 }

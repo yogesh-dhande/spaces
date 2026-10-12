@@ -73,17 +73,22 @@ import spacesterminalcore
                 == "copilot mcp add spaces -- /usr/local/bin/spaces mcp")
     }
 
+    @Test func buildsPiAddCommand() {
+        #expect(MCPClientConfiguration.piAddCommand(cliPath: "/usr/local/bin/spaces") == "pi mcp add spaces -- /usr/local/bin/spaces mcp")
+    }
+
     /// A pasted command must hand the agent the whole path as one word, or a bundle path with a space
     /// registers its first fragment as the executable.
     @Test func addCommandsQuoteACLIPathTheShellWouldSplit() {
         let path = "/Applications/Spaces Test.app/Contents/Resources/spaces"
         #expect(MCPClientConfiguration.copilotAddCommand(cliPath: path) == "copilot mcp add spaces -- '\(path)' mcp")
+        #expect(MCPClientConfiguration.piAddCommand(cliPath: path) == "pi mcp add spaces -- '\(path)' mcp")
         #expect(MCPClientConfiguration.claudeCodeAddCommand(cliPath: path) == "claude mcp add spaces -s user -- '\(path)' mcp")
         #expect(MCPClientConfiguration.shellWord("/tmp/it's") == "'/tmp/it'\\''s'")
     }
 
     @Test func clientSnippetsMatchConfiguration() {
-        #expect(CodingAgent.allCases == [.claudeCode, .codex, .opencode, .copilot])
+        #expect(CodingAgent.allCases == [.claudeCode, .codex, .opencode, .copilot, .pi])
         #expect(
             CodingAgent.claudeCode.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces") == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
         #expect(CodingAgent.codex.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces").hasPrefix("[mcp_servers.spaces]"))

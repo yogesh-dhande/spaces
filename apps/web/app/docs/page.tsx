@@ -73,7 +73,7 @@ const concepts: { name: string; description: string; href: string }[] = [
   },
   {
     name: "Coding agent",
-    description: "Claude Code, Codex, opencode, or GitHub Copilot CLI, run in a terminal, whose state Spaces shows using hooks it installs for the agent.",
+    description: "Claude Code, Codex, opencode, GitHub Copilot CLI, or pi, run in a terminal, whose state Spaces shows using hooks it installs for the agent.",
     href: "/docs/coding-agents",
   },
   {
