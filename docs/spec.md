@@ -290,6 +290,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - When another client stops or deletes a workspace, whether it lives on this Mac or a paired device, the Mac closes its panes and its tracked browser tabs once it sees the change. With no Mac app running at the stop, the tabs stay open, because only the app tracks them; deleting that workspace later, with the app running, closes them.
 
 ### Sidebar
+- The fixed rows above the projects are Alerts, Automations, and Resources, in that order. Arrow-key navigation moves through them in the same order before the first workspace.
 - Under a project, the default workspace comes first, then the rest by name (natural, case-insensitive).
 - A workspace's targets are grouped in a fixed order: browser sessions, configured processes (running or not), coding agents, then ad hoc terminals. The numbered target shortcuts follow the same order, so a row's position and its number never disagree.
 - Each managed target carries a state (working or running, blocked, done, inactive or not started, exited), and a workspace shows its highest-attention target's state even while collapsed, in the priority exited, blocked, done, working, idle. Ad hoc terminals and browser sessions carry no state.
@@ -426,6 +427,16 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - A run's terminal, and its spawned agents' terminals, stay replayable for as long as the run is listed (until retention prunes it or the automation is deleted), but the device's ended-session age limit and ended-transcript disk budget can still reclaim them; the replay then reports the render as unavailable.
 - The Mac's Automations view and its running-run badge span every paired device; an unreachable device is shown as unreachable, not left out.
 - iOS works with the connected device's automations: it can run one now, cancel a run, end a run's agents, open a run's terminal, and set a one-time next run, but creating, editing, and deleting stay on the Mac. A skipped or queued run never had a terminal. The Automations badge counts runs in flight; a failed run badges Alerts instead.
+
+## Resources
+- The Mac's Resources pane shows the CPU and memory of the work running in terminals and, separately, the cost of Spaces itself. It spans every paired device that is reachable and wire-compatible, the local Mac included. A blocked device is left out; an unreachable one is named offline.
+- Measurement exists only while the pane is on screen. Opening it starts sampling on each device and on this Mac, a first figure arrives about 2 seconds later, and a new one every 2 seconds. Leaving the pane, closing or minimizing the main window, or hiding the app stops all sampling and discards every figure and history, so returning starts fresh and an off-screen pane costs nothing. Until a device's first figure arrives it reads "Measuring…", never 0.
+- Two summary cards stay separate and are never added together: "Your terminals" (the work run in terminals, one line per device with its core count and memory) and "Spaces itself" (the Spaces app on this Mac, then the Spaces daemon on each device). A device that is offline keeps its lines and reads "Offline". A heavy build or agent must never read as Spaces' own usage. The Spaces app figure is this Mac's app process, its child processes, and the WebKit processes that serve its editor pane.
+- The table lists live terminals busiest first, by CPU or memory (the user picks the column; always descending), across all devices. A terminal is named project / workspace / terminal name, with the sidebar's agent glyph when it runs a coding agent. Idle terminals are listed. Spaces itself is never a row. A terminal the overview does not yet name (just created or closed) is skipped until it does. Workspaces mode shows the same table with one row per workspace per device, summing that workspace's terminals.
+- A terminal's figure covers its shell and every process still attached to it. A process that detaches, such as a Docker container or a background daemon, is not counted, and the pane says so.
+- CPU is a share of one core, so a busy process can pass 100%. Memory is the process's physical footprint on macOS (what Activity Monitor shows, including compressed pages) and its resident memory on Linux.
+- Each row and card carries a CPU history from when the pane opened, capped at the last 10 minutes.
+- A row's jump button, or a double-click on the row, opens that terminal (on its own device), or in Workspaces mode selects that workspace in the sidebar. A hidden workspace, or one in a hidden project, is still listed (it still uses resources) but has no sidebar row to select, so its Workspaces-mode row has no jump; its terminals still open from Terminals mode.
 
 ## Coding Agents
 

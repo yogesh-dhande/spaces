@@ -244,7 +244,7 @@ extension AgentHookCodexAppServer {
         /// reparented once the launcher dies and cannot be found from it afterwards.
         private func terminate() {
             guard waitStatus == nil, !reapHandedOff else { return }
-            let processIDs = AgentHookProcessTree.processIDs(rootProcessID: processID)
+            let processIDs = ProcessTree.processIDs(rootProcessID: processID)
             for signal in [SIGTERM, SIGKILL] {
                 _ = kill(-processID, signal)
                 for descendant in processIDs.reversed() { _ = kill(descendant, signal) }
