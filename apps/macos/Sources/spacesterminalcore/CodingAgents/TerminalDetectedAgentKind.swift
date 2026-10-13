@@ -21,6 +21,7 @@ public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable, Cas
     case opencode
     case copilot
     case pi
+    case amp
 
     public var displayLabel: String {
         switch self {
@@ -30,6 +31,7 @@ public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable, Cas
         case .opencode: "opencode"
         case .copilot: "copilot"
         case .pi: "pi"
+        case .amp: "amp"
         }
     }
 
@@ -41,6 +43,7 @@ public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable, Cas
         case .opencode: "opencode"
         case .copilot: "copilot"
         case .pi: "pi"
+        case .amp: "amp"
         }
     }
 }

@@ -4,7 +4,7 @@ import spacesterminalcore
 /// Builds the copyable MCP client configuration shown in Settings → MCP.
 ///
 /// Spaces exposes its MCP server over stdio: an MCP client (Claude Code, Codex,
-/// opencode, Copilot, pi) spawns `spaces mcp`, which forwards every tool call to the running
+/// opencode, Copilot, pi, Amp) spawns `spaces mcp`, which forwards every tool call to the running
 /// `spacesd` daemon. The settings pane only needs to surface the resolved CLI
 /// path and the snippets a user pastes into their client.
 enum MCPClientConfiguration {
@@ -82,6 +82,11 @@ enum MCPClientConfiguration {
     /// Copilot and unlike Codex the entry names no variables.
     static func piAddCommand(cliPath: String) -> String { "pi mcp add \(serverName) -- \(shellWord(cliPath)) mcp" }
 
+    /// `amp mcp add` registers the server for Amp, writing it into `amp.mcpServers` in
+    /// `~/.config/amp/settings.json`. Amp passes the launching terminal's environment to stdio MCP servers
+    /// (verified live against amp 0.0.1791849701), so like Copilot and pi the entry names no variables.
+    static func ampAddCommand(cliPath: String) -> String { "amp mcp add \(serverName) -- \(shellWord(cliPath)) mcp" }
+
     /// The CLI bundled at `Contents/Resources/spaces` when running from an app
     /// bundle; `nil` for non-bundled (test/dev tooling) executables.
     static func defaultBundleResourceCLIPath() -> String? {
@@ -104,6 +109,7 @@ extension CodingAgent {
         case .opencode: "opencode"
         case .copilot: "Copilot CLI"
         case .pi: "pi"
+        case .amp: "Amp"
         }
     }
 
@@ -112,7 +118,7 @@ extension CodingAgent {
         case .claudeCode: "Run once in your terminal."
         case .codex: "Add to the mcp_servers table in ~/.codex/config.toml."
         case .opencode: "Add to the mcp block in ~/.config/opencode/opencode.json."
-        case .copilot, .pi: "Run once in your terminal."
+        case .copilot, .pi, .amp: "Run once in your terminal."
         }
     }
 
@@ -123,6 +129,7 @@ extension CodingAgent {
         case .opencode: MCPClientConfiguration.opencodeConfigJSON(cliPath: cliPath)
         case .copilot: MCPClientConfiguration.copilotAddCommand(cliPath: cliPath)
         case .pi: MCPClientConfiguration.piAddCommand(cliPath: cliPath)
+        case .amp: MCPClientConfiguration.ampAddCommand(cliPath: cliPath)
         }
     }
 }

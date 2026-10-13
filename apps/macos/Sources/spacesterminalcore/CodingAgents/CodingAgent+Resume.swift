@@ -21,6 +21,10 @@ extension CodingAgent {
     ///  - pi: `--session <key>` immediately after the executable, the key being the session file's path. A terminal pi's argv is usually just `pi`
     ///    (it sets `process.title`, which hides the user's options from the process inspector), so most
     ///    rewrites see a bare command; a Spaces-spawned pi carries the command Spaces built.
+    ///  - Amp: `threads continue <key>` at the end of the agent's own segment, after the global options,
+    ///    which Amp accepts before its subcommand (`amp -m high threads continue <key>`, verified against
+    ///    amp 0.0.1791849701). Amp's interactive launch takes no positional prompt, so nothing follows the
+    ///    options to collide with. The key is the thread id.
     ///
     /// Every rewrite stays inside the command's first segment (see `firstCommandSegmentRange(inCommand:)`),
     /// so a chained command such as `opencode && notify` hands the selector to the agent rather than to
@@ -60,6 +64,9 @@ extension CodingAgent {
         case .claudeCode, .copilot: return insert("--resume \(key)", afterExecutableTokenIn: command)
         case .pi: return insert("--session \(selector)", afterExecutableTokenIn: command)
         case .codex: return insert("resume \(key)", afterExecutableTokenIn: command)
+        case .amp:
+            let segment = CodingAgent.firstCommandSegmentRange(inCommand: command)
+            return command.replacingCharacters(in: segment.upperBound..<segment.upperBound, with: " threads continue \(key)")
         case .opencode:
             let segment = CodingAgent.firstCommandSegmentRange(inCommand: command)
             return command.replacingCharacters(in: segment.upperBound..<segment.upperBound, with: " -s \(key)")
@@ -83,7 +90,8 @@ extension CodingAgent {
     /// conversation it can rejoin: `claude -p`/`--print`, a Claude Code subcommand run (`claude attach
     /// <id>`, `claude mcp ...`, `claude update`, and the rest of its `Commands:` list), `codex exec` (and
     /// its `e` alias), `codex review`, `codex fork`, `opencode run` without `-i`/`--interactive`, and the Copilot
-    /// and pi runs named in `oneShotLaunchMarkers`.
+    /// and pi runs named in `oneShotLaunchMarkers`, and every Amp run but the interactive ones (see
+    /// `ampLaunchIsOneShotJob(launchCommand:)`).
     ///
     /// Most of those are jobs rather than sessions: they print an answer and exit. Codex additionally takes
     /// a one-shot run's conversation as `codex exec resume <key>`, after options whose arity only Codex
@@ -107,6 +115,7 @@ extension CodingAgent {
     /// option turns up in the rest of the arguments.
     public static func launchIsOneShotJob(launchCommand: String) -> Bool {
         guard let agent = matching(command: launchCommand) else { return false }
+        if agent == .amp { return agent.ampLaunchIsOneShotJob(launchCommand: launchCommand) }
         let markers = agent.oneShotLaunchMarkers
         var cancellingOptions: Set<String> = []
         let answer = agent.firstAnswer(walkingArgumentsIn: launchCommand) { argument, _ -> Bool? in
@@ -200,7 +209,63 @@ extension CodingAgent {
             OneShotLaunchMarkers(
                 options: ["-p", "--print", "--mode", "--export", "--no-session", "--list-models", "-v", "--version", "-h", "--help"],
                 subcommands: Self.piSubcommands)
+        // Amp's execute and stream options run a prompt and exit (`-x`/`--execute`, `-ox`/`--orb-execute`,
+        // the `--stream-json*` family) and `--no-tui` drops the interactive UI. Its subcommands are not
+        // listed here: all of them are non-interactive except `threads continue` and `last`, which the
+        // two-level scan in `ampLaunchIsOneShotJob(launchCommand:)` tells apart.
+        case .amp:
+            OneShotLaunchMarkers(options: [
+                "-x", "--execute", "-ox", "--orb-execute", "--stream-json", "--stream-json-thinking", "--stream-json-input", "--no-tui",
+            ])
         }
+    }
+
+    /// Amp's thread-resuming subcommand spellings: `threads` (`thread`, `t`) `continue` (`c`), and the
+    /// `last` (`l`) shortcut that continues the most recent thread (amp 0.0.1791849701).
+    private static let ampThreadsAliases: Set<String> = ["threads", "thread", "t"]
+    private static let ampContinueAliases: Set<String> = ["continue", "c"]
+    private static let ampLastAliases: Set<String> = ["last", "l"]
+
+    /// Whether an Amp launch is a run `resumeCommand` leaves as written. Amp's interactive launch takes no
+    /// positional prompt, so any first positional is a subcommand, and every subcommand is non-interactive
+    /// (`threads list`, `mcp`, `plugins`, `login`, and the rest) except `threads continue` and `last`,
+    /// which open the TUI on a thread. That makes the answer two levels deep, which the generic
+    /// subcommand markers cannot express: `threads` alone is a one-shot (it only prints help), and
+    /// `threads` followed by anything but `continue` is too. An execute or stream option marks the launch
+    /// one-shot wherever it is written.
+    private func ampLaunchIsOneShotJob(launchCommand: String) -> Bool {
+        var positionals: [String] = []
+        let optionMarker = firstAnswer(walkingArgumentsIn: launchCommand) { argument, _ -> Bool? in
+            switch argument {
+            case .option(let name): return oneShotLaunchMarkers.options.contains(name) ? true : nil
+            case .positional(let text, _):
+                positionals.append(text)
+                return nil
+            }
+        }
+        if optionMarker == true { return true }
+        guard let first = positionals.first else { return false }
+        if Self.ampLastAliases.contains(first) { return false }
+        guard Self.ampThreadsAliases.contains(first), positionals.count >= 2 else { return true }
+        return !Self.ampContinueAliases.contains(positionals[1])
+    }
+
+    /// Where an Amp command already names a thread: the thread id of `threads continue <id>`, or, when the
+    /// command carries `continue` without an id, the spot after it. `last` names the most recent thread, so
+    /// the whole word is replaced by `threads continue <key>`.
+    private func ampNamedConversation(inCommand command: String) -> NamedConversation? {
+        var positionals: [(text: String, span: Range<String.Index>)] = []
+        _ = firstAnswer(walkingArgumentsIn: command) { argument, span -> Bool? in
+            if case .positional(let text, _) = argument { positionals.append((text, span)) }
+            return nil
+        }
+        guard let first = positionals.first else { return nil }
+        if Self.ampLastAliases.contains(first.text) { return NamedConversation(range: first.span, separator: "threads continue ") }
+        guard Self.ampThreadsAliases.contains(first.text), positionals.count >= 2, Self.ampContinueAliases.contains(positionals[1].text) else {
+            return nil
+        }
+        if positionals.count >= 3 { return NamedConversation(range: positionals[2].span, separator: "") }
+        return NamedConversation(range: positionals[1].span.upperBound..<positionals[1].span.upperBound, separator: " ")
     }
 
     /// pi's own subcommands, its `Commands:` list including the `uninstall` alias (pi 1.1.0). A subcommand
@@ -243,6 +308,9 @@ extension CodingAgent {
         // pi's `--resume`/`-r` takes no value (it opens a picker), so it is a bare flag removed before
         // this scan rather than a selector.
         case .pi: ["--session"]
+        // Amp names a thread through the `threads continue` subcommand path, not a selector word; see
+        // `ampNamedConversation(inCommand:)`.
+        case .amp: []
         case .codex: ["resume"]
         case .opencode: ["--session", "-s"]
         }
@@ -264,6 +332,7 @@ extension CodingAgent {
     /// agent's own segment, so a selector belonging to a program later in a chain is not mistaken for one
     /// of the agent's.
     private func namedConversation(inCommand command: String) -> NamedConversation? {
+        if self == .amp { return ampNamedConversation(inCommand: command) }
         let tokens = CodingAgent.firstSegmentTokenRanges(inCommand: command)
         guard let executable = CodingAgent.executableTokenRange(inCommand: command), let executableIndex = tokens.firstIndex(of: executable) else {
             return nil
@@ -495,6 +564,9 @@ extension CodingAgent {
         case .claudeCode, .codex, .pi: .everyPositional
         case .opencode: .afterSubcommand("run")
         case .copilot: .none
+        // Amp's interactive launch takes no positional prompt (a first positional is a subcommand), so no
+        // positional is ever stripped; a launch with a subcommand is read by the Amp-specific scans.
+        case .amp: .none
         }
     }
 
@@ -510,7 +582,7 @@ extension CodingAgent {
     /// its `-p`/`--prompt` is a one-shot run that never reaches a resume rewrite.
     private var promptOptions: Set<String> {
         switch self {
-        case .claudeCode, .codex, .pi: []
+        case .claudeCode, .codex, .pi, .amp: []
         case .opencode: ["--prompt"]
         case .copilot: ["-i", "--interactive"]
         }
@@ -578,6 +650,14 @@ extension CodingAgent {
                 "-n", "--name", "--models", "-t", "--tools", "-xt", "--exclude-tools", "--thinking", "-e", "--extension", "--skill",
                 "--prompt-template", "--theme", "--use-theme", "--export", "--tui-mode",
             ]
+        case .amp:
+            // Read from amp 0.0.1791849701. `--project` and `--plugin-ready-timeout` take an optional value,
+            // which is read as taken whenever the next word is not an option (the rule Claude Code's
+            // optional-valued options follow). `-x`/`--execute` are one-shot markers and never reach here.
+            [
+                "--visibility", "--settings-file", "--log-level", "--log-file", "--mcp-config", "-m", "--mode", "--features", "--executor",
+                "--runner-dir", "--attach", "--orb-size", "--title", "-l", "--label", "--runner-id", "--project", "--plugin-ready-timeout",
+            ]
         }
     }
 
@@ -598,6 +678,8 @@ extension CodingAgent {
         // pi's repeatable options take one value per occurrence, and `[@files...] [messages...]` are
         // positionals; none of its options is variadic.
         case .pi: []
+        // Amp's value-taking options each take one value.
+        case .amp: []
         }
     }
 

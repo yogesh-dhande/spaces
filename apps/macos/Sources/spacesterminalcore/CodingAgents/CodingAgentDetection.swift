@@ -71,6 +71,15 @@ extension CodingAgent {
                     kind: .pi, executableNames: ["pi"], nodeScriptNames: ["pi"],
                     nodePathFragments: ["/@earendil-works/pi-coding-agent/"])
             ]
+        case .amp:
+            // The official installer puts a Mach-O binary at `~/.amp/bin/amp`, and `ps` shows comm `amp`
+            // with the real argv (verified against amp 0.0.1791849701). An npm install of
+            // `@sourcegraph/amp` runs a node script under that package, matched by its path.
+            return [
+                CodingAgentDetectionVariant(
+                    kind: .amp, executableNames: ["amp"], nodeScriptNames: ["amp", "amp.js"],
+                    nodePathFragments: ["/@sourcegraph/amp/"])
+            ]
         }
     }
 }
@@ -84,6 +93,7 @@ extension TerminalDetectedAgentKind {
         case .opencode: .opencode
         case .copilot: .copilot
         case .pi: .pi
+        case .amp: .amp
         }
     }
 }

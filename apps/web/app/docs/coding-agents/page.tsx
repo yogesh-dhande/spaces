@@ -19,7 +19,7 @@ export default function CodingAgentsDocsPage() {
     >
       <Section id="supported-agents" title="Supported agents">
         <Prose>
-          Spaces tracks Claude Code, Codex, opencode, GitHub Copilot CLI, and pi (1.1.0 or later). Start any of them in a
+          Spaces tracks Claude Code, Codex, opencode, GitHub Copilot CLI, pi (1.1.0 or later), and Amp. Start any of them in a
           Spaces terminal and it shows up as its own row, listed under Coding Agents in that
           terminal&apos;s workspace.
         </Prose>
@@ -38,7 +38,9 @@ export default function CodingAgentsDocsPage() {
           its own file, <InlineCode>~/.copilot/hooks/spaces.json</InlineCode>, and leaves your other
           Copilot hook files alone. For pi it writes its own extension,{" "}
           <InlineCode>~/.pi/agent/extensions/spaces.ts</InlineCode>, and leaves your other pi
-          extensions alone.
+          extensions alone. For Amp it writes its own plugin,{" "}
+          <InlineCode>~/.config/amp/plugins/spaces.ts</InlineCode>, and leaves your other Amp
+          plugins alone.
         </Prose>
         <Prose>
           Settings &rarr; Coding Agents shows, per agent, one of five states: not installed, out of
@@ -66,6 +68,16 @@ export default function CodingAgentsDocsPage() {
           <InlineCode>/new</InlineCode> or resume one. pi older than 1.1.0 isn&apos;t tracked, and
           Spaces reports only from pi&apos;s interactive terminal, not from{" "}
           <InlineCode>pi -p</InlineCode> or the json and rpc modes.
+        </Prose>
+        <Prose>
+          Amp reports from your first prompt on: a freshly launched Amp shows as a row once Spaces
+          sees it running, and its status follows once you send a prompt. An Amp row follows the thread
+          you are looking at, so starting a new thread or continuing another keeps it in step. Amp asks
+          for no tool approvals by default, so an Amp row shows as blocked only when a tool approval is
+          waiting; a question from the agent or a dialog from one of your Amp plugins does not show as
+          blocked. Spaces does not report from Amp&apos;s execute mode (<InlineCode>amp -x</InlineCode>).
+          Removing <InlineCode>spaces.ts</InlineCode> from the plugins folder is how you switch the
+          integration off.
         </Prose>
         <Prose>
           Copilot asks whether you trust a folder each time you start it in one it has not

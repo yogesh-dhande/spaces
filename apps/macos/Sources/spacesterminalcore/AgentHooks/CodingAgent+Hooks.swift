@@ -5,7 +5,7 @@ import Foundation
 extension CodingAgent {
     /// Claude and Codex use the same JSON hook shape; these are their event → signal bindings. Copilot's
     /// file shape differs (flat entries, see `AgentHookCopilotHooksWriter`) but binds events the same way,
-    /// so its table lives here too. opencode (a plugin file) and pi (an extension file) carry their mapping in
+    /// so its table lives here too. opencode (a plugin file), pi (an extension file) and Amp (a plugin file) carry their mapping in
     /// the script they write instead and return an empty list.
     ///
     /// **The post-tool events are what end a block.** Neither agent emits anything at the instant a
@@ -97,7 +97,7 @@ extension CodingAgent {
                 .init(eventName: "postToolUseFailure", event: .working), .init(eventName: "notification", event: .blocked),
                 .init(eventName: "agentStop", event: .done), .init(eventName: "sessionEnd", event: .exit),
             ]
-        case .opencode, .pi: []
+        case .opencode, .pi, .amp: []
         }
     }
 
@@ -114,7 +114,8 @@ extension CodingAgent {
         case .copilot: true
         // pi signals `exit` only for a `quit` shutdown, never for the `new`, `resume`, `fork` or
         // `reload` shutdowns that keep the process, so its exit needs no further filtering.
-        case .claudeCode, .codex, .opencode, .pi: false
+        // Amp signals `exit` only at disposal, once a thread has been active, so it needs no filtering either.
+        case .claudeCode, .codex, .opencode, .pi, .amp: false
         }
     }
 
@@ -164,6 +165,10 @@ extension CodingAgent {
         case .pi:
             try AgentHookPiExtensionWriter.install(
                 extensionURL: AgentHookPiExtensionWriter.extensionURL(piHome: configDirectoryURL(home: home)),
+                spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
+        case .amp:
+            try AgentHookAmpPluginWriter.install(
+                pluginURL: AgentHookAmpPluginWriter.pluginURL(ampHome: configDirectoryURL(home: home)),
                 spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         }
     }
@@ -215,6 +220,11 @@ extension CodingAgent {
             // edits the user's settings, so the user is sent to pi to turn it back on.
             let settingsURL = piHome.appendingPathComponent("settings.json")
             return AgentHookPiExtensionWriter.extensionExcluded(settingsURL: settingsURL) ? .disabledByAgent : .current
+        case .amp:
+            // Amp has no per-plugin disable switch Spaces can read, so an installed plugin is never `.disabledByAgent`.
+            return AgentHookAmpPluginWriter.installState(
+                pluginURL: AgentHookAmpPluginWriter.pluginURL(ampHome: configDirectoryURL(home: home)),
+                spacesExecutablePath: spacesExecutablePath)
         }
     }
 

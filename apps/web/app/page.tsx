@@ -44,7 +44,7 @@ export default function HomePage() {
               <span className="hero-caret" aria-hidden />
             </p>
             <p className="mt-7 max-w-[660px] text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Run Claude Code, Codex, opencode, GitHub Copilot CLI, and pi on any of your machines. Check on them from your Mac or iPhone,
+              Run Claude Code, Codex, opencode, GitHub Copilot CLI, pi, and Amp on any of your machines. Check on them from your Mac or iPhone,
               and let them work together.
             </p>
             <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
@@ -177,7 +177,7 @@ export default function HomePage() {
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Use the Spaces MCP to put one agent in front of everything you have going: a fix in this repo, a
-              feature on that branch, an experiment on the Linux server. It spawns Claude Code, Codex, opencode, Copilot, or pi
+              feature on that branch, an experiment on the Linux server. It spawns Claude Code, Codex, opencode, Copilot, pi, or Amp
               as children and hears back when one finishes or needs you. Point it at the{" "}
               <Link href="/docs/orchestration" className="text-accent hover:underline">
                 orchestration guide
@@ -200,7 +200,7 @@ export default function HomePage() {
               <ul className="mt-4 space-y-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
                 <li>
                   <strong className="font-semibold text-foreground">Mix harnesses.</strong>{" "}
-                  Claude Code, Codex, opencode, Copilot, and pi: any of them can lead, any can
+                  Claude Code, Codex, opencode, Copilot, pi, and Amp: any of them can lead, any can
                   be a child.
                 </li>
                 <li>
@@ -314,7 +314,7 @@ export default function HomePage() {
                 <span className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-foreground-soft">
                   Works with
                 </span>
-                {["Claude Code", "Codex", "opencode", "GitHub Copilot CLI", "pi"].map((name) => (
+                {["Claude Code", "Codex", "opencode", "GitHub Copilot CLI", "pi", "Amp"].map((name) => (
                   <span
                     key={name}
                     className="rounded-full border border-line/80 bg-surface/60 px-2.5 py-1 text-xs text-foreground"

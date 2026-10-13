@@ -1,6 +1,6 @@
 # Spaces
 
-Your coding agents, reachable from anywhere: run Claude Code, Codex, opencode, GitHub Copilot CLI, and pi on your Mac or a Linux server, check on them from your Mac or iPhone, and let them work together across harnesses.
+Your coding agents, reachable from anywhere: run Claude Code, Codex, opencode, GitHub Copilot CLI, pi, and Amp on your Mac or a Linux server, check on them from your Mac or iPhone, and let them work together across harnesses.
 
 [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Website](https://usespaces.dev) · [Docs](https://usespaces.dev/docs)
 
@@ -20,7 +20,7 @@ Spaces is a native Mac app (not Electron) that gives each piece of work its own 
 
 ### Coding agents
 
-- **Status and Alerts**: [Claude Code, Codex, opencode, GitHub Copilot CLI, and pi](https://usespaces.dev/docs/coding-agents) report when they are working, blocked on you, or done. Alerts collects those states with exited processes and terminal bells from every workspace and paired device, so you can see which terminal needs you without opening each one.
+- **Status and Alerts**: [Claude Code, Codex, opencode, GitHub Copilot CLI, pi, and Amp](https://usespaces.dev/docs/coding-agents) report when they are working, blocked on you, or done. Alerts collects those states with exited processes and terminal bells from every workspace and paired device, so you can see which terminal needs you without opening each one.
 - **Agent briefs**: each coding agent keeps a short markdown brief beside its terminal (status with an expected finish time, questions for you, its task list), written through the CLI or the MCP server and shown on the Mac and the iPhone, so you can see where an agent stands without reading its transcript.
 - **Orchestration**: one coding agent can [spawn and coordinate other agents](https://usespaces.dev/docs/orchestration), each in its own workspace, on this machine or a paired one, and is told when a child is blocked, done, or exits.
 - **CLI**: [`spaces`](https://usespaces.dev/docs/cli) drives projects, workspaces, terminals, and agents from a shell. It is also how coding agents report their status.

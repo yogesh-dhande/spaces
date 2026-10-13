@@ -18,7 +18,7 @@ public enum AgentHookCommand {
     /// Executable name probed on `PATH` and common install directories to build hook commands.
     public static let spacesExecutableName = "spaces"
 
-    /// SPACES_HOOK_VERSION. Bump by hand whenever `signalCommand`, the opencode plugin or pi extension body, or an
+    /// SPACES_HOOK_VERSION. Bump by hand whenever `signalCommand`, the opencode plugin, pi extension or Amp plugin body, or an
     /// agent's event bindings change. A config carrying an older number reads back as `.outdated`,
     /// which is what re-offers the update to a user whose hooks a previous Spaces release installed.
     ///
@@ -37,7 +37,7 @@ public enum AgentHookCommand {
     public static let hookVersion = 5
 
     /// What the launch coding-agents setup step's dismissal is remembered against: the hook version and
-    /// the agents Spaces supports, e.g. `5:claudeCode,codex,opencode,copilot,pi`. The step returns when a
+    /// the agents Spaces supports, e.g. `5:claudeCode,codex,opencode,copilot,pi,amp`. The step returns when a
     /// release changes the hooks or supports a new agent. It is separate from `hookVersion` because a
     /// new agent must re-offer the step without marking every installed hook out of date; install state
     /// still reads `hookVersion` alone, so an existing installed hook is unaffected.
