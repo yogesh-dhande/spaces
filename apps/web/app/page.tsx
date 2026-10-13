@@ -11,6 +11,7 @@ import {
   type Feature,
   type HeroDevice,
   agentAlerts,
+  appStoreURL,
   automationPoints,
   automationRows,
   faqItems,
@@ -120,7 +121,7 @@ export default function HomePage() {
             <div className="max-w-xl">
               <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
                 <span className="rounded-full border border-accent-2/50 px-2 py-0.5 text-[0.62rem] text-accent-2">
-                  TestFlight beta
+                  iPhone and iPad
                 </span>
               </p>
               <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
@@ -131,12 +132,8 @@ export default function HomePage() {
                 closed. See which agent is waiting, answer it in the same terminal, and restart processes.
               </p>
               <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-                Invite only for now.{" "}
-                <a
-                  href="https://github.com/yogesh-dhande/spaces/issues"
-                  className="text-accent hover:underline"
-                >
-                  Ask for an invite
+                <a href={appStoreURL} className="text-accent hover:underline">
+                  Download it on the App Store
                 </a>
                 .
               </p>

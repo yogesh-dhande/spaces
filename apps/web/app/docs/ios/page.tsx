@@ -3,8 +3,7 @@ import { DocsShell } from "../components/docs-shell";
 import { DocLink } from "../components/doc-link";
 import { PhoneFrame } from "../../components/device-frames";
 import { Card, Prose, Section, SectionHeading } from "../components/section";
-
-const githubIssuesURL = "https://github.com/yogesh-dhande/spaces/issues";
+import { appStoreURL } from "../../content";
 
 export const metadata: Metadata = {
   title: "iPhone app",
@@ -21,12 +20,12 @@ export default function IOSDocsPage() {
     >
       <Section id="availability" title="Availability">
         <Prose>
-          The Spaces iOS app is an invite-only TestFlight beta for iPhone and iPad, on iOS 17 or later.{" "}
-          <a className="text-accent hover:underline" href={githubIssuesURL} target="_blank" rel="noopener noreferrer">
-            Ask for an invite
+          The Spaces iOS app is on the{" "}
+          <a className="text-accent hover:underline" href={appStoreURL} target="_blank" rel="noopener noreferrer">
+            App Store
           </a>{" "}
-          by opening an issue on GitHub. The app asks you to start a subscription before it opens; in the
-          TestFlight beta that is a test purchase, and you are not charged.
+          for iPhone and iPad, on iOS 17 or later. It asks you to start a yearly subscription before it
+          opens, with a one-week free trial.
         </Prose>
       </Section>
 

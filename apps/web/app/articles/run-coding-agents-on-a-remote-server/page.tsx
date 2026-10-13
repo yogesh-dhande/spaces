@@ -242,7 +242,7 @@ const article: ArticleData = {
             "**Who can pair.** Pairing gives a client full control of that server's Spaces service, so pair only your own devices.",
             "**Credentials on the server.** Each agent signs in there, and the git credentials it pushes with live there too.",
             "**Uptime.** Restore brings agents back after a reboot, but anything a process held only in memory is lost.",
-            "**The platforms.** The server is a Linux machine with systemd (Ubuntu, Debian, Fedora, and AlmaLinux are tested) or another Mac. The clients are the Mac app and the iPhone and iPad app, which is an invite-only TestFlight beta. There is no Windows or Android support and no web client."
+            "**The platforms.** The server is a Linux machine with systemd (Ubuntu, Debian, Fedora, and AlmaLinux are tested) or another Mac. The clients are the Mac app and the iPhone and iPad app on the App Store. There is no Windows or Android support and no web client."
           ]
         }
       ]

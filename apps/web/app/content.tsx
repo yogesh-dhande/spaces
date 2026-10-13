@@ -4,6 +4,7 @@
 import Link from "next/link";
 
 export const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
+export const appStoreURL = "https://apps.apple.com/app/id6791713994";
 
 // Sample devices in the hero visual, grouped like the Mac sidebar: machine, then
 // workspace, then the agents running in it. They mirror the Mac screenshot beside them.
@@ -129,8 +130,12 @@ export const faqItems: FaqItem[] = [
     question: "How much does it cost?",
     answer: (
       <>
-        Spaces is free on Mac and Linux. The iPhone app is in an invite-only
-        TestFlight beta.
+        Spaces is free on Mac and Linux. The iPhone and iPad app is a yearly
+        subscription on the{" "}
+        <a href={appStoreURL} className="text-accent hover:underline">
+          App Store
+        </a>
+        , with a one-week free trial.
       </>
     ),
   },
@@ -141,7 +146,7 @@ export const faqItems: FaqItem[] = [
         <li>macOS 14 Sonoma or later</li>
         <li>Google Chrome, used for browser sessions</li>
         <li>A Linux server (Ubuntu, Debian, Fedora, or AlmaLinux) with systemd</li>
-        <li>iOS 17 or later for the iPhone beta</li>
+        <li>iOS 17 or later for the iPhone and iPad app</li>
       </ul>
     ),
   },
@@ -196,12 +201,9 @@ export const faqItems: FaqItem[] = [
     question: "Is there a mobile app?",
     answer: (
       <>
-        Yes, in an invite-only TestFlight beta.{" "}
-        <a
-          href="https://github.com/yogesh-dhande/spaces/issues"
-          className="text-accent hover:underline"
-        >
-          Ask for an invite on GitHub
+        Yes, for iPhone and iPad.{" "}
+        <a href={appStoreURL} className="text-accent hover:underline">
+          Download it on the App Store
         </a>
         . It pairs with your Mac or a Linux server from a QR code and talks to
         that machine directly. See the{" "}
