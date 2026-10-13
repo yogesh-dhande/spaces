@@ -84,7 +84,7 @@ import spacesterminalcore
         .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: "session-1", clientID: "client-1")),
         .resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest(sessionID: "session-1", terminalLink: "link")),
         .readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest(sessionID: "session-1", terminalLinkID: "link-1", offset: 0, limit: 1024)),
-        .subscribeDeviceOverview, .agentHooksStatus, .installAgentHooks(SpacesDeviceInstallAgentHooksRequest(kinds: [.claudeCode])),
+        .subscribeDeviceOverview, .subscribeDeviceResources, .agentHooksStatus, .installAgentHooks(SpacesDeviceInstallAgentHooksRequest(kinds: [.claudeCode])),
         .trustAgentHooks(SpacesDeviceTrustAgentHooksRequest(kind: .codex)), .stopCodexSharedServer,
         .spawnAgentSession(SpacesDeviceSpawnAgentSessionRequest(workspaceID: "workspace-1", command: "claude")),
         .listAgentSessions(SpacesDeviceListAgentSessionsRequest(workspaceID: "workspace-1")),
@@ -138,7 +138,8 @@ import spacesterminalcore
     /// Wire keys with no associated value, which the encoder always writes as `{}` via
     /// `SpacesDeviceAPIEmptyPayload`. Checked for a fully literal, exact payload in addition to the key.
     private static let emptyPayloadKeys: Set<String> = [
-        "ping", "daemonStatus", "requestDaemonRestart", "overview", "subscribeDeviceOverview", "agentHooksStatus", "listAutomations",
+        "ping", "daemonStatus", "requestDaemonRestart", "overview", "subscribeDeviceOverview", "subscribeDeviceResources", "agentHooksStatus",
+        "listAutomations",
     ]
 
     /// Completeness contract for `samples`, split across three layers because no single mechanism covers
@@ -157,7 +158,7 @@ import spacesterminalcore
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 86)
+        #expect(keys.count == 87)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -249,6 +250,7 @@ import spacesterminalcore
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
         case .subscribeDeviceOverview: "subscribeDeviceOverview"
+        case .subscribeDeviceResources: "subscribeDeviceResources"
         case .agentHooksStatus: "agentHooksStatus"
         case .installAgentHooks: "installAgentHooks"
         case .trustAgentHooks: "trustAgentHooks"

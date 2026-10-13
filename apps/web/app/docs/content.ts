@@ -91,6 +91,12 @@ export const docsNavGroups: DocsNavGroup[] = [
         summary:
           "One list of what needs you: blocked and finished agents, exited processes and terminals, bells, failed automation runs, and terminals you marked to come back to.",
       },
+      {
+        href: "/docs/resources",
+        title: "Resources",
+        summary:
+          "See which terminals use the most CPU and memory on each device, and what Spaces itself costs.",
+      },
     ],
   },
   {

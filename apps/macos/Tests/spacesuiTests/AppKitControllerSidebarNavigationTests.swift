@@ -47,36 +47,66 @@ import Testing
         #expect(target == .alerts)
     }
 
-    @Test func downArrowFromAutomationsSelectsFirstVisibleWorkspace() {
+    @Test func downArrowFromAutomationsSelectsResources() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
             selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: true, direction: 1)
 
-        #expect(target == .workspace("workspace-a"))
+        #expect(target == .resources)
     }
 
-    @Test func downArrowFromAutomationsStopsWhenNoWorkspaces() {
+    @Test func downArrowFromAutomationsSelectsResourcesWhenNoWorkspaces() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false,
             showingAutomations: true, direction: 1)
 
+        #expect(target == .resources)
+    }
+
+    @Test func upArrowFromResourcesSelectsAutomations() {
+        let target = AppKitController.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: [("project-a", ["workspace-a"])], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil,
+            showingAlerts: false, showingAutomations: false, showingResources: true, direction: -1)
+
+        #expect(target == .automations)
+    }
+
+    @Test func downArrowFromResourcesSelectsFirstVisibleWorkspace() {
+        let target = AppKitController.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
+            selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: false, showingResources: true, direction: 1)
+
+        #expect(target == .workspace("workspace-a"))
+    }
+
+    @Test func downArrowFromResourcesStopsWhenNoWorkspaces() {
+        let target = AppKitController.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: [], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false,
+            showingAutomations: false, showingResources: true, direction: 1)
+
         #expect(target == nil)
     }
 
-    @Test func upArrowFromFirstWorkspaceReturnsToAutomations() {
+    @Test func clearingSelectionForResourcesKeepsTheResourcesPane() {
+        #expect(
+            AppKitController.sidebarClearedSelectionPresentsPlaceholder(showingAlerts: false, showingAutomations: false, showingResources: true)
+                == false)
+    }
+
+    @Test func upArrowFromFirstWorkspaceReturnsToResources() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
             selectedProjectID: "project-a", selectedWorkspaceID: "workspace-a", showingAlerts: false, showingAutomations: false, direction: -1)
 
-        #expect(target == .automations)
+        #expect(target == .resources)
     }
 
-    @Test func upArrowFromFirstWorkspaceReturnsToAutomationsViaProjectFallback() {
+    @Test func upArrowFromFirstWorkspaceReturnsToResourcesViaProjectFallback() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", []), ("project-b", [])], hiddenWorkspaceIDs: [], selectedProjectID: "project-a",
             selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: false, direction: -1)
 
-        #expect(target == .automations)
+        #expect(target == .resources)
     }
 
     @Test func arrowNavigationMovesAcrossProjectBoundariesUsingFlatVisibleOrder() {

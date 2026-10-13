@@ -15,6 +15,8 @@ enum DetailPane: Equatable {
     case alerts
     /// The full-pane automations manager (automations + runs tabs).
     case automations
+    /// The full-pane resource usage view. It measures only while it is the current pane.
+    case resources
     /// The full-pane compatibility block for an incompatible device's daemon. Held here (rather than
     /// only in the sidebar selection) so the block survives background sidebar reloads instead of
     /// being replaced.
@@ -31,6 +33,9 @@ enum DetailPane: Equatable {
 
     /// Whether the automations manager is the current pane.
     var isAutomations: Bool { if case .automations = self { true } else { false } }
+
+    /// Whether the resource usage view is the current pane.
+    var isResources: Bool { if case .resources = self { true } else { false } }
 
     /// Device whose compatibility block is shown, or `nil` for any other pane.
     var compatibilityBlockDeviceID: String? { if case .compatibilityBlock(let deviceID) = self { deviceID } else { nil } }

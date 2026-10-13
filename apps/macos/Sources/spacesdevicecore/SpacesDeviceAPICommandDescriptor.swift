@@ -208,6 +208,8 @@ extension SpacesDeviceAPICommand {
         case .subscribe: return Self.descriptor(wireKey: "subscribe", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .subscribeDeviceOverview:
             return Self.descriptor(wireKey: "subscribeDeviceOverview", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .subscribeDeviceResources:
+            return Self.descriptor(wireKey: "subscribeDeviceResources", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .subscribeWorkspaceDiffSignature:
             return Self.descriptor(wireKey: "subscribeWorkspaceDiffSignature", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .subscribeWorkspaceFileSignature:

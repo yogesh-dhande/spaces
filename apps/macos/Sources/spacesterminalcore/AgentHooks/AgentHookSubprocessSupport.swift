@@ -234,7 +234,7 @@ import Foundation
             // Retain the pre-termination descendant snapshot through SIGKILL. The process-group
             // signal catches ordinary helpers atomically; the snapshot also catches a helper that
             // created its own group or session after inheriting the output pipe.
-            let processIDs = AgentHookProcessTree.processIDs(rootProcessID: processGroupID)
+            let processIDs = ProcessTree.processIDs(rootProcessID: processGroupID)
             for (signal, timeout): (Int32, TimeInterval) in [(SIGTERM, 1), (SIGKILL, 1)] {
                 _ = kill(-processGroupID, signal)
                 for processID in processIDs.reversed() { _ = kill(processID, signal) }
@@ -277,49 +277,11 @@ import Foundation
     /// as their ancestors exit and can no longer be rediscovered from the original root.
     enum AgentHookProcessTree {
         static func terminate(rootProcessID: pid_t, completion: DispatchSemaphore) {
-            let processIDs = processIDs(rootProcessID: rootProcessID)
+            let processIDs = ProcessTree.processIDs(rootProcessID: rootProcessID)
             for processID in processIDs.reversed() { kill(processID, SIGTERM) }
             let rootTerminated = completion.wait(timeout: .now() + 1) == .success
             for processID in processIDs.reversed() where processExists(processID) { kill(processID, SIGKILL) }
             if !rootTerminated { _ = completion.wait(timeout: .now() + 1) }
-        }
-
-        static func processIDs(rootProcessID: pid_t) -> [pid_t] { [rootProcessID] + descendantProcessIDs(of: rootProcessID) }
-
-        private static func descendantProcessIDs(of rootProcessID: pid_t) -> [pid_t] {
-            var result: [pid_t] = []
-            var pending = [rootProcessID]
-            var seen = Set<pid_t>()
-            while let parent = pending.popLast() {
-                for child in directChildProcessIDs(of: parent) where seen.insert(child).inserted {
-                    result.append(child)
-                    pending.append(child)
-                }
-            }
-            return result
-        }
-
-        private static func directChildProcessIDs(of parent: pid_t) -> [pid_t] {
-            #if os(macOS)
-                var capacity = 32
-                while capacity <= 4096 {
-                    var processIDs = [pid_t](repeating: 0, count: capacity)
-                    let bufferSize = Int32(processIDs.count * MemoryLayout<pid_t>.stride)
-                    let childCount = proc_listchildpids(parent, &processIDs, bufferSize)
-                    guard childCount > 0 else { return [] }
-                    if childCount < capacity { return Array(processIDs.prefix(Int(childCount))).filter { $0 > 0 } }
-                    capacity *= 2
-                }
-                return []
-            #else
-                let taskDirectory = URL(fileURLWithPath: "/proc/\(parent)/task", isDirectory: true)
-                let taskURLs = (try? FileManager.default.contentsOfDirectory(at: taskDirectory, includingPropertiesForKeys: nil)) ?? []
-                return taskURLs.flatMap { taskURL -> [pid_t] in
-                    let childrenURL = taskURL.appendingPathComponent("children")
-                    guard let contents = try? String(contentsOf: childrenURL, encoding: .utf8) else { return [] }
-                    return contents.split(whereSeparator: \.isWhitespace).compactMap { pid_t(String($0)) }
-                }
-            #endif
         }
 
         static func processExists(_ processID: pid_t) -> Bool {

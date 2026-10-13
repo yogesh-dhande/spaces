@@ -896,6 +896,136 @@ public final class SpacesDeviceWorkspaceFileSignatureStreamClient: @unchecked Se
     }
 }
 
+/// Reads the device-wide resources stream: opens a pinned-TLS Device API connection, sends a
+/// `subscribeDeviceResources` request, and delivers each newline-framed `SpacesDeviceResourcesFrame`.
+/// Every frame is delivered, including ones identical to the last: each is a new sample.
+public final class SpacesDeviceResourcesStreamClient: @unchecked Sendable {
+    private let request: SpacesDeviceAPIRequest
+    private let resolver: SpacesDeviceEndpointResolver
+    private let onFrame: @Sendable (SpacesDeviceResourcesFrame) -> Void
+    private let onDisconnect: @Sendable ((any Error)?) -> Void
+    private let connectionLock = NSLock()
+    private var connection: (any SpacesPinnedTLSLineConnection)?
+    /// The daemon writes a frame every `SpacesDeviceResourcesFrame.samplingInterval`, so a few missed
+    /// frames in a row mean the transport is dead even though the socket is open (the pinned-TLS receive
+    /// has no read timeout). Injected only so tests can compress the wait.
+    public static let defaultSilenceTimeout: TimeInterval = 5 * SpacesDeviceResourcesFrame.samplingInterval
+    private let silenceTimeout: TimeInterval
+    /// When the last bytes arrived from the daemon. Guarded by `connectionLock`.
+    private var lastReceiveInstant = ContinuousClock.now
+    /// Set by whichever termination path runs first, so the silence watchdog can neither report a stream
+    /// that has already ended nor keep polling after it. Guarded by `connectionLock`.
+    private var hasFinished = false
+
+    public init(
+        authToken: String?, clientApp: SpacesDeviceClientApp?, resolver: SpacesDeviceEndpointResolver,
+        silenceTimeout: TimeInterval = SpacesDeviceResourcesStreamClient.defaultSilenceTimeout,
+        onFrame: @escaping @Sendable (SpacesDeviceResourcesFrame) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) throws {
+        guard UInt16(exactly: resolver.port) != nil, resolver.port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
+        self.request = SpacesDeviceAPIRequest(command: .subscribeDeviceResources, authToken: authToken, clientApp: clientApp)
+        self.resolver = resolver
+        self.silenceTimeout = silenceTimeout
+        self.onFrame = onFrame
+        self.onDisconnect = onDisconnect
+    }
+
+    /// Dropping the last reference to a live stream cancels its connection, which is what releases the
+    /// daemon's subscriber slot and stops its sampling.
+    deinit { stop() }
+
+    public func start(timeoutSeconds: TimeInterval = 10) throws {
+        let host = try SpacesDeviceAPIStreamEndpoint.host(resolver: resolver)
+        let createdConnection: any SpacesPinnedTLSLineConnection
+        do { createdConnection = try resolver.connect(host: host, timeout: timeoutSeconds) } catch {
+            resolver.noteStreamFailed(host: host)
+            throw error
+        }
+        connectionLock.lock()
+        connection = createdConnection
+        lastReceiveInstant = ContinuousClock.now
+        hasFinished = false
+        connectionLock.unlock()
+        let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(onDisconnect, resolver: resolver, host: host)
+        do { try createdConnection.sendLine(try SpacesDeviceAPICodec.encodeRequest(request), timeout: timeoutSeconds) } catch {
+            resolver.noteStreamFailed(host: host)
+            throw error
+        }
+        let onFrame = onFrame
+        createdConnection.startReceiveLoop(
+            onLine: { [weak self] line in
+                do {
+                    let frame = try SpacesDeviceResourcesStreamCodec.decodeLine(line)
+                    guard self != nil else { return }
+                    onFrame(frame)
+                } catch {
+                    guard self?.markFinished() ?? true else { return }
+                    // A non-frame line is a server error response; report it as a rejection, not a failure
+                    // to reach the daemon.
+                    if let response = try? SpacesDeviceAPICodec.decodeResponse(line) {
+                        onDisconnect(SpacesDeviceAPIRequestClientError.requestRejected(message: response.message, code: response.errorCode))
+                    } else {
+                        onDisconnect(error)
+                    }
+                    self?.stop()
+                }
+            },
+            onBytesReceived: { [weak self] in self?.noteBytesReceived() },
+            onClosed: { [weak self] error in
+                guard self?.markFinished() ?? true else { return }
+                onDisconnect(error)
+            })
+        startSilenceWatch(onDisconnect: onDisconnect)
+    }
+
+    private func noteBytesReceived() {
+        connectionLock.lock()
+        lastReceiveInstant = ContinuousClock.now
+        connectionLock.unlock()
+    }
+
+    /// True for the caller that got to end this stream, false for every later one, so a stall, a decode
+    /// failure, and the receive loop's own close cannot each report a disconnect for the same stream.
+    private func markFinished() -> Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        guard !hasFinished else { return false }
+        hasFinished = true
+        return true
+    }
+
+    /// Reports a stall when no frame arrives within `silenceTimeout`. Runs on its own thread, like the
+    /// overview stream's watchdog, because a saturated cooperative pool can leave a timer-based watchdog
+    /// unscheduled past its own timeout.
+    private func startSilenceWatch(onDisconnect: @escaping @Sendable ((any Error)?) -> Void) {
+        let checkInterval = TerminalStreamLiveness.silenceCheckIntervalSeconds(forTimeout: silenceTimeout)
+        SpacesBlockingIOThread.spawn(name: "spaces.device.resources-stream.liveness") { [weak self] in
+            while true {
+                Thread.sleep(forTimeInterval: checkInterval)
+                guard let self else { return }
+                connectionLock.lock()
+                let isRunning = !hasFinished && connection != nil
+                let isSilentPastTimeout = ContinuousClock.now - lastReceiveInstant >= .seconds(silenceTimeout)
+                connectionLock.unlock()
+                guard isRunning else { return }
+                guard isSilentPastTimeout else { continue }
+                guard markFinished() else { return }
+                onDisconnect(SpacesDeviceAPIRequestClientError.streamStalled)
+                stop()
+                return
+            }
+        }
+    }
+
+    public func stop() {
+        connectionLock.lock()
+        let activeConnection = connection
+        connection = nil
+        connectionLock.unlock()
+        activeConnection?.cancel()
+    }
+}
+
 /// Reads the per-workspace file-list-signature subscription stream: opens a pinned-TLS Device API
 /// connection, sends a `subscribeWorkspaceFileListSignature` request scoped to one workspace, and
 /// delivers each newline-framed `SpacesDeviceWorkspaceFileListSignatureFrame`. Unlike the diff/file

@@ -867,6 +867,23 @@ public enum SpacesDeviceClient {
         return client
     }
 
+    /// Opens a live resources subscription: the paired daemon samples its own machine every
+    /// `SpacesDeviceResourcesFrame.samplingInterval` and pushes one frame per sample for as long as the
+    /// connection is held. The daemon samples only while subscribed. The returned client must be retained
+    /// and `stop()`ped.
+    public static func subscribeDeviceResources(
+        context: DeviceRequestContext, onFrame: @escaping @Sendable (SpacesDeviceResourcesFrame) -> Void,
+        onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) throws -> SpacesDeviceResourcesStreamClient {
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(context: context)
+        let client = try SpacesDeviceResourcesStreamClient(
+            authToken: authToken, clientApp: context.clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: context.device, certificateFingerprint: certificateFingerprint), onFrame: onFrame,
+            onDisconnect: onDisconnect)
+        try client.start()
+        return client
+    }
+
     /// Opens a live per-workspace file-list-signature subscription: the paired daemon pushes a frame
     /// whenever the authoritative `workspaceFileList` result changes, and the caller re-fetches
     /// `workspaceFileList` on delivery rather than trusting any listing payload on the frame.
