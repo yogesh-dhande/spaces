@@ -259,6 +259,16 @@ extension SQLiteStore {
         try execute(sql: "UPDATE agent_sessions SET status = ?, updated_at = ? WHERE id = ?", bindings: [status.rawValue, updatedAt, id])
     }
 
+    /// Replaces only the row's conversation id, leaving status and `updated_at` alone, and moves a brief the
+    /// row wrote before it had a key to the conversation. `updated_at` is part of an alert's identity, so
+    /// a write that is not a status transition must not advance it.
+    public func setAgentSessionKey(id: String, sessionKey: String?) throws {
+        try withImmediateTransaction {
+            try execute(sql: "UPDATE agent_sessions SET session_key = NULLIF(?, '') WHERE id = ?", bindings: [sessionKey ?? "", id])
+            try moveRowBriefToConversation(agentID: id)
+        }
+    }
+
     public func agentSessionRuntimeTargetID(id: String) throws -> String? {
         let row = try queryRow(sql: "SELECT COALESCE(runtime_target_id, '') FROM agent_sessions WHERE id = ?", bindings: [id])
         guard let value = row?.first, !value.isEmpty else { return nil }
@@ -481,13 +491,21 @@ extension SQLiteStore {
         ).compactMap(decodeAgentSubscription)
     }
 
-    /// Timestamp of the most recent hook-sourced lifecycle signal for an agent session, or `nil` when it
-    /// has never been signaled. Readiness is defined by a real `spaces_agent_signal` event, so
-    /// foreground-detection events (a different source) are deliberately excluded.
+    /// The `agent_session_events.source` of status transitions derived from an agent's own OSC 7501
+    /// report.
+    static let programStatusEventSource = "osc7501"
+
+    /// Timestamp of the most recent lifecycle signal for an agent session, or `nil` when it has never
+    /// been signaled. Readiness is defined by the agent itself reporting its lifecycle to Spaces, so
+    /// foreground-detection events (a different source) are deliberately excluded. An OSC 7501 report
+    /// counts as much as a hook signal: it is the agent reporting from inside, it proves the status
+    /// channel works for an agent whose hooks are absent or broken, and the row it writes carries the
+    /// lifecycle history (and possibly subscribers) that the signaled-agent exit path exists to honor.
     public func lastAgentSignalAt(agentSessionID: String) throws -> String? {
         guard
             let value = try queryRow(
-                sql: "SELECT MAX(created_at) FROM agent_session_events WHERE agent_session_id = ? AND source = 'spaces_agent_signal'",
+                sql:
+                    "SELECT MAX(created_at) FROM agent_session_events WHERE agent_session_id = ? AND source IN ('spaces_agent_signal', '\(Self.programStatusEventSource)')",
                 bindings: [agentSessionID])?.first, !value.isEmpty
         else { return nil }
         return value

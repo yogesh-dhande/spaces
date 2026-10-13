@@ -239,7 +239,7 @@ extension WorkspaceOrchestrator {
         return terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind == .agent
     }
 
-    /// Whether this agent row has ever recorded a real hook lifecycle signal (`spaces_agent_signal`), as
+    /// Whether this agent row has ever recorded a real lifecycle signal (a hook, or the agent's own OSC 7501 report), as
     /// opposed to being pure foreground-detection state. This is the gate on demoting an ad-hoc
     /// detection-created row back to a plain terminal: foreground detection creates the row BEFORE the
     /// agent's first hook fires (always for hookless codex/opencode, whose first signal is `working`; a
@@ -739,6 +739,28 @@ extension WorkspaceOrchestrator {
             try updateAgentWindowStatusInTransaction(
                 workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey, label: label,
                 status: status, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys, readAgent: readAgent)
+        }
+    }
+
+    /// Applies a conversation-id update to a row without touching its status or `updatedAt`, for hooks
+    /// whose status writes are suppressed. The row is re-read inside the transaction: it is left alone
+    /// when it was removed or finalized (`.exited`) since the caller read it, and when the update leaves
+    /// the stored id unchanged, so a hook repeating the same id on every tool call neither revives a
+    /// row nor refreshes the `updatedAt` that dismissed alerts are keyed on. Returns whether the id changed.
+    @discardableResult public func updateAgentWindowSessionKey(
+        id: String, sessionKey: AgentSessionKeyUpdate, eventSource: String, environmentKeys: [String]? = nil
+    ) throws -> Bool {
+        try store.withTransaction {
+            guard let existing = try store.agentWindow(id: id), existing.status != .exited else { return false }
+            let newKey = sessionKey.applied(to: existing.sessionKey)
+            guard newKey != existing.sessionKey else { return false }
+            try store.setAgentSessionKey(id: id, sessionKey: newKey)
+            appendAgentSessionEvent(
+                agentSessionID: id, eventType: "session_key", source: eventSource,
+                message: agentSessionEventMessage(
+                    provider: existing.provider, label: existing.label, terminalTrackingID: existing.terminalTrackingID, sessionKey: newKey,
+                    environmentKeys: environmentKeys), createdAt: nowISO8601())
+            return true
         }
     }
 

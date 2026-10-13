@@ -725,7 +725,10 @@
             // `AlertsController.consumeFocusedSessionBellAlerts`). That is the decided behavior, not a gap:
             // a bell you are watching happen needs no notification, and Spaces renders no in-terminal bell
             // feedback by choice. Do not add one here.
-            case .setTitle, .setWorkingDirectory, .ringBell: break
+            //
+            // `.programStatus` is the daemon's alone for the same reason: it drives agent rows, which a
+            // mirror must never write.
+            case .setTitle, .setWorkingDirectory, .ringBell, .programStatus: break
             }
         }
 

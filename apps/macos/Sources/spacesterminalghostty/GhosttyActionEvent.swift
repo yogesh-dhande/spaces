@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 #if canImport(GhosttyKit)
     import GhosttyKit
@@ -31,6 +32,9 @@ public enum GhosttyActionEvent: Sendable, Equatable {
     /// payload with it, and the count is not meaningful either — its terminal layer already debounces
     /// repeats at 100 ms, so the event says the session rang, not how often.
     case ringBell
+    /// An OSC 7501 program status report. Only the daemon's session core acts on it (the full Ghostty
+    /// termio ignores OSC 7501 upstream, so the fork surfaces it as an action); mirror surfaces drop it.
+    case programStatus(state: TerminalProgramStatusState, id: String)
     case openURL(kind: OpenURLKind, value: String)
     case mouseOverLink(String?)
     case startSearch(String?)
@@ -62,6 +66,10 @@ public enum GhosttyActionEvent: Sendable, Equatable {
                 let value = String(cString: needle)
                 return .startSearch(value.isEmpty ? nil : value)
             case GHOSTTY_ACTION_RING_BELL: return .ringBell
+            case GHOSTTY_ACTION_PROGRAM_STATUS:
+                let report = action.action.program_status
+                guard let state = programStatusState(report.state) else { return nil }
+                return .programStatus(state: state, id: report.id.map { String(cString: $0) } ?? "")
             case GHOSTTY_ACTION_END_SEARCH: return .endSearch
             case GHOSTTY_ACTION_SEARCH_TOTAL:
                 let total = action.action.search_total.total
@@ -70,6 +78,18 @@ public enum GhosttyActionEvent: Sendable, Equatable {
                 let selected = action.action.search_selected.selected
                 return .searchSelected(selected >= 0 ? Int(selected) : nil)
             default: return nil
+            }
+        }
+
+        private static func programStatusState(_ state: ghostty_action_program_status_state_e) -> TerminalProgramStatusState? {
+            switch state {
+            case GHOSTTY_PROGRAM_STATUS_STATE_IDLE: .idle
+            case GHOSTTY_PROGRAM_STATUS_STATE_WORKING: .working
+            case GHOSTTY_PROGRAM_STATUS_STATE_DONE: .done
+            case GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED: .blocked
+            case GHOSTTY_PROGRAM_STATUS_STATE_ERROR: .error
+            case GHOSTTY_PROGRAM_STATUS_STATE_CLEAR: .clear
+            default: nil
             }
         }
 

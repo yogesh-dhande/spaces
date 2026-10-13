@@ -550,15 +550,23 @@
         private var handoffTranscriptReplayOffset: UInt64?
         private var lastResizeSerialByClientID: [String: UInt64] = [:]
         private let onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)?
+        private let onProgramStatus: TerminalProgramStatusHandler?
+        // Starts empty in every core, including one created by a daemon handoff, so an agent that was
+        // working keeps its row status until its next turn: the next `working` report re-establishes it,
+        // and an `idle` with no `working` since the handoff produces no done. Hooks deliver status
+        // meanwhile. Accepted: a handoff mid-turn is rare and the next turn heals it.
+        private var programStatusRelay = TerminalProgramStatusRelay()
 
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             requestSurfaceRefreshAction: (@TerminalEngineActor () -> Void)? = nil,
-            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil
+            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil,
+            onProgramStatus: TerminalProgramStatusHandler? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
             self.onSessionClosed = onSessionClosed
+            self.onProgramStatus = onProgramStatus
             controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
             stateStreamQueue = DispatchQueue(label: "spaces.terminal.session-host.state-stream.\(launchConfiguration.sessionID)")
             persistence = TerminalCorePersistenceQueue(label: "spaces.terminal.session-host.persistence.\(launchConfiguration.sessionID)")
@@ -2118,6 +2126,9 @@
             }
             let foregroundProcess = foregroundPID.flatMap(foregroundProcessResolver)
             let foregroundAgent = foregroundProcess.flatMap(TerminalForegroundProcessInspector.classify)
+            if let onProgramStatus, let event = programStatusRelay.observeForegroundAgent(foregroundAgent) {
+                onProgramStatus(launchConfiguration.sessionID, event)
+            }
             // Refresh the cached live cwd here (off the per-render broadcast path) so effectiveWorkingDirectory
             // publishes the process's real directory even when the shell never emits an OSC 7 PWD report.
             if let liveWorkingDirectory = Self.liveProcessWorkingDirectory(foregroundPID: foregroundPID, childPID: childPID) {
@@ -2472,6 +2483,16 @@
                 // the session locally and runs its own link detection, so the link opens on the device
                 // the user activated it from. `action_cb` still reports the action as handled, which
                 // keeps Ghostty's own shell-out fallback from opening it here instead.
+                return
+            case .programStatus(let state, let id):
+                // An action queued before termination can run after it; the stopped session's agent is gone.
+                guard !didTerminateCurrentRun else { return }
+                // The foreground classification is refreshed on a timer, so rebind to the agent running
+                // now before judging whether this report belongs to one.
+                refreshRuntimeState(force: false)
+                if let onProgramStatus, let event = programStatusRelay.receive(stateValue: state.rawValue, id: id) {
+                    onProgramStatus(launchConfiguration.sessionID, event)
+                }
                 return
             case .mouseOverLink, .startSearch, .endSearch, .searchTotal, .searchSelected: return
             }

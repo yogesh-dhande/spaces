@@ -771,6 +771,38 @@ static void spaces_ghostty_vt_on_pwd_changed(GhosttyTerminal terminal, void *use
     session->pending.pwd_changed = true;
 }
 
+// Reports per drain are capped so a program spraying OSC 7501 cannot grow the sink without bound;
+// the consumer's per-id record table is capped too, so losing the excess of one write turn is benign.
+#define SPACES_GHOSTTY_VT_MAX_PROGRAM_STATUS_REPORTS 1024u
+
+static void spaces_ghostty_vt_on_program_status(
+    GhosttyTerminal terminal, void *userdata, const GhosttyTerminalProgramStatus *report
+) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL || report == NULL) return;
+    size_t count = session->pending.program_status_report_count;
+    if (count >= SPACES_GHOSTTY_VT_MAX_PROGRAM_STATUS_REPORTS) return;
+
+    size_t id_len = report->id.ptr == NULL ? 0 : report->id.len;
+    char *id = (char *)malloc(id_len + 1);
+    if (id == NULL) return;
+    if (id_len > 0) memcpy(id, report->id.ptr, id_len);
+    id[id_len] = '\0';
+
+    SpacesGhosttyVtProgramStatusReport *grown = (SpacesGhosttyVtProgramStatusReport *)realloc(
+        session->pending.program_status_reports, (count + 1) * sizeof(SpacesGhosttyVtProgramStatusReport)
+    );
+    if (grown == NULL) {
+        free(id);
+        return;
+    }
+    grown[count].state = (uint32_t)report->state;
+    grown[count].id = id;
+    session->pending.program_status_reports = grown;
+    session->pending.program_status_report_count = count + 1;
+}
+
 static void spaces_ghostty_vt_on_write_pty(GhosttyTerminal terminal, void *userdata, const uint8_t *data, size_t len) {
     (void)terminal;
     SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
@@ -936,6 +968,9 @@ bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
         {GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_title_changed},
         {GHOSTTY_TERMINAL_OPT_PWD_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_pwd_changed},
         {GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (const void *)(uintptr_t)spaces_ghostty_vt_on_clipboard_write},
+        // Setting this option is also what makes libghostty-vt answer the `OSC 7501 ; ?` capability
+        // probe (through write_pty above); agents only report once they get that reply.
+        {GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS, (const void *)(uintptr_t)spaces_ghostty_vt_on_program_status},
         // GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ is deliberately not registered: with no read callback,
         // libghostty-vt denies OSC 52 "?" and OSC 5522 reads itself, and Spaces has nothing to serve
         // there anyway. The daemon holds no clipboard of its own (a session's clipboard lives on the
@@ -965,6 +1000,10 @@ void spaces_ghostty_vt_session_events_free(SpacesGhosttyVtSessionEvents *events)
     if (events == NULL) return;
     free(events->clipboard_text);
     free(events->pty_response);
+    for (size_t index = 0; index < events->program_status_report_count; index++) {
+        free(events->program_status_reports[index].id);
+    }
+    free(events->program_status_reports);
     memset(events, 0, sizeof(*events));
 }
 

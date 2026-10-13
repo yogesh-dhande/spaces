@@ -417,6 +417,10 @@ enum SpacesDaemonErrorClassification {
     /// cross-notification submission order. `nonisolated` so it is reachable from the nonisolated submitter.
     private nonisolated let agentNotificationDeliveryQueue = DispatchQueue(label: "spaces.agent-notification.delivery")
 
+    /// Terminal sessions whose coding agent has reported over OSC 7501; hook status signals for them are
+    /// ignored (see `ProgramStatusReportingSessions`).
+    private nonisolated let programStatusReportingSessions = ProgramStatusReportingSessions()
+
     init(launchExecutablePath: String) throws {
         self.launchExecutablePath = launchExecutablePath
         instanceLock = try TerminalServiceInstanceLock.acquire(path: try TerminalServicePaths.instanceLockPath())
@@ -2688,34 +2692,14 @@ enum SpacesDaemonErrorClassification {
         case done = "done"
         case exit = "exit"
 
-        /// The status each signal maps its agent row to. The `.exit` value is not consumed on the exit
-        /// path — `handleAgentExit` owns that decision (delete, `.done`, or `.exited`) — but reads
-        /// `.exited` so the mapping stays honest.
-        var status: AgentWindowStatus {
+        /// The status report this event carries, shared with OSC 7501 reports (see
+        /// `WorkspaceOrchestrator.recordAgentStatusSignal`); `init` and `exit` are lifecycle, not status.
+        var statusSignal: AgentStatusSignal? {
             switch self {
-            case .`init`: .idle
-            case .working: .spinning
-            case .blocked: .waiting
-            case .done: .done
-            case .exit: .exited
-            }
-        }
-
-        var establishesAgentFromEvidence: Bool {
-            switch self {
-            case .working, .blocked, .done: true
-            case .`init`, .exit: false
-            }
-        }
-
-        /// The subscriber notification this transition produces, or `nil` when it produces none. Only
-        /// blocked/done/exit wake a watcher; init and working are silent.
-        var childNotificationTransition: AgentNotificationEngine.ChildTransition? {
-            switch self {
+            case .working: .working
             case .blocked: .blocked
             case .done: .done
-            case .exit: .exited
-            case .`init`, .working: nil
+            case .`init`, .exit: nil
             }
         }
     }
@@ -2734,26 +2718,23 @@ enum SpacesDaemonErrorClassification {
             throw SpacesRuntimeError.invalidArgument(message: "Unsupported agent event '\(eventValue)'.")
         }
         _ = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
+        if let statusSignal = type.statusSignal {
+            let outcome = try orchestrator.recordAgentStatusSignal(
+                statusSignal, origin: .hook, workspaceID: workspaceID, terminalSessionID: sessionID, sessionKey: payload.agentSessionKey.sessionKeyUpdate,
+                detectedAgentLabel: profileAgentRuntimeLabel(sessionID: sessionID), programStatusSessions: programStatusReportingSessions,
+                makeNotificationEngine: { makeAgentNotificationEngine(orchestrator: orchestrator) })
+            return profileAgentStatusResponse(outcome, eventName: type.rawValue)
+        }
+
         let existingAgent = try matchingProfileAgentWindow(workspaceID: workspaceID, sessionID: sessionID, orchestrator: orchestrator)
         let signalLabel = profileAgentRuntimeLabel(sessionID: sessionID) ?? normalizedProfileArgument(existingAgent?.label)
-        let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && signalLabel != nil)
-        if !canRecordSignal { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
-
-        // Per-tool hooks fire `working` as each tool starts and again as it completes. When the
-        // agent is already working the signal changes nothing, so return before building the engine or
-        // posting the GUI-refresh notification; the orchestrator enforces the same duplicate-working
-        // suppression at the store layer for every other signal surface.
-        if type == .working, existingAgent?.status == type.status {
-            return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
-        }
+        if existingAgent == nil, type != .`init` { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
 
         let environmentKeys = [WorkspaceOrchestrator.terminalTrackingIDEnvVar]
         // What this signal reports about the agent's own conversation, turned into the row update it asks
         // for: keep the stored id when the signal names no conversation, drop it when the signal names one
         // that is not resumable yet (a fresh Claude Code session, including the one `/clear` opens), and
-        // replace it when the signal names a resumable conversation, so the newest resumable id wins. The
-        // duplicate-`working` suppression above can swallow one, which costs nothing: an agent reports the
-        // same conversation on every signal of a run, so the next transition applies it.
+        // replace it when the signal names a resumable conversation, so the newest resumable id wins.
         let agentSessionKey = payload.agentSessionKey.sessionKeyUpdate
         let engine = makeAgentNotificationEngine(orchestrator: orchestrator)
         // Whether this signal leaves the signaling terminal's own agent row idle/done, the single
@@ -2773,26 +2754,6 @@ enum SpacesDaemonErrorClassification {
             // A restart-init on a previously exited row resets to idle (registerAgentWindow) and flushes;
             // a reconnect on a live busy row stays spinning/waiting and must not.
             shouldFlushQueuedNotifications = registered.status.leavesSubscriberIdle
-        case .working:
-            // The first `working` after `blocked` is the resume that follows a permission approval —
-            // approvals fire no hook of their own, so this transition is also what withdraws any held
-            // "is blocked" line for this child before a subscriber can receive stale misinformation.
-            let resumedFromBlocked = existingAgent?.status == .waiting
-            guard
-                let updated = try updateExistingProfileAgentStatus(
-                    orchestrator, existingAgent: existingAgent, workspaceID: workspaceID, sessionID: sessionID, sessionKey: agentSessionKey,
-                    label: signalLabel, type: type, environmentKeys: environmentKeys)
-            else { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
-            if resumedFromBlocked { try engine.childDidResumeWorking(agentSessionID: updated.id) }
-            shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
-        case .blocked, .done:
-            guard
-                let updated = try updateExistingProfileAgentStatus(
-                    orchestrator, existingAgent: existingAgent, workspaceID: workspaceID, sessionID: sessionID, sessionKey: agentSessionKey,
-                    label: signalLabel, type: type, environmentKeys: environmentKeys)
-            else { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
-            if let transition = type.childNotificationTransition { try engine.childDidTransition(agent: updated, transition: transition) }
-            shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
             // Copilot's phantom `sessionEnd` for a session that never started is not this agent's exit
@@ -2807,26 +2768,67 @@ enum SpacesDaemonErrorClassification {
             // terminal is a bare shell (or gone) after an exit, so nothing more is flushed or discarded here.
             try orchestrator.finalizeAgentRow(
                 existingAgent, reason: .exited(eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys))
+            // The agent is gone, so what it reported over OSC 7501 no longer outranks the next agent's hooks.
+            programStatusReportingSessions.remove(sessionID: sessionID)
             shouldFlushQueuedNotifications = false
+        case .working, .blocked, .done:
+            // Handled by the status path above.
+            return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.")
         }
         if shouldFlushQueuedNotifications { try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID) }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }
 
-    /// Applies a `working`/`blocked`/`done` status. A signal that read an existing row may update only
-    /// that row: if a concurrent exit finalized it first, the signal is dropped (nil) rather than
-    /// recreating or reviving the row. A signal whose read found no row (it establishes the agent from evidence)
-    /// registers one.
-    private nonisolated func updateExistingProfileAgentStatus(
-        _ orchestrator: WorkspaceOrchestrator, existingAgent: AgentWindowRecord?, workspaceID: String, sessionID: String,
-        sessionKey: AgentSessionKeyUpdate, label: String?, type: ProfileAgentEventType, environmentKeys: [String]
-    ) throws -> AgentWindowRecord? {
+    private nonisolated func profileAgentStatusResponse(_ outcome: AgentStatusSignalOutcome, eventName: String) -> TerminalServiceProfileCommandResponse {
+        switch outcome {
+        case .ignored: return TerminalServiceProfileCommandResponse(message: "Agent \(eventName) ignored.")
+        case .unchanged: return TerminalServiceProfileCommandResponse(message: "Agent \(eventName) recorded.")
+        case .recorded:
+            postAgentEventNotification()
+            return TerminalServiceProfileCommandResponse(message: "Agent \(eventName) recorded.")
+        }
+    }
+
+    /// Writes an agent's OSC 7501 status change through the same path a hook status takes. Runs on
+    /// `agentNotificationDeliveryQueue`, off the terminal engine, because recording reaches the notification
+    /// engine's terminal-send, which hops onto the engine synchronously. The queue is serial, so one
+    /// terminal's transitions land in the order its agent reported them, and the exec handoff's drain of
+    /// that queue waits for them.
+    private nonisolated func recordProgramStatusTransition(sessionID: String, transition: TerminalProgramStatusTransition, agentLabel: String) {
+        guard livenessState.teardownRejection() == nil else { return }
+        let signal: AgentStatusSignal =
+            switch transition {
+            case .working: .working
+            case .blocked: .blocked
+            case .done: .done
+            }
         do {
-            return try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, sessionKey: sessionKey, label: label, status: type.status,
-                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys, readAgent: existingAgent)
-        } catch is AgentRowFinalizedError { return nil }
+            let orchestrator = try makeProfileOrchestrator()
+            // A terminal outside every workspace has no agent row to write.
+            guard let workspaceID = try orchestrator.workspaceIDForTerminalSession(sessionID) else { return }
+            let outcome = try orchestrator.recordAgentStatusSignal(
+                signal, origin: .programStatus, workspaceID: workspaceID, terminalSessionID: sessionID, sessionKey: .keep,
+                detectedAgentLabel: profileAgentRuntimeLabel(sessionID: sessionID) ?? normalizedProfileArgument(agentLabel),
+                programStatusSessions: programStatusReportingSessions,
+                makeNotificationEngine: { makeAgentNotificationEngine(orchestrator: orchestrator) })
+            if outcome == .recorded { postAgentEventNotification() }
+        } catch { writeStandardError("spacesd program_status_error session=\(sessionID) error=\(error)\n") }
+    }
+
+    /// Receives a session core's OSC 7501 events on the terminal engine actor. Marking the session as
+    /// reporting happens here, synchronously, so a hook arriving after the report already sees the
+    /// override; the database write is deferred off the engine.
+    private nonisolated func handleProgramStatusEvent(sessionID: String, event: TerminalProgramStatusEvent) {
+        switch event {
+        case .agentEnded:
+            programStatusReportingSessions.remove(sessionID: sessionID)
+        case .transition(let transition, let agentLabel):
+            programStatusReportingSessions.insert(sessionID: sessionID)
+            agentNotificationDeliveryQueue.async { [weak self] in
+                self?.recordProgramStatusTransition(sessionID: sessionID, transition: transition, agentLabel: agentLabel)
+            }
+        }
     }
 
     private nonisolated func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws
@@ -3159,6 +3161,9 @@ enum SpacesDaemonErrorClassification {
         do {
             if let sessionCore = sessionCores.removeValue(forKey: sessionID) {
                 sessionCore.terminate()
+                // `terminate()` does not run `onSessionClosed`, so the stopped agent's OSC 7501 ownership is
+                // dropped here, or a report still queued for delivery would pass the ownership check.
+                programStatusReportingSessions.remove(sessionID: sessionID)
                 // The writes `terminate()` just enqueued, the `.exited` state among them, are what a capture
                 // reads to tell a killed agent from a live one, so the core stays reachable by the capture
                 // fence until they commit.
@@ -3205,11 +3210,13 @@ enum SpacesDaemonErrorClassification {
                 let sessionID = closedCore.launchConfiguration.sessionID
                 guard self?.sessionCores[sessionID] === closedCore else { return }
                 self?.sessionCores.removeValue(forKey: sessionID)
+                self?.programStatusReportingSessions.remove(sessionID: sessionID)
                 // Same reason as the terminate path: a session that ended on its own writes its `.exited`
                 // state write-behind, and a capture taken before it lands would offer the agent back.
                 self?.retainUntilPersistenceDrains(closedCore)
                 self?.clearWorkspaceRunningAfterSessionExit(closedCore)
-            })
+            },
+            onProgramStatus: { [weak self] sessionID, event in self?.handleProgramStatusEvent(sessionID: sessionID, event: event) })
         sessionCores[launchConfiguration.sessionID] = created
         return created
     }

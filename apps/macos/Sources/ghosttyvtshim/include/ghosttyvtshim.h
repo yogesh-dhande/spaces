@@ -203,6 +203,14 @@ enum {
     SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES = 1 * 1024 * 1024,
 };
 
+// One OSC 7501 report. `state` carries the libghostty-vt GhosttyProgramStatusState value
+// (0 idle, 1 working, 2 done, 3 blocked, 4 error, 5 clear). `id` is a NUL-terminated copy; the empty
+// string is the root record.
+typedef struct {
+    uint32_t state;
+    char *id;
+} SpacesGhosttyVtProgramStatusReport;
+
 // What the terminal's effect callbacks observed since the last drain. libghostty-vt invokes those
 // callbacks synchronously inside `ghostty_terminal_vt_write`, so they only record here; the caller
 // drains once per write turn and acts on the engine.
@@ -226,6 +234,10 @@ typedef struct {
     // Query responses (DSR, DECRQM, color reports, XTVERSION) concatenated in emission order, malloc'd.
     char *pty_response;
     size_t pty_response_len;
+    // OSC 7501 program status reports in emission order, malloc'd, NULL when none arrived. Order
+    // matters: the consumer folds them into per-id records, and a clear erases what came before it.
+    SpacesGhosttyVtProgramStatusReport *program_status_reports;
+    size_t program_status_report_count;
 } SpacesGhosttyVtSessionEvents;
 
 // Registers the terminal's effect callbacks against this session, so subsequent writes accumulate
