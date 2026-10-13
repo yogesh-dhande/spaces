@@ -31,7 +31,7 @@ Spaces is a native Mac app (not Electron) that gives each piece of work its own 
 ### Across machines
 
 - **Remote machines**: pair a Mac or a Linux machine and work in its workspaces, terminals, and processes from your Mac. Sessions run on that machine and keep running when your Mac disconnects or the app quits.
-- **iPhone and iPad**: the iOS app is a full client, a peer of the Mac app rather than a remote for it. It pairs by QR code directly with any Mac or Linux machine running Spaces and works with that machine's workspaces, live terminals, agents, alerts, and automations, with no Mac in the path. It is in beta on TestFlight, by invitation: [open a GitHub issue](https://github.com/yogesh-dhande/spaces/issues/new) to ask for one.
+- **iPhone and iPad**: the iOS app is a full client, a peer of the Mac app rather than a remote for it. It pairs by QR code directly with any Mac or Linux machine running Spaces and works with that machine's workspaces, live terminals, agents, alerts, and automations, with no Mac in the path. It is on the [App Store](https://apps.apple.com/app/id6791713994), a yearly subscription with a one-week free trial.
 
 ### Keyboard
 
@@ -49,7 +49,7 @@ Spaces is a native Mac app (not Electron) that gives each piece of work its own 
 - **Google Chrome**, for browser sessions. On first launch Spaces asks for the macOS Automation permission to control Chrome; browser sessions cannot open or focus without it.
 - **Remote Linux machine** (optional): Ubuntu 24.04 and 26.04, Debian 13, Fedora 43, and AlmaLinux 10, on x86_64 or arm64, reachable over SSH for pairing. Other Linux distributions with glibc 2.38 or newer and systemd should work but are not tested.
 - **Remote Mac** (optional): Spaces installed and opened once.
-- **iPhone or iPad** (optional): iOS 17 or later, with a TestFlight invitation.
+- **iPhone or iPad** (optional): iOS 17 or later, with the app from the [App Store](https://apps.apple.com/app/id6791713994).
 
 ## Install
 
