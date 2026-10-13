@@ -107,6 +107,40 @@ final class CodingAgentResumeCommandTests: XCTestCase {
         XCTAssertFalse(CodingAgent.launchIsOneShotJob(launchCommand: "pi --model sonnet:high --thinking high"))
     }
 
+    // MARK: - Amp: threads continue <key> at the end of the agent's segment
+
+    func testAmpAppendsThreadsContinueAfterTheGlobalOptions() {
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "amp", sessionKey: "T-1"), "amp threads continue T-1")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "amp -m high", sessionKey: "T-1"), "amp -m high threads continue T-1")
+        XCTAssertEqual(
+            CodingAgent.resumeCommand(launchCommand: "amp --mcp-config x.json && notify", sessionKey: "T-1"),
+            "amp --mcp-config x.json threads continue T-1 && notify")
+    }
+
+    func testAmpSwapsAThreadTheCommandAlreadyNames() {
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "amp threads continue T-old", sessionKey: "T-1"), "amp threads continue T-1")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "amp -m high t c T-old", sessionKey: "T-1"), "amp -m high t c T-1")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "amp thread continue", sessionKey: "T-1"), "amp thread continue T-1")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "amp last", sessionKey: "T-1"), "amp threads continue T-1")
+        XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: "amp -m high l", sessionKey: "T-1"), "amp -m high threads continue T-1")
+    }
+
+    /// Execute and stream runs and every subcommand but `threads continue` and `last` print and exit, so
+    /// they come back exactly as typed.
+    func testAmpOneShotRunsAreRelaunchedExactlyAsTyped() {
+        let oneShots = [
+            #"amp -x "do it""#, #"amp --execute "do it""#, #"amp -ox "do it""#, "amp --stream-json", "amp --stream-json-input", "amp --no-tui",
+            "amp threads list", "amp t l", "amp threads", "amp mcp list", "amp plugins list", "amp login", "amp update",
+        ]
+        for command in oneShots {
+            XCTAssertTrue(CodingAgent.launchIsOneShotJob(launchCommand: command), command)
+            XCTAssertEqual(CodingAgent.resumeCommand(launchCommand: command, sessionKey: "T-1"), command)
+        }
+        for command in ["amp", "amp -m high", "amp threads continue T-old", "amp t c", "amp last", "amp l"] {
+            XCTAssertFalse(CodingAgent.launchIsOneShotJob(launchCommand: command), command)
+        }
+    }
+
     /// A relaunch command keeps the executable the agent was invoked with, so every name a detection
     /// variant matches has to reach an agent here, and so does each agent's own canonical name for the node
     /// wrapper that is rewritten to it. A name this scan does not know silently skips the rewrite, and the

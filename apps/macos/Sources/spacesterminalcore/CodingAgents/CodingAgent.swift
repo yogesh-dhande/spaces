@@ -17,6 +17,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
     case opencode
     case copilot
     case pi
+    case amp
 
     public var displayName: String {
         switch self {
@@ -26,6 +27,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         case .copilot: "Copilot"
         // Lowercase is the product's own styling.
         case .pi: "pi"
+        case .amp: "Amp"
         }
     }
 
@@ -37,6 +39,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         case .opencode: "OC"
         case .copilot: "CP"
         case .pi: "PI"
+        case .amp: "AM"
         }
     }
 
@@ -50,6 +53,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         case .opencode: ["opencode"]
         case .copilot: ["copilot"]
         case .pi: ["pi"]
+        case .amp: ["amp"]
         }
     }
 
@@ -57,7 +61,7 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
     public var primaryCommandName: String { executableNames[0] }
 
     /// All agents' `primaryCommandName`s joined in prose, Oxford-comma style: "claude, codex,
-    /// opencode, copilot, or pi". Derived from `allCases` so a new agent appears automatically in help/error text that
+    /// opencode, copilot, pi, or amp". Derived from `allCases` so a new agent appears automatically in help/error text that
     /// enumerates supported commands.
     public static var commandListText: String {
         let names = allCases.map(\.primaryCommandName)
@@ -80,6 +84,9 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         case .copilot: home.appendingPathComponent(".copilot", isDirectory: true)
         // pi's `PI_CODING_AGENT_DIR` override is not read, for the same reason as `COPILOT_HOME`.
         case .pi: home.appendingPathComponent(".pi/agent", isDirectory: true)
+        // Amp's `XDG_CONFIG_HOME` override is not read, for the same reason as `COPILOT_HOME`. Its binary
+        // lives in `~/.amp/bin`, which is not config.
+        case .amp: home.appendingPathComponent(".config/amp", isDirectory: true)
         }
     }
 }

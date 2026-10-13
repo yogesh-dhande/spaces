@@ -123,7 +123,7 @@ export const docsNavGroups: DocsNavGroup[] = [
         href: "/docs/coding-agents",
         title: "Agent status",
         summary:
-          "How Spaces knows whether Claude Code, Codex, opencode, GitHub Copilot CLI, or pi is working, waiting for you, or done.",
+          "How Spaces knows whether Claude Code, Codex, opencode, GitHub Copilot CLI, pi, or Amp is working, waiting for you, or done.",
       },
       {
         href: "/docs/orchestration",
@@ -174,7 +174,7 @@ export const docsNavGroups: DocsNavGroup[] = [
         href: "/docs/mcp",
         title: "MCP tools",
         summary:
-          "Connect Claude Code, Codex, opencode, GitHub Copilot CLI, or pi to Spaces and see the tools they get.",
+          "Connect Claude Code, Codex, opencode, GitHub Copilot CLI, pi, or Amp to Spaces and see the tools they get.",
       },
       {
         href: "/docs/spaces-yaml",

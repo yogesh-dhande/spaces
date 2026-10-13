@@ -161,7 +161,7 @@ spaces agent signal <event> [--workspace <id>] [--session <id>] [--agent-session
           rows={[
             [
               <InlineCode key="command">--command &lt;cmd&gt;</InlineCode>,
-              "Command that launches a supported coding agent (claude, codex, opencode, copilot, or pi).",
+              "Command that launches a supported coding agent (claude, codex, opencode, copilot, pi, or amp).",
             ],
             [
               <InlineCode key="workspace">--workspace &lt;id&gt;</InlineCode>,
@@ -204,7 +204,7 @@ spaces device remove <name-or-id>`}</CodeBlock>
         <CodeBlock>{`spaces mcp`}</CodeBlock>
         <Prose>
           Runs the Spaces MCP server over standard input and output, so an MCP client such as
-          Claude Code, Codex, opencode, GitHub Copilot CLI, or pi can connect. See{" "}
+          Claude Code, Codex, opencode, GitHub Copilot CLI, pi, or Amp can connect. See{" "}
           <DocLink href="/docs/mcp">MCP tools</DocLink> for setup and the tool list.
         </Prose>
       </Section>

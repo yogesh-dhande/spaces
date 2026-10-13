@@ -1,6 +1,6 @@
 import Foundation
 
-/// The `const SPACES_CLI = "..."` line the script-file integrations (opencode's plugin, pi's extension)
+/// The `const SPACES_CLI = "..."` line the script-file integrations (opencode's plugin, pi's extension, Amp's plugin)
 /// bake the installed `spaces` path into, and the inverse that reads it back for install-state checks.
 enum AgentHookEmbeddedCLIPath {
     private static let declarationPrefix = "const SPACES_CLI = \""

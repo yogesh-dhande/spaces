@@ -93,7 +93,7 @@ struct AgentHookCopilotTests {
     }
 
     @Test func otherAgentsExitsAlwaysCount() {
-        for agent in [CodingAgent.claudeCode, .codex, .opencode, .pi] {
+        for agent in [CodingAgent.claudeCode, .codex, .opencode, .pi, .amp] {
             #expect(agent.exitSignalCounts(reportedKey: .unreported, rowSessionKey: nil))
             #expect(agent.exitSignalCounts(reportedKey: .resumable("a"), rowSessionKey: "b"))
         }

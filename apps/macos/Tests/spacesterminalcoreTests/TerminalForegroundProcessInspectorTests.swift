@@ -191,6 +191,20 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
         XCTAssertEqual(snapshot?.displayCommand, "pi")
     }
 
+    /// The official installer puts a Mach-O binary at `~/.amp/bin/amp`, and `ps` shows the real argv
+    /// (verified against amp 0.0.1791849701). An npm install runs a node script under `@sourcegraph/amp`.
+    func testClassifiesAmpNativeAndNodeShapes() {
+        let native = TerminalForegroundProcessSnapshot(pid: 130, executablePath: "/Users/me/.amp/bin/amp", argv: ["amp", "-m", "high"])
+        let node = TerminalForegroundProcessSnapshot(
+            pid: 131, executablePath: "/opt/homebrew/bin/node",
+            argv: ["node", "/opt/homebrew/lib/node_modules/@sourcegraph/amp/dist/main.js"])
+
+        for process in [native, node] {
+            XCTAssertEqual(TerminalForegroundProcessInspector.classify(process)?.detectedAgentKind, .amp, "pid \(process.pid)")
+            XCTAssertEqual(TerminalForegroundProcessInspector.classify(process)?.displayLabel, "amp", "pid \(process.pid)")
+        }
+    }
+
     /// The deprecated 0.73.x package lacks the extension events the integration needs, so it is not pi.
     func testDoesNotClassifyTheDeprecatedPiPackageAsPi() {
         let deprecated = TerminalForegroundProcessSnapshot(

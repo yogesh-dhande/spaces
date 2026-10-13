@@ -129,7 +129,7 @@ export default function AutomationsDocsPage() {
         <ul className="mt-4 space-y-2.5">
           <Field
             name="Agent"
-            description="An agent command (defaults to claude, and may carry flags such as --model; also works with codex, opencode, copilot, and pi) and a multiline prompt sent once the agent is ready for it."
+            description="An agent command (defaults to claude, and may carry flags such as --model; also works with codex, opencode, copilot, pi, and amp) and a multiline prompt sent once the agent is ready for it."
           />
           <Field
             name="Script"

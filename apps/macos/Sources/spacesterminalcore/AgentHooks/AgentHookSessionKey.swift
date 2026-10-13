@@ -57,6 +57,12 @@ public enum AgentHookSessionKeyReport: Equatable, Sendable {
 /// directory): pi creates that file at the first prompt, and `pi --session`
 /// cannot open a session without one, so the same exists-or-pending rule applies (verified against
 /// pi 1.1.0). A `--no-session` run sends no payload.
+///
+/// Amp's plugin writes `{ "session_id": "T-<uuid>" }` only, the thread id `amp threads continue` takes,
+/// with no transcript path (Amp keeps no transcript file), so it reports `resumable` as it stands.
+/// Amp emits the id at the thread's first prompt, by which point the thread exists. When the user starts
+/// a new thread, the plugin sends an empty `session_id`, which for Amp alone reads `pending`: the thread
+/// the row held has been left and the new one has no id yet, the same moment pi's `/new` reports.
 public enum AgentHookSessionKey {
     /// The top-level JSON key Claude Code and Codex use.
     static let payloadKey = "session_id"
@@ -79,7 +85,7 @@ public enum AgentHookSessionKey {
             let value = fields[agent == .copilot ? copilotPayloadKey : payloadKey] as? String
         else { return .unreported }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return .unreported }
+        guard !trimmed.isEmpty else { return agent == .amp ? .pending : .unreported }
         guard let transcriptPath = normalizedTranscriptPath(inFields: fields) else { return .resumable(trimmed) }
         return transcriptExists(transcriptPath) ? .resumable(trimmed) : .pending
     }

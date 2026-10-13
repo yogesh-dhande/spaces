@@ -9,7 +9,7 @@ final class AgentSpawnCommandGateTests: XCTestCase {
         let cases: [(command: String, expected: CodingAgent?)] = [
             ("claude", .claudeCode), ("codex --yolo", .codex), ("FOO=1 claude", .claudeCode), ("env FOO=1 codex", .codex),
             ("/usr/local/bin/claude -c", .claudeCode), ("opencode", .opencode), ("copilot -i hi", .copilot), ("/opt/homebrew/bin/copilot", .copilot),
-            ("pi", .pi), ("pi --model sonnet:high", .pi),
+            ("pi", .pi), ("pi --model sonnet:high", .pi), ("amp", .amp), ("amp -m high", .amp),
             ("vim", nil), ("", nil), ("env", nil),
         ]
         for testCase in cases {
@@ -28,6 +28,7 @@ final class AgentSpawnCommandGateTests: XCTestCase {
         XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "env FOO=1 opencode"), .opencode)
         XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "copilot --allow-all-tools"), .copilot)
         XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "pi --model sonnet:high"), .pi)
+        XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "amp -m high"), .amp)
     }
 
     /// Registry-completeness check: every agent's own `primaryCommandName` must resolve through the
