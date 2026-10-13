@@ -248,15 +248,21 @@
         private var heldMouseButtons = Set<UInt8>()
         private var inputOutputResyncTask: Task<Void, Never>?
         private let onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)?
+        private let onProgramStatus: TerminalProgramStatusHandler?
+        // Starts empty after a daemon handoff; same accepted behavior as the Mac embedded core (see
+        // GhosttyEmbeddedSessionHost): a working agent keeps its row status until its next turn.
+        private var programStatusRelay = TerminalProgramStatusRelay()
 
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             requestSurfaceRefreshAction _: (@TerminalEngineActor () -> Void)? = nil,
-            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil
+            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil,
+            onProgramStatus: TerminalProgramStatusHandler? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
             self.onSessionClosed = onSessionClosed
+            self.onProgramStatus = onProgramStatus
             controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
             stateStreamQueue = DispatchQueue(label: "spaces.terminal.session-host.state-stream.\(launchConfiguration.sessionID)")
             persistence = TerminalCorePersistenceQueue(label: "spaces.terminal.session-host.persistence.\(launchConfiguration.sessionID)")
@@ -741,6 +747,9 @@
             sendQueryResponses(events.ptyResponse)
             applyBellEvents(count: events.bellCount)
             writeRuntimeState(state: .running)
+            // After the runtime state write: building it is what classifies the foreground agent, and a
+            // report is only meaningful against the agent running as of the output that carried it.
+            applyProgramStatusReports(events.programStatusReports)
             broadcastCurrentState(reason: .output)
             // After the output broadcast: that payload carries the screen frame, this one carries no
             // screen state at all, so the frame keeps the delta chain and the metadata reason only
@@ -1541,6 +1550,9 @@
             /// sentinel. Over-cap and non-standard-destination writes never reach here: the shim
             /// drops them at capture.
             var clipboardText: String?
+            /// OSC 7501 reports in emission order. Handoff replay drains discard them: those bytes are
+            /// as old as the handoff window, and the agent's current state arrives with its next report.
+            var programStatusReports: [(state: UInt32, id: String)] = []
         }
 
         /// Takes the events the vt session accumulated during the writes since the last drain. The C
@@ -1559,7 +1571,25 @@
             } else if raw.clipboard_cleared {
                 events.clipboardText = ""
             }
+            for index in 0..<raw.program_status_report_count {
+                let report = raw.program_status_reports[index]
+                events.programStatusReports.append((report.state, report.id.map { String(cString: $0) } ?? ""))
+            }
             return events
+        }
+
+        private func applyProgramStatusReports(_ reports: [(state: UInt32, id: String)]) {
+            guard let onProgramStatus else { return }
+            let sessionID = launchConfiguration.sessionID
+            for report in reports {
+                if let event = programStatusRelay.receive(stateValue: report.state, id: report.id) { onProgramStatus(sessionID, event) }
+            }
+        }
+
+        /// Rebinds the OSC 7501 relay to the foreground agent a runtime-state snapshot just classified.
+        private func observeForegroundAgentForProgramStatus(_ agent: TerminalForegroundAgentSnapshot?) {
+            guard let onProgramStatus, let event = programStatusRelay.observeForegroundAgent(agent) else { return }
+            onProgramStatus(launchConfiguration.sessionID, event)
         }
 
         /// Folds this turn's bells into the timestamp the runtime state publishes. The whole turn's bells
@@ -1795,6 +1825,7 @@
             let foregroundPID = ptyDriver.foregroundPID()
             let foregroundProcess = foregroundPID.flatMap { TerminalForegroundProcessInspector.inspect(pid: $0) }
             let foregroundAgent = foregroundProcess.flatMap { TerminalForegroundProcessInspector.classify($0) }
+            observeForegroundAgentForProgramStatus(foregroundAgent)
             // Refresh the cached live cwd here so effectiveWorkingDirectory publishes the process's real
             // directory even when the shell never reports a new PWD through Ghostty shell integration
             // (OSC 7). Platform parity with `GhosttyEmbeddedSessionCore.refreshRuntimeState`.

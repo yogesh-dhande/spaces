@@ -18,6 +18,7 @@ import ghosttyvtshim
         var clipboardCleared = false
         var clipboardDropped = false
         var ptyResponse = ""
+        var programStatus: [(state: UInt32, id: String)] = []
     }
 
     private func makeSession(events: Bool = true) throws -> OpaquePointer {
@@ -48,6 +49,10 @@ import ghosttyvtshim
             events.ptyResponse = response.withMemoryRebound(to: UInt8.self, capacity: raw.pty_response_len) {
                 String(decoding: UnsafeBufferPointer(start: $0, count: raw.pty_response_len), as: UTF8.self)
             }
+        }
+        for index in 0..<raw.program_status_report_count {
+            let report = raw.program_status_reports[index]
+            events.programStatus.append((report.state, String(cString: report.id)))
         }
         return events
     }
@@ -277,6 +282,36 @@ import ghosttyvtshim
         #expect(spaces_ghostty_vt_session_set_theme(session, &lightTheme))
         write(session, "\u{1B}[?996n")
         #expect(drain(session).ptyResponse == "\u{1B}[?997;2n")
+    }
+
+    /// Reports arrive in emission order with the state and a copied id, so a consumer can fold them
+    /// into per-id records. State values are libghostty-vt's: working 1, done 2, blocked 3, clear 5.
+    @Test func programStatusReportsAreCapturedInOrderWithTheirIds() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        write(session, "\u{1B}]7501;state=working\u{07}\u{1B}]7501;state=blocked:id=build/test\u{07}\u{1B}]7501;state=clear:id=build\u{07}")
+        let events = drain(session)
+        #expect(events.programStatus.map(\.state) == [1, 3, 5])
+        #expect(events.programStatus.map(\.id) == ["", "build/test", "build"])
+        #expect(drain(session).programStatus.isEmpty)
+    }
+
+    /// Agents only report after the terminal answers the `?` probe, and libghostty-vt answers it only
+    /// when a status callback is installed.
+    @Test func theProgramStatusProbeIsAnsweredOnlyWhenEventsAreEnabled() throws {
+        let enabled = try makeSession()
+        defer { spaces_ghostty_vt_session_free(enabled) }
+        write(enabled, "\u{1B}]7501;?\u{07}")
+        #expect(drain(enabled).ptyResponse == "\u{1B}]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\u{07}")
+
+        let inert = try makeSession(events: false)
+        defer { spaces_ghostty_vt_session_free(inert) }
+        write(inert, "\u{1B}]7501;?\u{07}")
+        write(inert, "\u{1B}]7501;state=working\u{07}")
+        let events = drain(inert)
+        #expect(events.ptyResponse.isEmpty)
+        #expect(events.programStatus.isEmpty)
     }
 
     /// Events are opt-in because a session that replays a transcript must not re-raise the bells and

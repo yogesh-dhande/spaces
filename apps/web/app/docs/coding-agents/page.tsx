@@ -104,6 +104,13 @@ export default function CodingAgentsDocsPage() {
           identity, so Spaces ignores it rather than show its status on the wrong row. Agents running
           inside tmux or screen therefore don&apos;t report status to Spaces.
         </Prose>
+        <Prose>
+          Agents that report their own status to the terminal (Claude Code and Codex do, through the
+          terminal Program Status Protocol) take over the working, blocked, and done states of their
+          row from the hooks, and raise the same alerts. Hooks still provide the conversation Spaces
+          resumes, the brief, and when the agent starts and exits. This needs no setup, and it applies
+          only to terminals where Spaces has identified a coding agent.
+        </Prose>
       </Section>
 
       <Section id="codex-server" title="Codex's background server">
