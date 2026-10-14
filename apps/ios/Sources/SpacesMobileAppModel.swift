@@ -3018,6 +3018,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // the shared channel's overview refreshes.
         let channel = bridgeClient.makeCommandChannel()
         defer { Task { await channel.close() } }
+        // A finished loop drops its handle, which is how `reconcileDaemonSelfUpdateAttempt` tells that no
+        // poll is running when a stopped attempt starts moving again.
+        defer { if generation == daemonSelfUpdatePollGeneration { daemonSelfUpdatePollTask = nil } }
         func isCurrent() -> Bool {
             !Task.isCancelled && generation == daemonSelfUpdatePollGeneration && identity == overviewIdentity
                 && daemonSelfUpdateAttempts[daemonSelfUpdateKey] != nil && !isDaemonSelfUpdateCompleted
@@ -3076,6 +3079,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             attempt.restartingSince = daemonSelfUpdateNow
             daemonSelfUpdateAttempts[key] = attempt
         }
+        // The poll stops on a failure; another client's retry then reaches this app only as an in-flight
+        // report, and without a poll the device going away mid-restart would never be noticed.
+        if presentation.isInFlight, daemonSelfUpdatePollTask == nil { startDaemonSelfUpdatePolling() }
     }
 
     /// Resumes (or stops) the poll for whichever device is now active; an attempt belongs to its device
