@@ -2190,7 +2190,8 @@ private struct DeviceSyncState {
             case .none: break
             }
             if SidebarDeviceSectionStatus.offersSelfUpdate(
-                compatibility: section?.compatibility, presentation: host.daemonUpdate.selfUpdatePresentation(deviceID: deviceID))
+                compatibility: section?.compatibility, isUpdateStaged: section?.daemonStatus?.isUpdatePending == true,
+                presentation: host.daemonUpdate.selfUpdatePresentation(deviceID: deviceID))
             {
                 // Accent, not orange: the device works, and an update is on offer or under way. It opens
                 // the same block the incompatible device's button does.
