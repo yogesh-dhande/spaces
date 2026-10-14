@@ -160,6 +160,9 @@
         /// boundary instead of waiting out a real second.
         private static let defaultRenderUpdateResyncInterval: TimeInterval = 1
         var renderUpdateResyncIntervalForTesting: TimeInterval?
+        /// Whether a throttled resync is still owed its delayed retry. Only a test reads it, to assert the
+        /// retry was armed and later retired without waiting on the wall clock.
+        var hasPendingRenderUpdateResyncForTesting: Bool { pendingRenderUpdateResyncTask != nil }
         private var renderUpdateResyncInterval: TimeInterval { renderUpdateResyncIntervalForTesting ?? Self.defaultRenderUpdateResyncInterval }
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
