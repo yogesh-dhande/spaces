@@ -11,9 +11,10 @@ struct DaemonSelfUpdateCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(content.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text)
+                // One line however long the device name is; the version pair keeps its room.
+                Text(content.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
-                DaemonVersionPairLabel(pair: content.versionPair)
+                DaemonVersionPairLabel(pair: content.versionPair).layoutPriority(1)
             }
             Text(content.body).font(.system(size: 13)).foregroundStyle(Theme.mutedSecondary).fixedSize(horizontal: false, vertical: true)
             if let progress = content.progress { DaemonSelfUpdateProgressBar(progress: progress) }

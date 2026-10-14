@@ -20,9 +20,13 @@ enum SidebarDeviceSectionStatus: Equatable {
 extension SidebarDeviceSectionStatus {
     /// Whether a device's header carries the accent Update button: the device is usable (an incompatible
     /// one shows its Resolve button instead, and one that is away has no verdict) and its self-update has
-    /// something to show.
+    /// something to show. A finished update is confirmed in the device's block, not offered again.
     static func offersSelfUpdate(compatibility: SpacesWireCompatibility?, presentation: DaemonSelfUpdatePresentation) -> Bool {
-        compatibility?.isCompatible == true && presentation != .none
+        guard compatibility?.isCompatible == true else { return false }
+        switch presentation {
+        case .none, .updated: return false
+        case .available, .downloading, .installing, .restarting, .stillRestarting, .failed: return true
+        }
     }
 
     /// Resolves a device section's caption area from the facts the sidebar holds about it. Pure, so the

@@ -54,6 +54,24 @@ final class DaemonSelfUpdateStatusTests: XCTestCase {
         XCTAssertEqual(cache.current, found)
     }
 
+    /// The run installs its build before handing off to it; that window is not a staged update for a
+    /// client to apply, or the Mac fires a second handoff and swaps the update block for a staged one.
+    func testABuildInstalledByAMovingSelfUpdateRunIsNotStaged() {
+        func status(step: DaemonSelfUpdateProgress.Step?) -> TerminalServiceDaemonStatus {
+            TerminalServiceDaemonStatus(
+                version: "0.23.0", installedVersion: "0.24.0", certificateFingerprint: nil, activeSessionCount: 0,
+                selfUpdate: DaemonSelfUpdateStatus(
+                    channel: .stable, availableVersion: "0.24.0",
+                    progress: step.map { DaemonSelfUpdateProgress(targetVersion: "0.24.0", step: $0, failureReason: $0 == .failed ? "x" : nil) }))
+        }
+
+        XCTAssertNil(status(step: .installing).stagedVersion)
+        XCTAssertNil(status(step: .restarting).stagedVersion)
+        XCTAssertEqual(DaemonUpdateRemedy.remedy(for: status(step: .installing)), .none)
+        XCTAssertEqual(status(step: .failed).stagedVersion, "0.24.0")
+        XCTAssertEqual(status(step: nil).stagedVersion, "0.24.0")
+    }
+
     func testSelfUpdateWithUnknownProgressStepDegradesToNil() throws {
         let decoded = try decode(
             #"{"version":"1.2.3","selfUpdate":{"channel":"stable","progress":{"targetVersion":"1.3.0","step":"verifying"}}}"#)

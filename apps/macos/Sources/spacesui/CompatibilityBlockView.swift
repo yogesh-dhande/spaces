@@ -147,16 +147,25 @@ final class CompatibilityBlockView: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let eyebrow = NSTextField(labelWithAttributedString: Self.eyebrowText(content.eyebrow, tone: content.eyebrowTone))
+        // One line however long the device name is; the tooltip keeps the full text reachable.
+        eyebrow.maximumNumberOfLines = 1
+        eyebrow.lineBreakMode = .byTruncatingTail
+        eyebrow.toolTip = content.eyebrow.uppercased()
+        eyebrow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(eyebrow)
+        eyebrow.widthAnchor.constraint(lessThanOrEqualToConstant: Self.bodyMeasure).isActive = true
         stack.setCustomSpacing(14, after: eyebrow)
 
         let pair = Self.versionPairRow(content.versionPair)
         stack.addArrangedSubview(pair)
         stack.setCustomSpacing(8, after: pair)
 
-        let whoLine = NSTextField(labelWithString: content.whoLine)
+        let whoLine = NSTextField(wrappingLabelWithString: content.whoLine)
         whoLine.font = Typography.metadata
         whoLine.textColor = Theme.mutedSecondary
+        whoLine.alignment = .center
+        // Same measure as the body, so a long device name wraps inside the column instead of clipping.
+        whoLine.preferredMaxLayoutWidth = Self.bodyMeasure
         stack.addArrangedSubview(whoLine)
         stack.setCustomSpacing(18, after: whoLine)
 
@@ -246,7 +255,13 @@ final class CompatibilityBlockView: NSView {
     /// offer or under way. Uppercased here so the shared self-update copy stays in sentence case.
     private static func eyebrowText(_ text: String, tone: EyebrowTone) -> NSAttributedString {
         let color = tone == .accent ? Theme.accent : Theme.orange
-        return NSAttributedString(string: text.uppercased(), attributes: [.font: Typography.metadataTitle, .foregroundColor: color, .kern: 1.2])
+        // An attributed string's own paragraph style decides how it breaks, so the label's tail truncation
+        // only takes effect when the string asks for it too.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        paragraph.alignment = .center
+        return NSAttributedString(
+            string: text.uppercased(), attributes: [.font: Typography.metadataTitle, .foregroundColor: color, .kern: 1.2, .paragraphStyle: paragraph])
     }
 
     /// The self-update bar, as wide as the body sentence so the two read as one column.
@@ -384,8 +399,8 @@ final class CompatibilityBlockView: NSView {
         case .available(let from, let to):
             return content(
                 eyebrow: isBlocked ? Self.cannotConnectEyebrow : DaemonSelfUpdateCopy.availableTitle, from: from, to: to,
-                body: DaemonSelfUpdateCopy.macBody(deviceName: deviceName, version: to),
-                button: DaemonSelfUpdateCopy.updateButtonTitle(deviceName: deviceName), tone: isBlocked ? .warning : .accent)
+                body: DaemonSelfUpdateCopy.macBody(version: to), button: DaemonSelfUpdateCopy.updateButtonTitle,
+                tone: isBlocked ? .warning : .accent)
         case .downloading(let from, let to, let received, let total):
             var bar = ProgressBar.indeterminate
             if let total, total > 0 { bar = .determinate(Double(received) / Double(total)) }
@@ -399,8 +414,9 @@ final class CompatibilityBlockView: NSView {
         case .stillRestarting(let from, let to):
             return content(
                 eyebrow: DaemonSelfUpdateCopy.stillRestartingTitle, from: from, to: to,
-                body: DaemonSelfUpdateCopy.stillRestartingBody(deviceName: deviceName, version: to), button: DaemonSelfUpdateCopy.tryAgainTitle,
-                tone: .warning)
+                body: DaemonSelfUpdateCopy.stillRestartingBody(version: to), button: DaemonSelfUpdateCopy.tryAgainTitle, tone: .warning)
+        case .updated(let from, let to):
+            return content(eyebrow: DaemonSelfUpdateCopy.updatedTitle, from: from, to: to, body: DaemonSelfUpdateCopy.updatedBody(version: to))
         case .failed(let from, let to, let reason):
             return content(
                 eyebrow: DaemonSelfUpdateCopy.failedTitle, from: from, to: to, body: reason, button: DaemonSelfUpdateCopy.tryAgainTitle, tone: .warning)

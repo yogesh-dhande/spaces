@@ -66,7 +66,8 @@ export default function RemoteAccessDocsPage() {
           app and the iPhone app show &ldquo;Update available&rdquo; for it, and pressing Update has the
           machine download, verify, and install the release itself, with no SSH access needed from the
           phone. Both apps show each step: downloading, installing, and restarting. Terminals,
-          processes, and coding agents keep running throughout. A download that receives no data for 60
+          processes, and coding agents keep running throughout. When the machine is back on the new
+          version, both apps show &ldquo;Updated&rdquo; until you move to something else. A download that receives no data for 60
           seconds stops and reports why, so you can try again.
         </Prose>
         <p className={paragraphClass}>
