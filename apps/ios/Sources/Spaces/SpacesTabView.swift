@@ -124,7 +124,9 @@ struct SpacesTabView: View {
                         if case .hero(let hero) = model.daemonCompatibilityPresentation {
                             Section {
                                 DaemonVersionHeroView(content: hero, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
-                                    Task { await model.retryStagedApply() }
+                                    Task {
+                                        if model.blockedHeroRunsSelfUpdate { await model.runDaemonSelfUpdateAction() } else { await model.retryStagedApply() }
+                                    }
                                 }.frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.compatibilityHero)
                             }
                         }
@@ -201,13 +203,17 @@ struct SpacesTabView: View {
     /// is not shown here at all: it takes the whole list as the version hero, or nothing while Spaces is
     /// applying the staged build on its own.
     @ViewBuilder private var pendingUpdateCard: some View {
-        if case .pendingUpdate(let content) = model.daemonCompatibilityPresentation {
+        switch model.daemonCompatibilityPresentation {
+        case .pendingUpdate(let content):
             // The update action fires directly: `requestDaemonUpdate()` re-execs the daemon onto
             // whatever build is staged and preserves running terminals, processes, and coding agents,
             // so there is nothing to confirm or defer.
             PendingDaemonUpdateCardView(content: content, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
                 Task { await model.requestDaemonUpdate() }
             }
+        case .selfUpdateCard(let content):
+            DaemonSelfUpdateCardView(content: content) { Task { await model.runDaemonSelfUpdateAction() } }
+        case .none, .hero: EmptyView()
         }
     }
 

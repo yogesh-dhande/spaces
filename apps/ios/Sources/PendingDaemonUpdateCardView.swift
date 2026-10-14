@@ -40,11 +40,5 @@ struct PendingDaemonUpdateCardView: View {
     /// The same `running → staged` fact the hero states large, sized down to a trailing detail: here it
     /// is context for a card whose sentence already carries the message. Digit-monospaced so the two
     /// versions align on their dots.
-    private var versionPair: some View {
-        HStack(spacing: 5) {
-            Text(content.versionPair.from).foregroundStyle(Theme.mutedSecondary)
-            Text("\u{2192}").foregroundStyle(Theme.accent)
-            Text(content.versionPair.to).foregroundStyle(Theme.text)
-        }.font(.system(size: 12).monospacedDigit()).lineLimit(1)
-    }
+    private var versionPair: some View { DaemonVersionPairLabel(pair: content.versionPair) }
 }

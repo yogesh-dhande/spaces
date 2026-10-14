@@ -502,6 +502,18 @@ public enum SpacesDeviceClient {
         try request(.init(command: .requestDaemonRestart), context: context)
     }
 
+    /// Frozen-core self-update request: asks a daemon that can update itself to download and install the
+    /// newest release on its channel. Like `requestDaemonRestart`, the request path applies no wire
+    /// compatibility gate, so it reaches a daemon whose wire version this client cannot otherwise speak.
+    /// Throws `requestRejected` with code `.capabilityMissing` when the daemon cannot update itself.
+    @discardableResult public static func startDaemonSelfUpdate(context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .startDaemonSelfUpdate), context: context)
+    }
+
+    @discardableResult public static func setDaemonUpdateChannel(_ channel: DaemonUpdateChannel, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .setDaemonUpdateChannel(.init(channel: channel))), context: context) }
+
     public static func workspaceCreateOptions(selectedProjectID: String?, context: DeviceRequestContext) throws -> SpacesDeviceWorkspaceCreateOptions
     {
         let response = try request(.init(command: .workspaceCreateOptions(.init(projectID: selectedProjectID))), context: context)

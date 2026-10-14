@@ -16,6 +16,11 @@ set -euo pipefail
 #   releases/prerelease/appcast.xml the pre-release feed, from the newest
 #                                   release of any kind.
 #
+# The Linux daemon's update check reads two newest-version files alongside them:
+#   releases/linux-latest.json            {"version":"X.Y.Z"} for the stable channel.
+#   releases/prerelease/linux-latest.json {"version":"X.Y.Z"} for the pre-release channel.
+# The versions come from the same two releases as the appcasts, with no leading v.
+#
 # Both appcasts are served byte-for-byte as their release published them.
 # publish-sparkle-appcast.sh bakes one enclosure prefix -- https://usespaces.dev/releases
 # -- into every appcast when it is generated and signed, so both feeds point
@@ -76,6 +81,15 @@ if [[ -z "$newest_tag" ]]; then
   echo "Error: no Spaces release tagged v<major>.<minor>.<patch> found in $REPO; the pre-release feed has nothing to serve." >&2
   exit 1
 fi
+
+# With no tag, `gh release view` shows the repo's latest (newest promoted) release.
+stable_tag="$(gh release view --repo "$REPO" --json tagName --jq .tagName)"
+if [[ ! "$stable_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Error: GitHub's latest release tag '$stable_tag' in $REPO is not v<major>.<minor>.<patch>." >&2
+  exit 1
+fi
+printf '{"version":"%s"}\n' "${stable_tag#v}" > "$RELEASES_DIR/linux-latest.json"
+printf '{"version":"%s"}\n' "${newest_tag#v}" > "$PRERELEASE_DIR/linux-latest.json"
 
 stage_feed "https://github.com/$REPO/releases/latest/download" "$RELEASES_DIR/appcast.xml" "stable"
 stage_feed "https://github.com/$REPO/releases/download/$newest_tag" "$PRERELEASE_DIR/appcast.xml" "pre-release ($newest_tag)"

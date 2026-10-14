@@ -12,6 +12,7 @@ import workspacecore
     private let agentSessionKiller: (@Sendable (String) throws -> Bool)?
     private let automationOperations: AutomationOperations?
     private let onRestartRequested: (@Sendable () -> Void)?
+    private let selfUpdateController: (any DaemonSelfUpdateControlling)?
     private let liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider?
     private let liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])?
 
@@ -28,7 +29,7 @@ import workspacecore
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil, selfUpdateController: (any DaemonSelfUpdateControlling)? = nil,
         liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider? = nil,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil
     ) {
@@ -40,6 +41,7 @@ import workspacecore
         self.agentSessionKiller = agentSessionKiller
         self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
+        self.selfUpdateController = selfUpdateController
         self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
         self.liveInMemoryTerminalSessionsProvider = liveInMemoryTerminalSessionsProvider
     }
@@ -128,7 +130,7 @@ import workspacecore
             host: settings.host, port: settings.port, identity: identity, pairingStoreProtocol: try SpacesDevicePairingStore(),
             builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
             agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
-            liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
+            selfUpdateController: selfUpdateController, liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
             liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider)
         do {
             try createdServer.start()

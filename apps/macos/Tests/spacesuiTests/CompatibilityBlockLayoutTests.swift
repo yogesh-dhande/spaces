@@ -22,12 +22,20 @@ import Testing
                 ("staged update on Linux", .applyStagedUpdate(daemonVersion: "0.8.7", installedVersion: "0.9.2"), false, true, false, false),
                 ("staged update on a Mac", .applyStagedUpdate(daemonVersion: "0.8.7", installedVersion: "0.9.2"), false, false, false, false),
                 ("this app too old", .updateClient(daemonVersion: "0.3.0"), false, false, false, false),
+                ("self-update available", .selfUpdate(.available(from: "0.23.0", to: "0.24.0"), channel: .stable, isBlocked: false), false, true, false, false),
+                (
+                    "self-update downloading",
+                    .selfUpdate(.downloading(from: "0.23.0", to: "0.24.0", received: 12_400_000, total: 38_000_000), channel: .stable, isBlocked: false),
+                    false, true, false, false
+                ),
+                ("self-update restarting", .selfUpdate(.restarting(from: "0.23.0", to: "0.24.0"), channel: .prerelease, isBlocked: false), false, true, false, false),
+                ("blocked self-update", .selfUpdate(.available(from: "0.1.0", to: "0.24.0"), channel: .stable, isBlocked: true), false, true, false, false),
             ]
         for state in states {
             let block = CompatibilityBlockView(
                 remedy: state.remedy, deviceName: "lantern", isLocalDevice: state.isLocalDevice, isLinuxDaemon: state.isLinuxDaemon,
                 canUpdateOverSSH: state.canUpdateOverSSH, isUpdatingOverSSH: state.isUpdatingOverSSH, onRetryStagedApply: {}, onCheckForUpdates: {},
-                onUpdateOverSSH: {})
+                onUpdateOverSSH: {}, onSelfUpdateAction: {})
             // The same placement the detail pane gives it: centered, free to size itself under a cap.
             let pane = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
             block.translatesAutoresizingMaskIntoConstraints = false

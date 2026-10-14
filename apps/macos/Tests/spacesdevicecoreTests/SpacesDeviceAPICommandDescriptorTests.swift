@@ -144,7 +144,7 @@ import Testing
         case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
             .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
             60
-        case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
+        case .pair, .ping, .daemonStatus, .requestDaemonRestart, .startDaemonSelfUpdate, .setDaemonUpdateChannel, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
             .renameAgentSession, .dismissAlerts, .visitTerminalSession, .setComeBackLater, .state, .terminalControl, .terminalPasteImage,
             .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview,
