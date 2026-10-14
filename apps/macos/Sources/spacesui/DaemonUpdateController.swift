@@ -25,6 +25,7 @@ protocol CompatibilityBlockPresenting: AnyObject {
     func showSelfUpdateBlock(deviceID: String, presentation: DetailPanePresentation)
     func reloadDeviceHeader(deviceID: String)
     func reconnectDevice(deviceID: String)
+    func pullDeviceOverview(deviceID: String)
     func showError(_ error: Error)
     func showDeviceNotLoadedError()
 }
@@ -551,8 +552,10 @@ extension AppKitController: CompatibilityBlockPresenting {}
         selfUpdatePresentation(deviceID: deviceID).isInFlight && selfUpdateAttempts.hasAttempt(deviceID: deviceID)
     }
 
-    /// Asks for the device's status every `selfUpdatePollInterval` through the sidebar reload the staged
-    /// handoff already uses, which lands the status in the section and runs the reconcile above. The loop
+    /// Asks for the device's status every `selfUpdatePollInterval` with a pull of that device alone, which
+    /// lands the status in the section and runs the reconcile above. Only this device: a whole-sidebar
+    /// forced reload would also clear every other device's failure backoff and redial offline ones at
+    /// this cadence for as long as the update (or a Still restarting wait) lasts. The loop
     /// checks the device itself each tick, so it ends even if no status ever lands (a device that stays
     /// away still ends it once the attempt does).
     private func startSelfUpdatePolling(deviceID: String) {
@@ -565,7 +568,7 @@ extension AppKitController: CompatibilityBlockPresenting {}
                     self.selfUpdatePollTasks[deviceID] = nil
                     return
                 }
-                self.requestSidebarReload()
+                self.host.pullDeviceOverview(deviceID: deviceID)
             }
         }
     }
