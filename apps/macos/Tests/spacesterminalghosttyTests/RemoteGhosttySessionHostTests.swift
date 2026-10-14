@@ -4967,7 +4967,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send,
             stateStreamSubscriber: subscriber.subscribe)
-        host.renderUpdateResyncIntervalForTesting = 0.2
+        // A window far longer than the test, so the failing delta is always throttled into a pending
+        // retry and that retry can never fire before the full frame lands.
+        host.renderUpdateResyncIntervalForTesting = 60
         waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
         try host.attach(
             client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
@@ -4975,7 +4977,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("the attach's state fetch lands") { self.stateRequestCount(recorder) == 1 }
 
         subscriber.emit(try deltaPayloadWithoutABaseline(sessionID: sessionID, runtimeState: fixture.payload.runtimeState))
-        // The session's own full frame arrives before the window expires, at revision 9 — past the
+        waitForCondition("the failed delta arms the trailing retry") { host.hasPendingRenderUpdateResyncForTesting }
+        XCTAssertEqual(stateRequestCount(recorder), 1, "the throttled resync sends nothing yet")
+
+        // The session's own full frame arrives before the retry is due, at revision 9, past the
         // revision 8 the failed delta targeted.
         subscriber.emit(
             try fullFramePayload(
@@ -4983,9 +4988,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             ))
         waitForCondition("the streamed frame paints") { host.snapshotText() == "alpha" }
 
-        // Well past the boundary the retry would have fired at.
-        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
-        XCTAssertEqual(stateRequestCount(recorder), 1, "a repaired chain owes no retry")
+        XCTAssertFalse(host.hasPendingRenderUpdateResyncForTesting, "a repaired chain owes no retry")
+        XCTAssertEqual(stateRequestCount(recorder), 1, "the repaired chain sent no extra state request")
     }
 
     /// The limit of that rule: the frame has to cover the failure the retry was armed for.
