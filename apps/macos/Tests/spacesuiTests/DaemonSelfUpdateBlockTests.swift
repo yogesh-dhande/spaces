@@ -205,14 +205,16 @@ import spacesterminalcore
 
     @Test func theHeaderOffersUpdateOnlyForAUsableDeviceWithSomethingToShow() {
         typealias Status = SidebarDeviceSectionStatus
-        #expect(Status.offersSelfUpdate(compatibility: .compatible, presentation: available))
-        #expect(Status.offersSelfUpdate(compatibility: .compatible, presentation: .downloading(from: "0.23.0", to: "0.24.0", received: 1, total: 2)))
-        #expect(Status.offersSelfUpdate(compatibility: .compatible, presentation: .failed(from: "0.23.0", to: "0.24.0", reason: "x")))
-        #expect(!Status.offersSelfUpdate(compatibility: .compatible, presentation: .none))
-        #expect(!Status.offersSelfUpdate(compatibility: .compatible, presentation: .updated(from: "0.23.0", to: "0.24.0")))
+        #expect(Status.offersSelfUpdate(compatibility: .compatible, isUpdateStaged: false, presentation: available))
+        #expect(Status.offersSelfUpdate(compatibility: .compatible, isUpdateStaged: false, presentation: .downloading(from: "0.23.0", to: "0.24.0", received: 1, total: 2)))
+        #expect(Status.offersSelfUpdate(compatibility: .compatible, isUpdateStaged: false, presentation: .failed(from: "0.23.0", to: "0.24.0", reason: "x")))
+        #expect(!Status.offersSelfUpdate(compatibility: .compatible, isUpdateStaged: false, presentation: .none))
+        #expect(!Status.offersSelfUpdate(compatibility: .compatible, isUpdateStaged: false, presentation: .updated(from: "0.23.0", to: "0.24.0")))
         // An incompatible device has its Resolve button, and an away one has no verdict.
-        #expect(!Status.offersSelfUpdate(compatibility: .daemonTooOld, presentation: available))
-        #expect(!Status.offersSelfUpdate(compatibility: nil, presentation: available))
+        #expect(!Status.offersSelfUpdate(compatibility: .daemonTooOld, isUpdateStaged: false, presentation: available))
+        #expect(!Status.offersSelfUpdate(compatibility: nil, isUpdateStaged: false, presentation: available))
+        // A staged build is applied instead, so its block is not the self-update's and the button would open nothing.
+        #expect(!Status.offersSelfUpdate(compatibility: .compatible, isUpdateStaged: true, presentation: .failed(from: "0.23.0", to: "0.24.0", reason: "x")))
     }
 
     // MARK: - Attempts
