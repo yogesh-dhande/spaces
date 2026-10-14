@@ -3144,6 +3144,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func deviceSection(id deviceID: String) -> DeviceSection? { sidebar.deviceSection(id: deviceID) }
     func reloadDeviceHeader(deviceID: String) { sidebar.reloadDeviceHeader(deviceID: deviceID) }
     func reconnectDevice(deviceID: String) { sidebar.retryDeviceConnection(deviceID: deviceID) }
+    func pullDeviceOverview(deviceID: String) { sidebar.pullRemoteDeviceOverview(deviceID: deviceID) }
     /// The device label to render for `deviceID` wherever the New Project flow names a target device.
     /// Prefers the loaded section's `displayName` (so the local device reads "Local"); the fallback
     /// mirrors the old `?? localDeviceName` sites it replaces, which only ever missed a section for the

@@ -3054,6 +3054,14 @@ private struct DeviceSyncState {
         refreshRemoteOverviewSubscriptions()
     }
 
+    /// One overview pull for a single remote device, for a poll that needs that device's live status (a
+    /// self-update in flight). It clears only this device's backoff, since the poll is asking for this
+    /// device specifically, and leaves the section's load state alone, unlike the user's Retry.
+    func pullRemoteDeviceOverview(deviceID: String) {
+        guard let record = host.macPairedDevices().first(where: { $0.id == deviceID }) else { return }
+        startRemoteOverviewPull(record: record, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short), bypassesBackoff: true)
+    }
+
     private func markDeviceSectionRetrying(deviceID: String, index: Int) {
         DeviceLinkTrace.log(deviceID: deviceID, event: "retry_requested")
         // Reuses the load state a device starts in rather than adding a retrying-specific one: the
