@@ -4044,6 +4044,41 @@
             await waitUntil("the poll to read again after Try Again") { await statusReads() > readsAfterWaiting }
         }
 
+        /// After a failure stops the poll, another client's Try Again reaches this app only as an in-flight
+        /// report; the poll has to start again, or a device that then goes away is never noticed.
+        func testAnotherClientsRetryAfterAFailureRestartsThePoll() async throws {
+            let recorder = SpacesMobileRequestRecorder()
+            let failed = selfUpdatingStatus(
+                progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .failed, failureReason: "Disk is full."))
+            let box = SelfUpdateStatusBox(selfUpdatingStatus(), overviewBase: makeOverview())
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(await box.status))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: await box.overview.map { .overview($0) })
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, daemonSelfUpdatePollInterval: .milliseconds(10))
+            model.daemonStatus = await box.status
+            func statusReads() async -> Int { await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count }
+
+            await model.startDaemonSelfUpdate()
+            await box.set(failed)
+            await waitUntil("the failure to show") {
+                if case .failed = model.daemonSelfUpdatePresentation { return true }
+                return false
+            }
+            try await Task.sleep(for: .milliseconds(50))
+            let readsWhileStopped = await statusReads()
+
+            await box.set(selfUpdatingStatus(progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .downloading)))
+            await model.refresh()
+
+            await waitUntil("the poll to read again after the other client's retry") { await statusReads() > readsWhileStopped }
+        }
+
         /// A failed attempt whose update is finished from elsewhere is confirmed by the next overview, not
         /// only by the poll, and once dismissed it cannot suppress the offers that follow.
         func testAFailedSelfUpdateAttemptIsRetiredByAnOverviewShowingTheTargetVersion() async throws {
