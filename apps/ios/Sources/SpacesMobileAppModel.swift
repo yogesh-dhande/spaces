@@ -507,6 +507,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var daemonStatus: TerminalServiceDaemonStatus? {
         didSet {
             daemonStatusDeviceID = activeDeviceID
+            if let daemonStatus, daemonStatus.selfUpdate != nil { daemonSelfUpdateStatuses[daemonSelfUpdateKey] = daemonStatus }
             updateSessionRestoreOffer()
         }
     }
@@ -541,6 +542,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// every other mutating control in the app. Only the Update Daemon actions read this flag, and it
     /// covers an apply this app started on its own the same way it covers one the user asked for.
     var isApplyingDaemonUpdate = false
+    /// The updates this app asked a device to run on its own, by device. An entry exists from the press
+    /// of Update until the device reports it is on the target version; it carries the one thing only
+    /// this app knows, when it first showed Restarting. See `daemonSelfUpdatePresentation`.
+    private(set) var daemonSelfUpdateAttempts: [String: DaemonSelfUpdateAttempt] = [:]
+    /// The newest status each device reported while it could update itself, kept past the status being
+    /// cleared. A restarting daemon fails every status read, which clears `daemonStatus`; the card has to
+    /// keep saying what the update was doing, and the pair it was going between.
+    private var daemonSelfUpdateStatuses: [String: TerminalServiceDaemonStatus] = [:]
+    /// Whether the update poll's last status read reached the active device. Only an attempt reads it.
+    private var isDaemonSelfUpdateReachable = true
+    /// The time the update poll last looked, so a view rendering the presentation re-renders on the poll's
+    /// beat (and so crosses the 120 second Still restarting mark) without a timer of its own.
+    private var daemonSelfUpdateNow = Date()
+    @ObservationIgnored private var daemonSelfUpdatePollTask: Task<Void, Never>?
+    @ObservationIgnored private var daemonSelfUpdatePollGeneration = 0
     /// The one thing the automatic staged-apply flow ever reports: the device is still running its old
     /// build some time after this app asked it to apply the one installed on it. `nil` whenever there is
     /// nothing to report, which is every other moment of that flow — a staged update that lands is shown
@@ -895,6 +911,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Interval between daemon-status polls in `requestDaemonUpdate()`. Injectable so tests can shrink
     /// it instead of sleeping through the production wait.
     @ObservationIgnored private let daemonUpdatePollInterval: Duration
+    /// Interval between status reads while a device is running an update this app asked for, so the
+    /// download advances on screen. Injectable so tests need not wait it out.
+    @ObservationIgnored private let daemonSelfUpdatePollInterval: Duration
     /// Bumped by each `requestDaemonUpdate()` call so an invocation can tell whether it still owns
     /// `isApplyingDaemonUpdate` when it exits. See that method's ownership comment.
     @ObservationIgnored private var daemonUpdateGeneration = 0
@@ -951,6 +970,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let deviceName = UIDevice.current.name
         browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
         daemonUpdatePollInterval = .seconds(3)
+        daemonSelfUpdatePollInterval = .seconds(2)
         daemonUpdateTimeout = .seconds(30)
         refreshFailureAlertDelay = .seconds(5)
         workspaceDeletionReconciliationInterval = .seconds(2)
@@ -997,8 +1017,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
-        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
-        refreshFailureAlertDelay: Duration = .seconds(5), workspaceDeletionReconciliationInterval: Duration = .seconds(2),
+        daemonUpdatePollInterval: Duration = .seconds(3), daemonSelfUpdatePollInterval: Duration = .seconds(2),
+        daemonUpdateTimeout: Duration = .seconds(30), refreshFailureAlertDelay: Duration = .seconds(5), workspaceDeletionReconciliationInterval: Duration = .seconds(2),
         now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }, wallClock: @escaping @Sendable () -> Date = { Date() },
         visitSchedule: @escaping SpacesMobileTerminalVisitTracker.Schedule = SpacesMobileTerminalVisitTracker.sleepingSchedule,
         overviewStreamClientsForTesting: [String: SpacesDeviceAPIClient] = [:]
@@ -1011,6 +1031,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
         self.daemonUpdatePollInterval = daemonUpdatePollInterval
+        self.daemonSelfUpdatePollInterval = daemonSelfUpdatePollInterval
         self.daemonUpdateTimeout = daemonUpdateTimeout
         self.refreshFailureAlertDelay = refreshFailureAlertDelay
         self.workspaceDeletionReconciliationInterval = workspaceDeletionReconciliationInterval
@@ -1658,10 +1679,22 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// `DaemonCompatibilityPresentation.presentation`, which is pure and unit-tested; this only feeds it
     /// the facts. `nil` status means no handshake has landed yet, which is not a version state at all.
     var daemonCompatibilityPresentation: DaemonCompatibilityPresentation {
-        guard let daemonStatus, let daemonUpdateRemedy else { return .none }
+        guard let daemonStatus, let daemonUpdateRemedy else {
+            // A restarting daemon fails every status read, which clears the status. The card keeps
+            // showing the update from the last status the device sent while it could update itself.
+            guard let content = DaemonSelfUpdateContent.make(daemonSelfUpdatePresentation, deviceName: connectionSummary) else { return .none }
+            return .selfUpdateCard(content)
+        }
         return DaemonCompatibilityPresentation.presentation(
             remedy: daemonUpdateRemedy, status: daemonStatus, isBlocked: isActiveDeviceBlocked, stagedApplyDidNotLand: stagedApplyDidNotLand,
-            deviceName: connectionSummary, clientVersion: MobileAppVersion.current)
+            deviceName: connectionSummary, clientVersion: MobileAppVersion.current, selfUpdate: daemonSelfUpdatePresentation)
+    }
+
+    /// Whether the blocked hero's button runs the device's self-update rather than a staged apply. A
+    /// staged build wins on a self-updating device too, because that apply is the existing flow's.
+    var blockedHeroRunsSelfUpdate: Bool {
+        guard daemonStatus?.selfUpdate != nil, case .installUpdateOnDevice = daemonUpdateRemedy else { return false }
+        return true
     }
 
     var connectionSummary: String {
@@ -2574,7 +2607,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // A requested daemon update takes the device offline on purpose, and `requestDaemonUpdate()` is
         // already watching across that outage. An authentication failure above still surfaces: that is
         // not an outage and does not resolve itself when the daemon returns.
-        guard !isApplyingDaemonUpdate else { return nil }
+        guard !isApplyingDaemonUpdate, !isDaemonSelfUpdateOutageExpected else { return nil }
         // Measured in wall-clock time rather than failure count because the kinds of failure this folds
         // together are not comparable in duration: a dead socket throws immediately, while an unreachable
         // host burns a whole request timeout (twice, counting the compatibility handshake above) before it
@@ -2844,6 +2877,180 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // longer justify, then firing an apply for a staged build that is keeping it blocked.
         retireStagedApplyState(currentStagedVersion: Self.stagedApplyVersion(status: status))
         maybeApplyStagedUpdateAutomatically()
+        reconcileDaemonSelfUpdateAttempt()
+    }
+
+    // MARK: - A Linux daemon updating itself
+
+    private var daemonSelfUpdateKey: String { activeDeviceID ?? "" }
+
+    /// What the active device's self-update looks like to the user. All of the rules live in
+    /// `DaemonSelfUpdatePresentation.resolve`; this feeds it the last status, whether the update poll
+    /// reached the device, this app's attempt, and the poll's clock.
+    ///
+    /// Without an attempt only the live status is read: a stale status kept for a restarting device must
+    /// not outlive the update it described.
+    var daemonSelfUpdatePresentation: DaemonSelfUpdatePresentation {
+        let attempt = daemonSelfUpdateAttempts[daemonSelfUpdateKey]
+        let remembered = attempt == nil ? nil : daemonSelfUpdateStatuses[daemonSelfUpdateKey]
+        guard let status = daemonStatus ?? remembered else { return .none }
+        return .resolve(status: status, isReachable: isDaemonSelfUpdateReachable, attempt: attempt, now: daemonSelfUpdateNow)
+    }
+
+    /// True while the device is expected to drop off the network because of an update this app asked for,
+    /// so the outage is the card's to report rather than a connection error's.
+    private var isDaemonSelfUpdateOutageExpected: Bool {
+        daemonSelfUpdateAttempts[daemonSelfUpdateKey] != nil && daemonSelfUpdatePresentation.isInFlight
+    }
+
+    /// The button on the self-update card and hero: Update when one is available, Try Again when the
+    /// update stalled or failed.
+    func runDaemonSelfUpdateAction() async {
+        switch daemonSelfUpdatePresentation {
+        case .available: await startDaemonSelfUpdate()
+        case .stillRestarting, .failed: await retryDaemonSelfUpdate()
+        case .none, .downloading, .installing, .restarting: return
+        }
+    }
+
+    /// Asks the active device to update itself to the version it reports available. A refusal is shown
+    /// through the ordinary error alert, since the user is watching the control they just pressed.
+    func startDaemonSelfUpdate() async {
+        guard daemonSelfUpdateAttempts[daemonSelfUpdateKey] == nil, case .available(_, let target) = daemonSelfUpdatePresentation else { return }
+        await requestDaemonSelfUpdate(target: target)
+    }
+
+    /// Try Again after the update stalled or failed. A reachable device is asked again. An unreachable
+    /// one cannot be asked, so the wait starts over: reconnect, and count the 120 seconds from now.
+    func retryDaemonSelfUpdate() async {
+        let target: String
+        switch daemonSelfUpdatePresentation {
+        case .failed(_, let to, _), .stillRestarting(_, let to): target = to
+        case .none, .available, .downloading, .installing, .restarting: return
+        }
+        guard !isDaemonSelfUpdateReachable else {
+            await requestDaemonSelfUpdate(target: target)
+            return
+        }
+        let now = wallClock()
+        daemonSelfUpdateNow = now
+        daemonSelfUpdateAttempts[daemonSelfUpdateKey] = DaemonSelfUpdateAttempt(targetVersion: target, restartingSince: now)
+        startDaemonSelfUpdatePolling()
+        await resetActiveConnectionEndpointAndWait()
+    }
+
+    /// Records the attempt before the request so the card moves the moment the button is pressed, and
+    /// takes it back if the device refuses.
+    private func requestDaemonSelfUpdate(target: String) async {
+        let key = daemonSelfUpdateKey
+        let identity = overviewIdentity
+        let previous = daemonSelfUpdateAttempts[key]
+        daemonSelfUpdateNow = wallClock()
+        isDaemonSelfUpdateReachable = true
+        daemonSelfUpdateAttempts[key] = DaemonSelfUpdateAttempt(targetVersion: target)
+        startDaemonSelfUpdatePolling()
+        // A private channel, for the reason `performDaemonUpdate` uses one: the shared channel does not
+        // serialize whole round trips, and this request must not interleave with an overview refresh.
+        let channel = bridgeClient.makeCommandChannel()
+        defer { Task { await channel.close() } }
+        do {
+            try await bridgeClient.startDaemonSelfUpdate(commandChannel: channel)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard identity == overviewIdentity else { return }
+            daemonSelfUpdateAttempts[key] = previous
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Reads the device's status every `daemonSelfUpdatePollInterval` for as long as this app has an
+    /// update attempt on the active device, so Downloading advances and the device's return is noticed.
+    private func startDaemonSelfUpdatePolling() {
+        daemonSelfUpdatePollTask?.cancel()
+        daemonSelfUpdatePollGeneration += 1
+        let generation = daemonSelfUpdatePollGeneration
+        let identity = overviewIdentity
+        daemonSelfUpdatePollTask = Task { await self.runDaemonSelfUpdatePoll(generation: generation, identity: identity) }
+    }
+
+    private func runDaemonSelfUpdatePoll(generation: Int, identity: Int) async {
+        // Its own channel: a restarting daemon makes these reads slow to fail, and they must not hold up
+        // the shared channel's overview refreshes.
+        let channel = bridgeClient.makeCommandChannel()
+        defer { Task { await channel.close() } }
+        func isCurrent() -> Bool {
+            !Task.isCancelled && generation == daemonSelfUpdatePollGeneration && identity == overviewIdentity
+                && daemonSelfUpdateAttempts[daemonSelfUpdateKey] != nil
+        }
+        while isCurrent() {
+            do { try await Task.sleep(for: daemonSelfUpdatePollInterval) } catch { return }
+            guard isCurrent() else { return }
+            do {
+                let status = try await bridgeClient.fetchDaemonStatus(commandChannel: channel)
+                guard isCurrent() else { return }
+                isDaemonSelfUpdateReachable = true
+                applyCompatibility(status)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard isCurrent() else { return }
+                isDaemonSelfUpdateReachable = false
+            }
+            reconcileDaemonSelfUpdateAttempt()
+            // A failure is terminal: the attempt stays so the failure text and Try Again keep showing, but
+            // nothing more will change until a retry starts the poll again. This is checked after a read,
+            // not before the loop, because a retry begins while the last stale `.failed` status is still held.
+            if case .failed = daemonSelfUpdatePresentation { return }
+        }
+    }
+
+    /// Keeps the attempt in step with what the presentation resolved to: starts the Restarting clock the
+    /// first time Restarting shows, and drops the attempt once the device is on the target version.
+    ///
+    /// Any in-flight report for a device with no attempt (the update was started from another client)
+    /// adopts one and starts the poll, so this app still notices when the device does not come back.
+    /// Adoption cannot wait for Restarting: the daemon hands off within a fraction of a second of the
+    /// installer reaching that step, so this app rarely sees it reported before the device goes away.
+    /// Every fresh status runs through here, not only the poll's, so a completed attempt is retired
+    /// however the final status arrived. Running it twice on one status changes nothing.
+    private func reconcileDaemonSelfUpdateAttempt() {
+        let key = daemonSelfUpdateKey
+        daemonSelfUpdateNow = wallClock()
+        if let status = daemonStatus, let attempt = daemonSelfUpdateAttempts[key] {
+            daemonSelfUpdateAttempts[key] = attempt.following(status)
+        }
+        let presentation = daemonSelfUpdatePresentation
+        guard var attempt = daemonSelfUpdateAttempts[key] else {
+            guard let target = presentation.inFlightTargetVersion, let status = daemonStatus else { return }
+            daemonSelfUpdateStatuses[key] = status
+            daemonSelfUpdateAttempts[key] = DaemonSelfUpdateAttempt(
+                targetVersion: target, restartingSince: presentation.isRestarting ? daemonSelfUpdateNow : nil)
+            startDaemonSelfUpdatePolling()
+            return
+        }
+        if case .none = presentation {
+            daemonSelfUpdateAttempts[key] = nil
+            daemonSelfUpdateStatuses[key] = nil
+        } else if presentation.isRestarting, attempt.restartingSince == nil {
+            attempt.restartingSince = daemonSelfUpdateNow
+            daemonSelfUpdateAttempts[key] = attempt
+        }
+    }
+
+    /// Resumes (or stops) the poll for whichever device is now active; an attempt belongs to its device
+    /// and keeps running through a switch away and back.
+    private func resumeDaemonSelfUpdatePolling() {
+        daemonSelfUpdatePollTask?.cancel()
+        daemonSelfUpdatePollTask = nil
+        daemonSelfUpdatePollGeneration += 1
+        isDaemonSelfUpdateReachable = true
+        if daemonSelfUpdateAttempts[daemonSelfUpdateKey] != nil { startDaemonSelfUpdatePolling() }
+    }
+
+    private func forgetDaemonSelfUpdate(deviceID: String) {
+        daemonSelfUpdateAttempts[deviceID] = nil
+        daemonSelfUpdateStatuses[deviceID] = nil
     }
 
     // MARK: - Applying a staged update to a blocked device
@@ -3215,7 +3422,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // drop the banner (it renders off `daemonStatus`) and unblock the device (blocking reads
             // `compatibility`), flashing stale workspace controls back mid-update; keep the last known
             // facts until the device's own status reporting says otherwise.
-            guard !isApplyingDaemonUpdate else { return }
+            guard !isApplyingDaemonUpdate, !isDaemonSelfUpdateOutageExpected else { return }
             // Could not read the handshake; leave compatibility unknown rather than blocking.
             daemonStatus = nil
             compatibility = nil
@@ -3574,6 +3781,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         connectionNotice = nil
         errorMessage = nil
         discardUnresolvedWorkspaceDeletions()
+        resumeDaemonSelfUpdatePolling()
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
     }
@@ -3619,6 +3827,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         SpacesMobileSettingsStore.save(settings)
         stagedApplyDidNotLandAlert = nil
         forgetStagedApplyState(deviceID: id)
+        forgetDaemonSelfUpdate(deviceID: id)
+        resumeDaemonSelfUpdatePolling()
         workspaceCreateOptions = nil
         connectionNotice = nil
         discardUnresolvedWorkspaceDeletions()

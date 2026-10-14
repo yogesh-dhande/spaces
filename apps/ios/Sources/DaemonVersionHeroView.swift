@@ -23,6 +23,10 @@ struct DaemonVersionHeroView: View {
             Text(content.body).font(.system(size: 14)).foregroundStyle(Theme.muted).multilineTextAlignment(.center).fixedSize(
                 horizontal: false, vertical: true
             ).padding(.top, 18)
+            if let progress = content.progress { DaemonSelfUpdateProgressBar(progress: progress).padding(.top, 14) }
+            if let footnote = content.footnote {
+                Text(footnote).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).multilineTextAlignment(.center).padding(.top, 8)
+            }
             if let actionTitle = content.actionTitle {
                 Button(action: onAction) {
                     HStack(spacing: 6) {

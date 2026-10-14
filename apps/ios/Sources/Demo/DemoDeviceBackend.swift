@@ -154,7 +154,7 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         case .setComeBackLater(let request): return serveSetComeBackLater(request)
 
         case .createWorkspace, .createProject, .importProject, .exportProject, .deleteProject, .pair, .requestDaemonRestart, .resolveTerminalLink,
-            .readTerminalLinkChunk:
+            .readTerminalLinkChunk, .startDaemonSelfUpdate, .setDaemonUpdateChannel:
             return reject(Self.unavailableInDemo)
 
         default: return reject(Self.unsupportedInDemo)

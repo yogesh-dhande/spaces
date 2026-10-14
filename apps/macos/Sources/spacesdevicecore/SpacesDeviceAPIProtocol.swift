@@ -844,6 +844,13 @@ public struct SpacesDeviceTerminalLinkChunk: Codable, Sendable, Equatable {
 
 public struct SpacesDeviceAPIEmptyPayload: Codable, Sendable, Equatable { public init() {} }
 
+/// The release channel a self-updating daemon follows, set by `setDaemonUpdateChannel`.
+public struct SpacesDeviceDaemonUpdateChannelRequest: Codable, Sendable, Equatable {
+    public let channel: DaemonUpdateChannel
+
+    public init(channel: DaemonUpdateChannel) { self.channel = channel }
+}
+
 public struct SpacesDevicePairRequest: Codable, Sendable, Equatable {
     public let pairingCode: String?
     public let pairingNonce: String?
@@ -2606,6 +2613,14 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// manager respawns it from the updated binary). Used by iOS and remote clients that cannot
     /// restart the daemon out of band. Contractually stable for the same reason as `daemonStatus`.
     case requestDaemonRestart
+    /// Frozen-core command: ask a daemon that can update itself to download and install the newest
+    /// release on its channel. Never renamed, removed, or payload-changed, so a newer client can update
+    /// an older-wire daemon that has the feature. The daemon replies `capabilityMissing` when it cannot
+    /// update itself.
+    case startDaemonSelfUpdate
+    /// Choose which release channel a self-updating daemon follows. Persisted on the daemon, which
+    /// re-checks its feed right away.
+    case setDaemonUpdateChannel(SpacesDeviceDaemonUpdateChannelRequest)
     case overview
     case createProject(SpacesDeviceProjectCreateRequest)
     case previewGitProject(SpacesDeviceGitProjectPreviewRequest)
@@ -2765,6 +2780,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .ping: "ping"
         case .daemonStatus: "daemonStatus"
         case .requestDaemonRestart: "requestDaemonRestart"
+        case .startDaemonSelfUpdate: "startDaemonSelfUpdate"
+        case .setDaemonUpdateChannel: "setDaemonUpdateChannel"
         case .overview: "overview"
         case .createProject: "createProject"
         case .previewGitProject: "previewGitProject"
@@ -2971,6 +2988,8 @@ extension SpacesDeviceAPICommand: Codable {
         case ping
         case daemonStatus
         case requestDaemonRestart
+        case startDaemonSelfUpdate
+        case setDaemonUpdateChannel
         case overview
         case createProject
         case previewGitProject
@@ -3072,6 +3091,10 @@ extension SpacesDeviceAPICommand: Codable {
         case .requestDaemonRestart:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .requestDaemonRestart
+        case .startDaemonSelfUpdate:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .startDaemonSelfUpdate
+        case .setDaemonUpdateChannel: self = .setDaemonUpdateChannel(try container.decode(SpacesDeviceDaemonUpdateChannelRequest.self, forKey: key))
         case .overview:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .overview
@@ -3192,6 +3215,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .ping: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .ping)
         case .daemonStatus: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .daemonStatus)
         case .requestDaemonRestart: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .requestDaemonRestart)
+        case .startDaemonSelfUpdate: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .startDaemonSelfUpdate)
+        case .setDaemonUpdateChannel(let payload): try container.encode(payload, forKey: .setDaemonUpdateChannel)
         case .overview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .overview)
         case .createProject(let payload): try container.encode(payload, forKey: .createProject)
         case .previewGitProject(let payload): try container.encode(payload, forKey: .previewGitProject)

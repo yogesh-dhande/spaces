@@ -48,6 +48,14 @@ export default function SettingsDocsPage() {
           <li>
             • &quot;Restart Local Daemon&quot; restarts the Spaces service on this Mac.
           </li>
+          <li>
+            • &quot;Pre-release updates&quot; (under a Linux machine that updates itself) makes the
+            machine offer each tagged release before it is promoted; see{" "}
+            <DocLink href="/docs/remote-access#update-and-uninstall-on-linux">
+              Remote machines: Update and uninstall on Linux
+            </DocLink>
+            .
+          </li>
         </ul>
 
         <SubHeading>Coding Agents</SubHeading>

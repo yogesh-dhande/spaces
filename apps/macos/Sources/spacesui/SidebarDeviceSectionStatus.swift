@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 /// What a device section header renders next to the device name: the section's load state, the action
 /// that recovers it, or nothing.
@@ -17,6 +18,13 @@ enum SidebarDeviceSectionStatus: Equatable {
 }
 
 extension SidebarDeviceSectionStatus {
+    /// Whether a device's header carries the accent Update button: the device is usable (an incompatible
+    /// one shows its Resolve button instead, and one that is away has no verdict) and its self-update has
+    /// something to show.
+    static func offersSelfUpdate(compatibility: SpacesWireCompatibility?, presentation: DaemonSelfUpdatePresentation) -> Bool {
+        compatibility?.isCompatible == true && presentation != .none
+    }
+
     /// Resolves a device section's caption area from the facts the sidebar holds about it. Pure, so the
     /// caption-versus-button decision is testable without an outline view.
     ///

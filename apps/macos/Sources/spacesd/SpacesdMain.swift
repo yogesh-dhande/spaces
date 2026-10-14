@@ -157,7 +157,8 @@ final class DaemonLivenessState: @unchecked Sendable {
         let status = TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: snapshot.certificateFingerprint,
             activeSessionCount: snapshot.sessionCount, protocolVersion: SpacesWireProtocol.version,
-            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier, deviceAPIAddresses: currentDeviceAPIAddresses())
+            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier, deviceAPIAddresses: currentDeviceAPIAddresses(),
+            selfUpdate: DaemonSelfUpdateStatusCache.shared.current)
         return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
     }
 }
@@ -308,6 +309,8 @@ enum SpacesDaemonErrorClassification {
     /// actor writes the certificate fingerprint once at startup and the session count on every
     /// `sessionCores` mutation; the socket worker reads both under the box's lock.
     private nonisolated let livenessState = DaemonLivenessState()
+    /// Non-nil only for an installed Linux release daemon that can update itself (see `DaemonSelfUpdateService`).
+    private nonisolated let selfUpdateService = DaemonSelfUpdateService.makeIfSupported()
     /// Isolated to the terminal engine actor: every `GhosttyEmbeddedSessionCore` runs on
     /// `TerminalEngineActor`, so the dictionary that owns them (and the members that read/mutate it)
     /// move there too, off the main actor. The `didSet` mirror into `livenessState` still runs on the
@@ -393,6 +396,7 @@ enum SpacesDaemonErrorClassification {
         // service serializes internally, so calling it directly is deadlock-safe (the one-way rule).
         automationOperations: daemonAutomationOperations(),
         onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } },
+        selfUpdateController: selfUpdateService,
         // Same queue guarantee as the closures above (the Device API's own connection-handling queue, never
         // main), so the engine hop is deadlock-safe. Lets a Device API `.state` read — one per pane attach —
         // be answered from the live core instead of dialing that core's own subscription socket.
@@ -535,6 +539,7 @@ enum SpacesDaemonErrorClassification {
         try server.start()
         deviceAPISupervisor.start()
         startLifecycleTimer()
+        selfUpdateService?.start()
         startDeviceRuntimeServices()
     }
 
@@ -1294,7 +1299,7 @@ enum SpacesDaemonErrorClassification {
             timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
             // Same off-actor helper the liveness ping uses, so both status paths agree on this daemon's
             // addresses without duplicating the bound-host cache.
-            deviceAPIAddresses: livenessState.currentDeviceAPIAddresses())
+            deviceAPIAddresses: livenessState.currentDeviceAPIAddresses(), selfUpdate: DaemonSelfUpdateStatusCache.shared.current)
     }
 
     // Exec-in-place update trigger: after a short grace so the already-sent RPC response can flush,
@@ -3504,6 +3509,9 @@ enum SpacesDaemonErrorClassification {
         // completes well before the first 1s timer tick reaches the same actor.
         Task { @TerminalEngineActor [weak self] in self?.lastSessionGarbageCollectionAt = Date() }
         lifecycleTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            // Skipped during a handoff like the automation timer: the exec image replaces this process
+            // and the new daemon starts its own checks.
+            if let self, !self.handoffInProgress { self.selfUpdateService?.tick() }
             // `reapInactiveSessions` and `garbageCollectRemovedSessionsIfDue` are both engine-isolated
             // (they read `sessionCores`), so this hops onto the engine actor directly rather than the main
             // actor the timer callback fires on.
@@ -3707,7 +3715,7 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil, selfUpdateController: (any DaemonSelfUpdateControlling)? = nil,
         liveTerminalSessionStateProvider: (@Sendable (String, TerminalOneShotStateRead) -> GhosttyRemoteSessionStatePayload?)? = nil,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil
     ) {
@@ -3715,7 +3723,7 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
                 agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
-                liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
+                selfUpdateController: selfUpdateController, liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
                 liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider)
         #endif
     }

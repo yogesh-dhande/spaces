@@ -396,12 +396,16 @@ import workspacecore
         for device in connectedClientDevices(response: response) {
             let isPairingExpanded = expandedDeviceRow == .pairing(deviceID: device.id)
             let row = connectedDeviceRow(device, isPairingExpanded: isPairingExpanded, response: response)
-            if isPairingExpanded, let panel = devicePairingPanel(for: device, response: response) {
+            let pairingPanel = isPairingExpanded ? devicePairingPanel(for: device, response: response) : nil
+            let channelControls = updateChannelControls(deviceID: device.id, deviceName: device.displayName)
+            // Panels belong to the row above them, so a row with any panel draws no hairline beneath it.
+            if pairingPanel != nil || channelControls != nil {
                 entries.append(.expandedRow(row))
-                entries.append(.panel(panel))
             } else {
                 entries.append(.row(row))
             }
+            if let pairingPanel { entries.append(.panel(pairingPanel)) }
+            if let channelControls { entries.append(.panel(channelControls)) }
         }
 
         // A non-ok control response means the local daemon (or just its Device API endpoint) is
@@ -527,6 +531,51 @@ import workspacecore
         toggle.isEnabled = !isRemoteDeviceAttemptInFlight
         addRemoteDeviceToggle = toggle
         return mobilePanelButtonRow([toggle])
+    }
+
+    /// The release channel a self-updating device follows, shown under its row. The device reports the
+    /// channel in its status (the sidebar's copy of it), so only a device that has reported one gets the
+    /// checkbox; a device that cannot update itself has no channel to choose.
+    private func updateChannelControls(deviceID: String, deviceName: String) -> NSView? {
+        guard let channel = host.deviceDaemonStatus(forDeviceID: deviceID)?.selfUpdate?.channel else { return nil }
+        let checkbox = NSButton(checkboxWithTitle: "Pre-release updates", target: self, action: #selector(deviceUpdateChannelChanged(_:)))
+        checkbox.translatesAutoresizingMaskIntoConstraints = false
+        checkbox.state = channel == .prerelease ? .on : .off
+        checkbox.identifier = NSUserInterfaceItemIdentifier(deviceID)
+        checkbox.setAccessibilityIdentifier("device-row-prerelease-updates-\(deviceID)")
+        let hint = host.helpTextLabel("Offer each tagged release on \(deviceName) before it is promoted to everyone.")
+        let stack = NSStackView(views: [checkbox, hint])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    /// Sends the choice to the device. On a failure the checkbox goes back to what the device still
+    /// follows, so it never claims a channel the device did not accept.
+    @objc private func deviceUpdateChannelChanged(_ sender: NSButton) {
+        let channel: DaemonUpdateChannel = sender.state == .on ? .prerelease : .stable
+        let previous: NSControl.StateValue = sender.state == .on ? .off : .on
+        guard let deviceID = sender.identifier?.rawValue, let device = host.deviceRecord(forDeviceID: deviceID) else {
+            sender.state = previous
+            host.showDeviceNotLoadedError()
+            return
+        }
+        Task { @MainActor [weak self, weak sender] in
+            do {
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try SpacesDeviceClient.setDaemonUpdateChannel(channel, context: DeviceRequestContext(device: device))
+                }.value
+            } catch {
+                sender?.state = previous
+                self?.host.showError(error)
+                return
+            }
+            // Pulls the status the device now reports, which is also how the sidebar learns of a release
+            // the new channel offers.
+            self?.host.requestSidebarReload(forceRemoteRefresh: true)
+        }
     }
 
     private func connectedDeviceRow(_ device: ClientConnectedDevice, isPairingExpanded: Bool, response: SpacesDeviceAPIControlResponse) -> NSView {

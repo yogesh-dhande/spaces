@@ -2068,6 +2068,12 @@ private struct DeviceSyncState {
         return outlineItemRef(for: .project(host.deviceModel.projects.first ?? Self.placeholderProject))
     }
 
+    /// Rebuilds one device's header row alone, for a change the header shows that no section data moved
+    /// with (an update attempt starting, or the wait for a restarting device running long).
+    func reloadDeviceHeader(deviceID: String) {
+        host.outlineView.reloadItem(outlineItemRef(for: .device(deviceID)))
+    }
+
     private func outlineItemRef(for item: OutlineItem) -> OutlineItemRef {
         let key = item.cacheKey
         if let existing = outlineItemRefCache[key] {
@@ -2194,6 +2200,21 @@ private struct DeviceSyncState {
                 button.setContentCompressionResistancePriority(.required, for: .horizontal)
                 contentRow.addArrangedSubview(button)
             case .none: break
+            }
+            if SidebarDeviceSectionStatus.offersSelfUpdate(
+                compatibility: section?.compatibility, presentation: host.daemonUpdate.selfUpdatePresentation(deviceID: deviceID))
+            {
+                // Accent, not orange: the device works, and an update is on offer or under way. It opens
+                // the same block the incompatible device's button does.
+                let button = NSButton(title: "Update", target: self, action: #selector(selfUpdateActionClicked(_:)))
+                button.bezelStyle = .inline
+                button.controlSize = .small
+                button.font = Typography.metadataTitle
+                button.contentTintColor = Theme.accent
+                button.identifier = NSUserInterfaceItemIdentifier("selfupdate:\(deviceID)")
+                button.setContentHuggingPriority(.required, for: .horizontal)
+                button.setContentCompressionResistancePriority(.required, for: .horizontal)
+                contentRow.addArrangedSubview(button)
             }
         }
 
@@ -3014,7 +3035,7 @@ private struct DeviceSyncState {
     /// own cadence, run immediately for this device alone and without waiting out its backoff. The
     /// section returns to `.loading` so the click has visible feedback, and the attempt moves it on to
     /// loaded, or back to offline carrying the reason it failed with this time.
-    private func retryDeviceConnection(deviceID: String) {
+    func retryDeviceConnection(deviceID: String) {
         guard deviceSectionOffersRetry(deviceID: deviceID), let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceID })
         else { return }
         if host.deviceModel.deviceSections[index].isLocal {
@@ -3051,6 +3072,11 @@ private struct DeviceSyncState {
         let deviceID = String(raw.dropFirst("compat:".count))
         guard let verdict = host.deviceCompatibility(forDeviceID: deviceID), !verdict.isCompatible else { return }
         host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict, presentation: .userNavigation)
+    }
+
+    @objc private func selfUpdateActionClicked(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, raw.hasPrefix("selfupdate:") else { return }
+        host.showSelfUpdateBlock(deviceID: String(raw.dropFirst("selfupdate:".count)), presentation: .userNavigation)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {

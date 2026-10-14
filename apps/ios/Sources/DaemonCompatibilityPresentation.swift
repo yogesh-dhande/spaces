@@ -18,6 +18,8 @@ import spacesterminalcore
 enum DaemonCompatibilityPresentation: Equatable {
     case none
     case pendingUpdate(PendingUpdate)
+    /// The card for a compatible Linux device that can update itself, in whichever step it is on.
+    case selfUpdateCard(DaemonSelfUpdateContent)
     case hero(Hero)
 
     /// The compact card for a device that works fine and has an update waiting.
@@ -42,6 +44,9 @@ enum DaemonCompatibilityPresentation: Equatable {
         let body: String
         /// `nil` for every state nothing this app does can fix.
         let actionTitle: String?
+        /// Set while a self-updating device reports a download or install, so the hero shows the step.
+        var progress: DaemonSelfUpdateContent.Progress?
+        var footnote: String?
     }
 
     /// Builds the presentation for the active device.
@@ -56,13 +61,18 @@ enum DaemonCompatibilityPresentation: Equatable {
     /// remedy that arises in both a blocking and a non-blocking state, and only the verdict tells them
     /// apart. `.updateClient` and `.installUpdateOnDevice` are produced only from an incompatible
     /// verdict, so they are always the blocking hero.
+    ///
+    /// `selfUpdate` is the device's self-update state as the client resolved it. A staged build wins over
+    /// it wherever both apply: the staged apply is the cheaper action and the existing flow owns it.
     static func presentation(
         remedy: DaemonUpdateRemedy, status: TerminalServiceDaemonStatus, isBlocked: Bool, stagedApplyDidNotLand: Bool, deviceName: String,
-        clientVersion: String
+        clientVersion: String, selfUpdate: DaemonSelfUpdatePresentation = .none
     ) -> DaemonCompatibilityPresentation {
         let runningVersion = DaemonVersionPair.displayVersion(status.version)
         switch remedy {
-        case .none: return .none
+        case .none:
+            guard let content = DaemonSelfUpdateContent.make(selfUpdate, deviceName: deviceName) else { return .none }
+            return .selfUpdateCard(content)
 
         case .updateClient:
             return .hero(
@@ -96,6 +106,9 @@ enum DaemonCompatibilityPresentation: Equatable {
             )
 
         case .installUpdateOnDevice:
+            if let selfUpdateStatus = status.selfUpdate {
+                return .hero(selfUpdateHero(status: selfUpdateStatus, selfUpdate: selfUpdate, runningVersion: runningVersion, deviceName: deviceName))
+            }
             // Nothing is staged, so there is no target version to name: what lands is whatever gets
             // installed on the device, from the Mac app over SSH or by opening Spaces there.
             return .hero(
@@ -108,5 +121,32 @@ enum DaemonCompatibilityPresentation: Equatable {
                         : "Open Spaces on \(deviceName) and install the update; its daemon applies it on its own, and nothing running stops.",
                     actionTitle: nil))
         }
+    }
+
+    /// The hero for a blocked device that can update itself. The eyebrow and pair keep the blocked
+    /// screen's shape; while an update runs, the body carries the step the device is on.
+    private static func selfUpdateHero(
+        status: DaemonSelfUpdateStatus, selfUpdate: DaemonSelfUpdatePresentation, runningVersion: String, deviceName: String
+    ) -> Hero {
+        let eyebrow = "CAN'T CONNECT — UPDATE NEEDED"
+        let startButton = DaemonSelfUpdateCopy.updateButtonTitle(deviceName: deviceName)
+        guard let content = DaemonSelfUpdateContent.make(selfUpdate, deviceName: deviceName), !content.isAvailable else {
+            // No newer release reported yet (the device's check has not run or could not reach the
+            // feed): there is nothing to update to, so no button that would only be refused.
+            guard let available = status.availableVersion else {
+                return Hero(
+                    eyebrow: eyebrow, versionPair: DaemonVersionPair(from: runningVersion, to: DaemonVersionPair.unknown),
+                    whoLine: "nothing newer is installed on \(deviceName)",
+                    body: DaemonSelfUpdateCopy.noReleaseFoundBody(deviceName: deviceName), actionTitle: nil)
+            }
+            return Hero(
+                eyebrow: eyebrow, versionPair: DaemonVersionPair(from: runningVersion, to: available),
+                whoLine: DaemonSelfUpdateCopy.heroWhoLine(availableVersion: available, deviceName: deviceName),
+                body: DaemonSelfUpdateCopy.heroBody(deviceName: deviceName), actionTitle: startButton)
+        }
+        return Hero(
+            eyebrow: eyebrow, versionPair: content.versionPair,
+            whoLine: DaemonSelfUpdateCopy.heroWhoLine(availableVersion: content.versionPair.to, deviceName: deviceName), body: content.body,
+            actionTitle: content.actionTitle, progress: content.progress, footnote: content.footnote)
     }
 }

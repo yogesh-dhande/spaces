@@ -1130,6 +1130,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon performs its
     /// exec-in-place handoff so running terminals, processes, and agents survive the update.
     private let onRestartRequested: (@Sendable () -> Void)?
+    /// Handles `.startDaemonSelfUpdate` and `.setDaemonUpdateChannel`. Nil on a daemon that cannot update
+    /// itself, which both commands report as `capabilityMissing`.
+    private let selfUpdateController: (any DaemonSelfUpdateControlling)?
     /// Exports a session's current state straight from the live in-process core, or nil when this daemon
     /// hosts no live core for that id. Injected because the cores belong to the daemon, not to this server.
     /// Without it every state read — including the one behind each pane attach — makes the daemon connect to
@@ -1453,7 +1456,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil
+        onRestartRequested: (@Sendable () -> Void)? = nil, selfUpdateController: (any DaemonSelfUpdateControlling)? = nil
     ) throws {
         self.host = host
         self.port = port
@@ -1465,6 +1468,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.agentSessionKiller = agentSessionKiller
         self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
+        self.selfUpdateController = selfUpdateController
         self.workspaceGitClient = RemoteWorkspaceGitClient()
         liveTerminalSessionStateProvider = nil
         liveInMemoryTerminalSessionsProvider = nil
@@ -1492,7 +1496,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil, liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil, selfUpdateController: (any DaemonSelfUpdateControlling)? = nil,
+        liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider? = nil,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
@@ -1515,6 +1520,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.agentSessionKiller = agentSessionKiller
         self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
+        self.selfUpdateController = selfUpdateController
         self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
         self.liveInMemoryTerminalSessionsProvider = liveInMemoryTerminalSessionsProvider
         self.overviewLoaderForTesting = overviewLoaderForTesting
@@ -3387,6 +3393,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             onRestartRequested()
             return SpacesDeviceAPIResponse(ok: true, message: "spacesd is restarting.")
+        case .startDaemonSelfUpdate:
+            guard let selfUpdateController else {
+                return SpacesDeviceAPIResponse(ok: false, message: "This daemon cannot update itself.", errorCode: .capabilityMissing)
+            }
+            switch selfUpdateController.startUpdate() {
+            case .started: return SpacesDeviceAPIResponse(ok: true, message: "Update started.")
+            case .alreadyRunning: return SpacesDeviceAPIResponse(ok: true, message: "An update is already running.")
+            case .upToDate: return SpacesDeviceAPIResponse(ok: false, message: "Spaces is already on the newest version.")
+            case .launchFailed(let message): return SpacesDeviceAPIResponse(ok: false, message: message)
+            }
+        case .setDaemonUpdateChannel(let payload):
+            guard let selfUpdateController else {
+                return SpacesDeviceAPIResponse(ok: false, message: "This daemon cannot update itself.", errorCode: .capabilityMissing)
+            }
+            try selfUpdateController.setChannel(payload.channel)
+            return SpacesDeviceAPIResponse(ok: true, message: "Update channel set to \(payload.channel.rawValue).")
         case .overview:
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded device overview.",

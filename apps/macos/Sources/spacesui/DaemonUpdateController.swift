@@ -22,6 +22,9 @@ protocol CompatibilityBlockPresenting: AnyObject {
     func refreshSelection()
     func showPlaceholder(message: String, presentation: DetailPanePresentation)
     func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility, presentation: DetailPanePresentation)
+    func showSelfUpdateBlock(deviceID: String, presentation: DetailPanePresentation)
+    func reloadDeviceHeader(deviceID: String)
+    func reconnectDevice(deviceID: String)
     func showError(_ error: Error)
     func showDeviceNotLoadedError()
 }
@@ -97,15 +100,17 @@ extension AppKitController: CompatibilityBlockPresenting {}
     /// no remedy and therefore `.clear`.
     nonisolated static func reconcileCompatibilityBlockAction(
         isVisibleBlockDevice: Bool, renderedRemedy: CompatibilityBlockView.BlockRemedy, verdict: SpacesWireCompatibility?,
-        status: TerminalServiceDaemonStatus?, stagedApplyDidNotLand: Bool
+        status: TerminalServiceDaemonStatus?, stagedApplyDidNotLand: Bool, selfUpdate: CompatibilityBlockView.SelfUpdateFacts? = nil
     ) -> CompatibilityBlockReconciliation {
         guard isVisibleBlockDevice else { return .leaveAlone }
-        guard let verdict, let newRemedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status) else { return .clear }
+        // A self-update keeps the block up without a verdict: a device restarting into its new build is
+        // away, which is the one time an absent verdict must not take the block down.
+        guard let newRemedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status, selfUpdate: selfUpdate) else { return .clear }
         // Ahead of the equality check, so clearing the failure mark (Try Again) takes the block down even
         // though the remedy itself is unchanged.
         guard
             AppKitController.shouldRenderCompatibilityBlock(
-                remedy: newRemedy, verdictIsCompatible: verdict.isCompatible, stagedApplyDidNotLand: stagedApplyDidNotLand)
+                remedy: newRemedy, verdictIsCompatible: verdict?.isCompatible == true, stagedApplyDidNotLand: stagedApplyDidNotLand)
         else { return .clear }
         return newRemedy == renderedRemedy ? .leaveAlone : .rerender(newRemedy)
     }
@@ -120,6 +125,7 @@ extension AppKitController: CompatibilityBlockPresenting {}
     func reconcileCompatibilityBlock(deviceID: String) {
         let verdict = host.deviceCompatibility(forDeviceID: deviceID)
         let status = host.deviceDaemonStatus(forDeviceID: deviceID)
+        refreshSelfUpdateSchedule(deviceID: deviceID)
         // Runs ahead of the visible-block guard: an SSH update or a staged apply started from here
         // outlives whatever the detail pane is showing, so their state has to be retired from the
         // device's own facts rather than from the pane's. Only a verdict clears anything — an absent
@@ -132,7 +138,7 @@ extension AppKitController: CompatibilityBlockPresenting {}
         guard let renderedRemedy = host.visibleCompatibilityBlockRemedy else { return }
         let action = Self.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: host.visibleCompatibilityBlockDeviceID == deviceID, renderedRemedy: renderedRemedy, verdict: verdict, status: status,
-            stagedApplyDidNotLand: stagedApplyDidNotLand(deviceID: deviceID, status: status))
+            stagedApplyDidNotLand: stagedApplyDidNotLand(deviceID: deviceID, status: status), selfUpdate: selfUpdateFacts(deviceID: deviceID))
         switch action {
         case .leaveAlone: return
         case .clear:
@@ -145,9 +151,12 @@ extension AppKitController: CompatibilityBlockPresenting {}
             host.presentDetailPane(.none, presentation: .backgroundRefresh)
             host.refreshSelection()
             if host.detailPane == .none { host.showPlaceholder(message: "Select a project or workspace.", presentation: .backgroundRefresh) }
-        case .rerender:
-            // `verdict` is guaranteed non-nil here: `.rerender` only comes from `blockRemedy` returning a
-            // remedy, which itself requires a non-optional verdict.
+        case .rerender(let remedy):
+            if case .selfUpdate = remedy {
+                host.showSelfUpdateBlock(deviceID: deviceID, presentation: .backgroundRefresh)
+                return
+            }
+            // Every other remedy comes from a verdict, so one is present here.
             guard let verdict else { return }
             host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict, presentation: .backgroundRefresh)
         }
@@ -419,8 +428,159 @@ extension AppKitController: CompatibilityBlockPresenting {}
     /// of the same device cannot inherit a spinner, a failure mark, or a watchdog from work that is no
     /// longer observable.
     func forgetDaemonUpdateProgress(deviceID: String) {
+        selfUpdateAttempts.forget(deviceID: deviceID)
+        stopSelfUpdatePolling(deviceID: deviceID)
+        stillRestartingTimers.removeValue(forKey: deviceID)?.task.cancel()
         daemonSSHUpdateInProgressDeviceIDs.remove(deviceID)
         silentDaemonHandoffRequestedAttempts = silentDaemonHandoffRequestedAttempts.filter { $0.deviceID != deviceID }
         retireStagedApplyState(deviceID: deviceID, currentStagedVersion: nil)
+    }
+
+    // MARK: - Self-update
+
+    /// The updates this app asked devices to run (or noticed a device restarting into), with each device's
+    /// last status so a restarting device still resolves to a state.
+    private var selfUpdateAttempts = DaemonSelfUpdateAttemptTracker()
+    /// One status poll per device with an update in flight, stopped as soon as the update is no longer
+    /// moving.
+    private var selfUpdatePollTasks: [String: Task<Void, Never>] = [:]
+    /// The pending re-render for a restart that runs past `DaemonSelfUpdatePresentation.stillRestartingAfter`,
+    /// keyed by the deadline it waits for so a repeated status never reschedules it.
+    private var stillRestartingTimers: [String: (deadline: Date, task: Task<Void, Never>)] = [:]
+    /// How often a device with an update in flight is asked for its status, so Downloading advances.
+    private static let selfUpdatePollInterval: Duration = .seconds(2)
+
+    /// What the app shows for `deviceID`'s self-update right now. The sidebar header, the detail block and
+    /// the poll all read it here.
+    func selfUpdatePresentation(deviceID: String) -> DaemonSelfUpdatePresentation {
+        guard let section = host.deviceSection(id: deviceID) else { return .none }
+        let isReachable = section.loadState == .loaded && section.daemonStatus != nil
+        return selfUpdateAttempts.presentation(deviceID: deviceID, liveStatus: section.daemonStatus, isReachable: isReachable, now: Date())
+    }
+
+    /// The block's inputs for a device whose self-update is in play, or nil when there is none.
+    func selfUpdateFacts(deviceID: String) -> CompatibilityBlockView.SelfUpdateFacts? {
+        let presentation = selfUpdatePresentation(deviceID: deviceID)
+        guard presentation != .none,
+            let channel = (host.deviceDaemonStatus(forDeviceID: deviceID) ?? selfUpdateAttempts.lastStatus(deviceID: deviceID))?.selfUpdate?.channel
+        else { return nil }
+        return CompatibilityBlockView.SelfUpdateFacts(presentation: presentation, channel: channel)
+    }
+
+    /// The remedy the block shows for `deviceID`, with its self-update folded in. The one entry point
+    /// the host renders from, so rendering and reconciling cannot disagree.
+    func blockRemedy(deviceID: String, verdict: SpacesWireCompatibility?) -> CompatibilityBlockView.BlockRemedy? {
+        CompatibilityBlockView.blockRemedy(
+            verdict: verdict, status: host.deviceDaemonStatus(forDeviceID: deviceID), selfUpdate: selfUpdateFacts(deviceID: deviceID))
+    }
+
+    /// The block's action for a self-update: Update (asks the device to update), or Try Again after a
+    /// failed or slow update. Try Again on a device that is away reconnects it and restarts the wait
+    /// instead, because there is no one to ask; on a reachable device it asks again.
+    func startOrRetrySelfUpdate(deviceID: String) {
+        let presentation = selfUpdatePresentation(deviceID: deviceID)
+        var target = ""
+        var isRetry = false
+        switch presentation {
+        case .available(_, let to): target = to
+        case .failed(_, let to, _), .stillRestarting(_, let to): (target, isRetry) = (to, true)
+        case .none, .downloading, .installing, .restarting: return
+        }
+        let section = host.deviceSection(id: deviceID)
+        let isReachable = section?.loadState == .loaded && section?.daemonStatus != nil
+        if isRetry, !isReachable {
+            selfUpdateAttempts.resetRestartingSince(deviceID: deviceID, now: Date())
+            host.reconnectDevice(deviceID: deviceID)
+            repaintSelfUpdate(deviceID: deviceID)
+            return
+        }
+        guard let device = host.deviceRecord(forDeviceID: deviceID),
+            let status = host.deviceDaemonStatus(forDeviceID: deviceID) ?? selfUpdateAttempts.lastStatus(deviceID: deviceID)
+        else {
+            host.showDeviceNotLoadedError()
+            return
+        }
+        selfUpdateAttempts.begin(deviceID: deviceID, targetVersion: target, status: status)
+        repaintSelfUpdate(deviceID: deviceID)
+        Task { @MainActor [weak self] in
+            do {
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try SpacesDeviceClient.startDaemonSelfUpdate(context: DeviceRequestContext(device: device))
+                }.value
+            } catch {
+                guard let self else { return }
+                self.selfUpdateAttempts.forget(deviceID: deviceID)
+                self.repaintSelfUpdate(deviceID: deviceID)
+                self.host.showError(error)
+                return
+            }
+            // Pulls the daemon's first progress report straight away rather than waiting for the poll.
+            self?.requestSidebarReload()
+        }
+    }
+
+    /// Re-renders everything that shows `deviceID`'s self-update: its sidebar header and, when it is
+    /// the open one, the detail block.
+    private func repaintSelfUpdate(deviceID: String) {
+        host.reloadDeviceHeader(deviceID: deviceID)
+        reconcileCompatibilityBlock(deviceID: deviceID)
+    }
+
+    /// Starts or stops the poll and the Still-restarting re-render to match the device's current state.
+    /// Called whenever fresh facts for the device land (from `reconcileCompatibilityBlock`) and whenever
+    /// the attempt changes.
+    private func refreshSelfUpdateSchedule(deviceID: String) {
+        guard selfUpdateShouldPoll(deviceID: deviceID) else {
+            stopSelfUpdatePolling(deviceID: deviceID)
+            stillRestartingTimers.removeValue(forKey: deviceID)?.task.cancel()
+            return
+        }
+        startSelfUpdatePolling(deviceID: deviceID)
+        scheduleStillRestartingRepaint(deviceID: deviceID)
+    }
+
+    private func selfUpdateShouldPoll(deviceID: String) -> Bool {
+        selfUpdatePresentation(deviceID: deviceID).isInFlight && selfUpdateAttempts.hasAttempt(deviceID: deviceID)
+    }
+
+    /// Asks for the device's status every `selfUpdatePollInterval` through the sidebar reload the staged
+    /// handoff already uses, which lands the status in the section and runs the reconcile above. The loop
+    /// checks the device itself each tick, so it ends even if no status ever lands (a device that stays
+    /// away still ends it once the attempt does).
+    private func startSelfUpdatePolling(deviceID: String) {
+        guard selfUpdatePollTasks[deviceID] == nil else { return }
+        selfUpdatePollTasks[deviceID] = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.selfUpdatePollInterval)
+                guard !Task.isCancelled, let self else { return }
+                guard self.selfUpdateShouldPoll(deviceID: deviceID) else {
+                    self.selfUpdatePollTasks[deviceID] = nil
+                    return
+                }
+                self.requestSidebarReload()
+            }
+        }
+    }
+
+    private func stopSelfUpdatePolling(deviceID: String) {
+        selfUpdatePollTasks.removeValue(forKey: deviceID)?.cancel()
+    }
+
+    /// Renders Still restarting at the 120 s mark without waiting for other activity: while the device is
+    /// away no status lands to trigger a render.
+    private func scheduleStillRestartingRepaint(deviceID: String) {
+        guard case .restarting = selfUpdatePresentation(deviceID: deviceID),
+            let deadline = selfUpdateAttempts.stillRestartingDeadline(deviceID: deviceID)
+        else { return }
+        if stillRestartingTimers[deviceID]?.deadline == deadline { return }
+        stillRestartingTimers[deviceID]?.task.cancel()
+        let task = Task { @MainActor [weak self] in
+            // A small margin so the clock reads past the deadline when the repaint resolves.
+            try? await Task.sleep(for: .seconds(max(deadline.timeIntervalSinceNow, 0) + 0.5))
+            guard !Task.isCancelled, let self else { return }
+            self.stillRestartingTimers[deviceID] = nil
+            self.repaintSelfUpdate(deviceID: deviceID)
+        }
+        stillRestartingTimers[deviceID] = (deadline, task)
     }
 }
