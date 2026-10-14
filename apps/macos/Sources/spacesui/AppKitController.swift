@@ -3859,6 +3859,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if Self.detailPanePresentationDismissesFormWindows(current: detailPane, presented: pane, presentation: presentation) {
             projectForms.clearActiveAddFormStateAndCloseWindows()
         }
+        // Every way off a device's block passes through here, so this is where its Updated confirmation ends.
+        if let blockDeviceID = detailPane.compatibilityBlockDeviceID, blockDeviceID != pane.compatibilityBlockDeviceID {
+            daemonUpdate.dismissCompletedSelfUpdate(deviceID: blockDeviceID)
+        }
         detailPane = pane
         if pane.workspaceID == nil { hideWorkspacePanelTabStrip() }
         if pane.compatibilityBlockDeviceID == nil { visibleCompatibilityBlockRemedy = nil }

@@ -32,8 +32,8 @@ import spacesterminalcore
         #expect(block.eyebrowTone == .accent)
         #expect(block.versionPair == CompatibilityBlockView.VersionPair(from: "0.23.0", to: "0.24.0"))
         #expect(block.whoLine == "build-box · pre-release updates")
-        #expect(block.body == "build-box downloads and installs Spaces 0.24.0 itself. Nothing it's running stops.")
-        #expect(block.actionButtonTitle == "Update build-box")
+        #expect(block.body == "The device downloads and installs Spaces 0.24.0 itself. Nothing it's running stops.")
+        #expect(block.actionButtonTitle == "Update")
         #expect(block.progressBar == nil)
         #expect(block.installerCommand == nil)
     }
@@ -43,7 +43,7 @@ import spacesterminalcore
         #expect(block.eyebrow == "CAN'T CONNECT — DAEMON NEEDS AN UPDATE")
         #expect(block.eyebrowTone == .warning)
         #expect(block.versionPair == CompatibilityBlockView.VersionPair(from: "0.1.0", to: "0.24.0"))
-        #expect(block.actionButtonTitle == "Update build-box")
+        #expect(block.actionButtonTitle == "Update")
         // Never the SSH or run-this-yourself guidance.
         #expect(block.installerCommand == nil)
     }
@@ -86,7 +86,7 @@ import spacesterminalcore
         let slow = content(.stillRestarting(from: "0.23.0", to: "0.24.0"))
         #expect(slow.eyebrow == "Still restarting")
         #expect(slow.eyebrowTone == .warning)
-        #expect(slow.body == "build-box hasn't come back on 0.24.0 yet. Its terminals keep running.")
+        #expect(slow.body == "The device hasn't come back on 0.24.0 yet. Its terminals keep running.")
         #expect(slow.actionButtonTitle == "Try Again")
         #expect(slow.progressBar == nil)
 
@@ -95,6 +95,28 @@ import spacesterminalcore
         #expect(failed.eyebrowTone == .warning)
         #expect(failed.body == "The download was cut off.")
         #expect(failed.actionButtonTitle == "Try Again")
+    }
+
+    @Test func updatedConfirmsInTheAccentWithTheVersionPairAndNoAction() {
+        let block = content(.updated(from: "0.23.0", to: "0.24.0"), channel: .prerelease)
+        #expect(block.eyebrow == "Updated")
+        #expect(block.eyebrowTone == .accent)
+        #expect(block.versionPair == CompatibilityBlockView.VersionPair(from: "0.23.0", to: "0.24.0"))
+        #expect(block.whoLine == "build-box · pre-release updates")
+        #expect(block.body == "Running Spaces 0.24.0. Its terminals kept running.")
+        #expect(block.actionButtonTitle == nil)
+        #expect(block.progressBar == nil)
+    }
+
+    @Test func theUpdateButtonTitleIgnoresTheDeviceName() {
+        let long = "spider-exp000-spaces-lsu-1014a.us-central1-a.c.keptune.internal"
+        let block = CompatibilityBlockView.content(
+            remedy: .selfUpdate(.available(from: "0.23.0", to: "0.24.0"), channel: .stable, isBlocked: false), deviceName: long,
+            isLocalDevice: false, isLinuxDaemon: true, clientVersion: "0.24.0", canCheckForUpdates: false, canUpdateOverSSH: false,
+            isUpdatingOverSSH: false)
+        #expect(block.actionButtonTitle == "Update")
+        #expect(block.whoLine == "\(long) · stable releases")
+        #expect(!block.body.contains(long))
     }
 
     // MARK: - Remedy choice
@@ -125,6 +147,14 @@ import spacesterminalcore
             CompatibilityBlockView.blockRemedy(verdict: .compatible, status: current, selfUpdate: facts)
                 == .selfUpdate(available, channel: .stable, isBlocked: false))
         #expect(CompatibilityBlockView.blockRemedy(verdict: .compatible, status: current, selfUpdate: nil) == nil)
+    }
+
+    @Test func aFinishedUpdateKeepsTheBlockUpAsUpdated() {
+        let updated = DaemonSelfUpdatePresentation.updated(from: "0.23.0", to: "0.24.0")
+        let facts = CompatibilityBlockView.SelfUpdateFacts(presentation: updated, channel: .stable)
+        #expect(
+            CompatibilityBlockView.blockRemedy(verdict: .compatible, status: status(version: "0.24.0"), selfUpdate: facts)
+                == .selfUpdate(updated, channel: .stable, isBlocked: false))
     }
 
     @Test func aDeviceAwayMidRestartKeepsTheBlockWithoutAVerdict() {
@@ -179,6 +209,7 @@ import spacesterminalcore
         #expect(Status.offersSelfUpdate(compatibility: .compatible, presentation: .downloading(from: "0.23.0", to: "0.24.0", received: 1, total: 2)))
         #expect(Status.offersSelfUpdate(compatibility: .compatible, presentation: .failed(from: "0.23.0", to: "0.24.0", reason: "x")))
         #expect(!Status.offersSelfUpdate(compatibility: .compatible, presentation: .none))
+        #expect(!Status.offersSelfUpdate(compatibility: .compatible, presentation: .updated(from: "0.23.0", to: "0.24.0")))
         // An incompatible device has its Resolve button, and an away one has no verdict.
         #expect(!Status.offersSelfUpdate(compatibility: .daemonTooOld, presentation: available))
         #expect(!Status.offersSelfUpdate(compatibility: nil, presentation: available))
@@ -212,8 +243,37 @@ import spacesterminalcore
         #expect(tracker.hasAttempt(deviceID: "box"))
 
         let done = tracker.presentation(deviceID: "box", liveStatus: updatableStatus(version: "0.24.0"), isReachable: true, now: now)
-        #expect(done == .none)
+        #expect(done == .updated(from: "0.23.0", to: "0.24.0"))
+        // The confirmation keeps the record, so it survives repeated reads until the user moves on.
+        #expect(tracker.hasAttempt(deviceID: "box"))
+        #expect(
+            tracker.presentation(deviceID: "box", liveStatus: updatableStatus(version: "0.24.0"), isReachable: true, now: now)
+                == .updated(from: "0.23.0", to: "0.24.0"))
+    }
+
+    @Test func updatedKeepsTheChannelWhenTheTargetBuildReportsNoSelfUpdate() {
+        var tracker = DaemonSelfUpdateAttemptTracker()
+        let now = Date(timeIntervalSince1970: 1_000)
+        tracker.begin(deviceID: "box", targetVersion: "0.24.0", status: updatableStatus())
+
+        let done = tracker.presentation(deviceID: "box", liveStatus: status(version: "0.24.0"), isReachable: true, now: now)
+        #expect(done == .updated(from: "0.23.0", to: "0.24.0"))
+        #expect(tracker.lastChannel(deviceID: "box") == .stable)
+    }
+
+    @Test func dismissingRetiresACompletedRecordAndLeavesAnInFlightOneAlone() {
+        var tracker = DaemonSelfUpdateAttemptTracker()
+        let now = Date(timeIntervalSince1970: 1_000)
+        tracker.begin(deviceID: "box", targetVersion: "0.24.0", status: updatableStatus())
+
+        tracker.dismissCompleted(deviceID: "box")
+        #expect(tracker.hasAttempt(deviceID: "box"))
+
+        _ = tracker.presentation(deviceID: "box", liveStatus: updatableStatus(version: "0.24.0"), isReachable: true, now: now)
+        tracker.dismissCompleted(deviceID: "box")
         #expect(!tracker.hasAttempt(deviceID: "box"))
+        let current = status(version: "0.24.0", selfUpdate: DaemonSelfUpdateStatus(channel: .stable))
+        #expect(tracker.presentation(deviceID: "box", liveStatus: current, isReachable: true, now: now) == .none)
     }
 
     @Test func aRetryThatInstallsADifferentVersionStillEndsTheAttempt() {
@@ -227,8 +287,7 @@ import spacesterminalcore
                 == .downloading(from: "0.23.0", to: "0.24.0", received: 1, total: 2))
 
         let back = tracker.presentation(deviceID: "box", liveStatus: updatableStatus(version: "0.24.0"), isReachable: true, now: now)
-        #expect(back == .none)
-        #expect(!tracker.hasAttempt(deviceID: "box"))
+        #expect(back == .updated(from: "0.23.0", to: "0.24.0"))
     }
 
     @Test func anUpdateStartedElsewhereIsFollowedThroughTheOutageFromItsFirstStep() {
@@ -276,6 +335,7 @@ import spacesterminalcore
         #expect(DaemonSelfUpdatePresentation.stillRestarting(from: "a", to: "b").isInFlight)
         #expect(!DaemonSelfUpdatePresentation.available(from: "a", to: "b").isInFlight)
         #expect(!DaemonSelfUpdatePresentation.failed(from: "a", to: "b", reason: "x").isInFlight)
+        #expect(!DaemonSelfUpdatePresentation.updated(from: "a", to: "b").isInFlight)
         #expect(!DaemonSelfUpdatePresentation.none.isInFlight)
     }
 }

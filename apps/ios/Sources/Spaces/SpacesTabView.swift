@@ -7,6 +7,9 @@ import spacesterminalcore
 struct SpacesTabView: View {
     @Bindable var model: SpacesMobileAppModel
     @State private var selectedSession: SelectedTerminalSessionRoute?
+    /// The device the self-update card or blocked hero was showing, captured on appear: by the time it
+    /// disappears after a device switch, the model's active device is already the new one.
+    @State private var selfUpdateSurfaceDeviceID: String?
     @State private var selectedBrowserSession: SelectedBrowserSessionRoute?
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
     @State private var isShowingVisibilitySheet = false
@@ -128,6 +131,9 @@ struct SpacesTabView: View {
                                         if model.blockedHeroRunsSelfUpdate { await model.runDaemonSelfUpdateAction() } else { await model.retryStagedApply() }
                                     }
                                 }.frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.compatibilityHero)
+                                // A finished update can leave the device blocked (its new build is still too old for this
+                                // app), so the hero ends the confirmation too, or the retained attempt hides the next offer.
+                                .modifier(EndsSelfUpdateConfirmation(model: model, surface: .hero, shownDeviceID: $selfUpdateSurfaceDeviceID))
                             }
                         }
                     } else if model.isLoading && model.overview == nil {
@@ -213,6 +219,7 @@ struct SpacesTabView: View {
             }
         case .selfUpdateCard(let content):
             DaemonSelfUpdateCardView(content: content) { Task { await model.runDaemonSelfUpdateAction() } }
+                .modifier(EndsSelfUpdateConfirmation(model: model, surface: .card, shownDeviceID: $selfUpdateSurfaceDeviceID))
         case .none, .hero: EmptyView()
         }
     }
@@ -619,6 +626,20 @@ struct SpacesTabView: View {
             // mutations against other workspaces, which have nothing to do with this loose session (#450).
         }.buttonStyle(.plain).disabled(isDeleting || (!session.isControlAvailable && !session.hasFinalRender)).opacity(isDeleting ? 0.5 : 1)
             .accessibilityIdentifier("terminal.row.\(session.id)")
+    }
+}
+
+/// Ends a finished self-update's Updated confirmation once the surface showing it (the card or the
+/// blocked hero) leaves the screen, unless the other surface took its place (see
+/// `leaveDaemonSelfUpdateSurface`). The device is captured on appear because a device switch moves the
+/// model's active device before the surface disappears.
+private struct EndsSelfUpdateConfirmation: ViewModifier {
+    let model: SpacesMobileAppModel
+    let surface: SpacesMobileAppModel.DaemonSelfUpdateSurface
+    @Binding var shownDeviceID: String?
+
+    func body(content: Content) -> some View {
+        content.onAppear { shownDeviceID = model.activeDeviceID }.onDisappear { model.leaveDaemonSelfUpdateSurface(surface, shownFor: shownDeviceID) }
     }
 }
 

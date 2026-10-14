@@ -10,11 +10,14 @@ public enum DaemonSelfUpdateCopy {
     /// Shown for a failed run whose daemon reported no reason.
     public static let failedFallbackReason = "The update stopped before it finished."
 
-    public static func availableBody(version: String, deviceName: String) -> String {
-        "Spaces \(version) is out for \(deviceName). It updates itself, and nothing it's running stops."
+    public static let updatedTitle = "Updated"
+    public static let updateButtonTitle = "Update"
+
+    public static func availableBody(version: String) -> String {
+        "Spaces \(version) is out. The device updates itself, and nothing it's running stops."
     }
 
-    public static func updateButtonTitle(deviceName: String) -> String { "Update \(deviceName)" }
+    public static func updatedBody(version: String) -> String { "Running Spaces \(version). Its terminals kept running." }
 
     public static func downloadingTitle(deviceName: String) -> String { "Updating \(deviceName)" }
 
@@ -28,8 +31,8 @@ public enum DaemonSelfUpdateCopy {
 
     public static func restartingBody(version: String) -> String { "Restarting on \(version). Its terminals keep running." }
 
-    public static func stillRestartingBody(deviceName: String, version: String) -> String {
-        "\(deviceName) hasn't come back on \(version) yet. Its terminals keep running."
+    public static func stillRestartingBody(version: String) -> String {
+        "The device hasn't come back on \(version) yet. Its terminals keep running."
     }
 
     // MARK: - Mac detail block
@@ -41,20 +44,18 @@ public enum DaemonSelfUpdateCopy {
         }
     }
 
-    public static func macBody(deviceName: String, version: String) -> String {
-        "\(deviceName) downloads and installs Spaces \(version) itself. Nothing it's running stops."
+    public static func macBody(version: String) -> String {
+        "The device downloads and installs Spaces \(version) itself. Nothing it's running stops."
     }
 
     // MARK: - iPhone blocked hero
 
     public static func heroWhoLine(availableVersion: String, deviceName: String) -> String { "\(availableVersion) is available for \(deviceName)" }
 
-    public static func heroBody(deviceName: String) -> String { "\(deviceName) downloads and installs it itself. Nothing it's running stops." }
+    public static let heroBody = "The device downloads and installs it itself. Nothing it's running stops."
 
     /// A blocked device that can update itself but has not found a release to update to yet.
-    public static func noReleaseFoundBody(deviceName: String) -> String {
-        "\(deviceName) checks for a newer Spaces release on its own and offers Update here once it finds one."
-    }
+    public static let noReleaseFoundBody = "The device checks for a newer Spaces release on its own and offers Update here once it finds one."
 
     /// Decimal megabytes with one decimal place.
     static func megabytes(_ bytes: Int64) -> String {

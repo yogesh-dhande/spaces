@@ -6,11 +6,15 @@ public struct DaemonSelfUpdateAttempt: Equatable, Sendable {
     /// The version the attempt waits for. A client follows the daemon's reported run target (see
     /// `following(_:)`), so a retry that installs a different version still retires the attempt.
     public var targetVersion: String
+    /// The version the device ran when the attempt began, shown as the "from" side of the Updated
+    /// confirmation. Unlike the target it is never retargeted.
+    public var fromVersion: String
     /// When the client first showed Restarting for this attempt; nil until it does.
     public var restartingSince: Date?
 
-    public init(targetVersion: String, restartingSince: Date? = nil) {
+    public init(targetVersion: String, fromVersion: String, restartingSince: Date? = nil) {
         self.targetVersion = targetVersion
+        self.fromVersion = fromVersion
         self.restartingSince = restartingSince
     }
 
@@ -35,6 +39,8 @@ public enum DaemonSelfUpdatePresentation: Equatable, Sendable {
     case restarting(from: String, to: String)
     case stillRestarting(from: String, to: String)
     case failed(from: String, to: String, reason: String)
+    /// The device is running the version the attempt waited for. Stays until the user moves on.
+    case updated(from: String, to: String)
 
     /// How long a client waits in Restarting before saying the device is slow to return.
     public static let stillRestartingAfter: TimeInterval = 120
@@ -45,11 +51,16 @@ public enum DaemonSelfUpdatePresentation: Equatable, Sendable {
     public static func resolve(
         status: TerminalServiceDaemonStatus, isReachable: Bool, attempt: DaemonSelfUpdateAttempt?, now: Date
     ) -> DaemonSelfUpdatePresentation {
-        guard let selfUpdate = status.selfUpdate else { return .none }
         let from = status.version
 
-        // The device reports a version at or past the attempt's target: the attempt is over.
-        if let attempt, !SpacesWireProtocol.isVersion(from, olderThan: attempt.targetVersion) { return .none }
+        // The device reports a version at or past the attempt's target: the attempt is over. Reaching the
+        // target is read from `status.version` alone, ahead of the self-update report, so a target build
+        // whose status carries no report still confirms.
+        if let attempt, !SpacesWireProtocol.isVersion(from, olderThan: attempt.targetVersion) {
+            return .updated(from: attempt.fromVersion, to: from)
+        }
+
+        guard let selfUpdate = status.selfUpdate else { return .none }
 
         if let attempt, !isReachable, selfUpdate.progress?.step != .failed {
             return restarting(from: from, to: attempt.targetVersion, since: attempt.restartingSince, now: now)
@@ -88,7 +99,7 @@ public enum DaemonSelfUpdatePresentation: Equatable, Sendable {
     public var isInFlight: Bool {
         switch self {
         case .downloading, .installing, .restarting, .stillRestarting: true
-        case .none, .available, .failed: false
+        case .none, .available, .failed, .updated: false
         }
     }
 
@@ -96,7 +107,7 @@ public enum DaemonSelfUpdatePresentation: Equatable, Sendable {
     public var inFlightTargetVersion: String? {
         switch self {
         case .downloading(_, let to, _, _), .installing(_, let to), .restarting(_, let to), .stillRestarting(_, let to): to
-        case .none, .available, .failed: nil
+        case .none, .available, .failed, .updated: nil
         }
     }
 

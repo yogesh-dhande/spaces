@@ -462,7 +462,7 @@ extension AppKitController: CompatibilityBlockPresenting {}
     func selfUpdateFacts(deviceID: String) -> CompatibilityBlockView.SelfUpdateFacts? {
         let presentation = selfUpdatePresentation(deviceID: deviceID)
         guard presentation != .none,
-            let channel = (host.deviceDaemonStatus(forDeviceID: deviceID) ?? selfUpdateAttempts.lastStatus(deviceID: deviceID))?.selfUpdate?.channel
+            let channel = host.deviceDaemonStatus(forDeviceID: deviceID)?.selfUpdate?.channel ?? selfUpdateAttempts.lastChannel(deviceID: deviceID)
         else { return nil }
         return CompatibilityBlockView.SelfUpdateFacts(presentation: presentation, channel: channel)
     }
@@ -484,7 +484,7 @@ extension AppKitController: CompatibilityBlockPresenting {}
         switch presentation {
         case .available(_, let to): target = to
         case .failed(_, let to, _), .stillRestarting(_, let to): (target, isRetry) = (to, true)
-        case .none, .downloading, .installing, .restarting: return
+        case .none, .downloading, .installing, .restarting, .updated: return
         }
         let section = host.deviceSection(id: deviceID)
         let isReachable = section?.loadState == .loaded && section?.daemonStatus != nil
@@ -519,6 +519,11 @@ extension AppKitController: CompatibilityBlockPresenting {}
         }
     }
 
+    /// Ends the Updated confirmation once the user has moved off the device's block.
+    func dismissCompletedSelfUpdate(deviceID: String) {
+        selfUpdateAttempts.dismissCompleted(deviceID: deviceID)
+    }
+
     /// Re-renders everything that shows `deviceID`'s self-update: its sidebar header and, when it is
     /// the open one, the detail block.
     private func repaintSelfUpdate(deviceID: String) {
@@ -531,6 +536,9 @@ extension AppKitController: CompatibilityBlockPresenting {}
     /// the attempt changes.
     private func refreshSelfUpdateSchedule(deviceID: String) {
         guard selfUpdateShouldPoll(deviceID: deviceID) else {
+            // A completed update nobody is looking at has nothing left to confirm, and its record would
+            // otherwise mask the device's next update as already done.
+            if host.visibleCompatibilityBlockDeviceID != deviceID { selfUpdateAttempts.dismissCompleted(deviceID: deviceID) }
             stopSelfUpdatePolling(deviceID: deviceID)
             stillRestartingTimers.removeValue(forKey: deviceID)?.task.cancel()
             return

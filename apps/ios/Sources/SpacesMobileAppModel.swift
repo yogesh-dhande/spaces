@@ -507,7 +507,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var daemonStatus: TerminalServiceDaemonStatus? {
         didSet {
             daemonStatusDeviceID = activeDeviceID
-            if let daemonStatus, daemonStatus.selfUpdate != nil { daemonSelfUpdateStatuses[daemonSelfUpdateKey] = daemonStatus }
+            // A device with an attempt keeps its latest status even when it carries no self-update report
+            // (a target build without the feature): the remembered status is what a disconnect falls back
+            // to, and a stale in-flight one would bring Restarting back after the update finished.
+            if let daemonStatus, daemonStatus.selfUpdate != nil || daemonSelfUpdateAttempts[daemonSelfUpdateKey] != nil {
+                daemonSelfUpdateStatuses[daemonSelfUpdateKey] = daemonStatus
+            }
             updateSessionRestoreOffer()
         }
     }
@@ -2903,51 +2908,85 @@ private enum SpacesMobileMutationTimeoutRecovery {
         daemonSelfUpdateAttempts[daemonSelfUpdateKey] != nil && daemonSelfUpdatePresentation.isInFlight
     }
 
+    /// True once the active device is on the version its update aimed at and the card is confirming it.
+    private var isDaemonSelfUpdateCompleted: Bool {
+        if case .updated = daemonSelfUpdatePresentation { return true }
+        return false
+    }
+
+    /// The two places the Spaces tab shows a device's self-update: the card above the list, and the
+    /// blocked hero that replaces the list.
+    enum DaemonSelfUpdateSurface { case card, hero }
+
+    /// Called when `surface` leaves the screen. An update that makes a blocked device compatible swaps
+    /// the hero for the card (and a release still too old for this app swaps the other way): that is the
+    /// same confirmation moving, not the user moving on, so only a disappearance with no swap ends it.
+    func leaveDaemonSelfUpdateSurface(_ surface: DaemonSelfUpdateSurface, shownFor deviceID: String?) {
+        let current: DaemonSelfUpdateSurface? =
+            switch daemonCompatibilityPresentation {
+            case .selfUpdateCard: .card
+            case .hero: .hero
+            case .none, .pendingUpdate: nil
+            }
+        if deviceID == activeDeviceID, let current, current != surface { return }
+        dismissCompletedDaemonSelfUpdate(shownFor: deviceID)
+    }
+
+    /// Ends the Updated confirmation the card showed for `deviceID`, once the user has moved on; an update
+    /// still moving is left alone. The card names its device because it disappears after a device switch
+    /// has already moved `activeDeviceID`; switching retires the departing device's confirmation itself
+    /// (`selectDevice`), so a card for a device that is no longer active does nothing here.
+    func dismissCompletedDaemonSelfUpdate(shownFor deviceID: String?) {
+        guard deviceID == activeDeviceID, isDaemonSelfUpdateCompleted else { return }
+        forgetDaemonSelfUpdate(deviceID: daemonSelfUpdateKey)
+    }
+
     /// The button on the self-update card and hero: Update when one is available, Try Again when the
     /// update stalled or failed.
     func runDaemonSelfUpdateAction() async {
         switch daemonSelfUpdatePresentation {
         case .available: await startDaemonSelfUpdate()
         case .stillRestarting, .failed: await retryDaemonSelfUpdate()
-        case .none, .downloading, .installing, .restarting: return
+        case .none, .downloading, .installing, .restarting, .updated: return
         }
     }
 
     /// Asks the active device to update itself to the version it reports available. A refusal is shown
     /// through the ordinary error alert, since the user is watching the control they just pressed.
     func startDaemonSelfUpdate() async {
-        guard daemonSelfUpdateAttempts[daemonSelfUpdateKey] == nil, case .available(_, let target) = daemonSelfUpdatePresentation else { return }
-        await requestDaemonSelfUpdate(target: target)
+        guard daemonSelfUpdateAttempts[daemonSelfUpdateKey] == nil, case .available(let from, let target) = daemonSelfUpdatePresentation else { return }
+        await requestDaemonSelfUpdate(from: from, target: target)
     }
 
     /// Try Again after the update stalled or failed. A reachable device is asked again. An unreachable
     /// one cannot be asked, so the wait starts over: reconnect, and count the 120 seconds from now.
     func retryDaemonSelfUpdate() async {
+        let from: String
         let target: String
         switch daemonSelfUpdatePresentation {
-        case .failed(_, let to, _), .stillRestarting(_, let to): target = to
-        case .none, .available, .downloading, .installing, .restarting: return
+        case .failed(let running, let to, _), .stillRestarting(let running, let to): (from, target) = (running, to)
+        case .none, .available, .downloading, .installing, .restarting, .updated: return
         }
         guard !isDaemonSelfUpdateReachable else {
-            await requestDaemonSelfUpdate(target: target)
+            await requestDaemonSelfUpdate(from: from, target: target)
             return
         }
         let now = wallClock()
         daemonSelfUpdateNow = now
-        daemonSelfUpdateAttempts[daemonSelfUpdateKey] = DaemonSelfUpdateAttempt(targetVersion: target, restartingSince: now)
+        daemonSelfUpdateAttempts[daemonSelfUpdateKey] = DaemonSelfUpdateAttempt(targetVersion: target, fromVersion: from, restartingSince: now)
         startDaemonSelfUpdatePolling()
         await resetActiveConnectionEndpointAndWait()
     }
 
     /// Records the attempt before the request so the card moves the moment the button is pressed, and
     /// takes it back if the device refuses.
-    private func requestDaemonSelfUpdate(target: String) async {
+    private func requestDaemonSelfUpdate(from: String, target: String) async {
         let key = daemonSelfUpdateKey
         let identity = overviewIdentity
         let previous = daemonSelfUpdateAttempts[key]
         daemonSelfUpdateNow = wallClock()
         isDaemonSelfUpdateReachable = true
-        daemonSelfUpdateAttempts[key] = DaemonSelfUpdateAttempt(targetVersion: target)
+        daemonSelfUpdateAttempts[key] = DaemonSelfUpdateAttempt(targetVersion: target, fromVersion: from)
         startDaemonSelfUpdatePolling()
         // A private channel, for the reason `performDaemonUpdate` uses one: the shared channel does not
         // serialize whole round trips, and this request must not interleave with an overview refresh.
@@ -2981,7 +3020,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         defer { Task { await channel.close() } }
         func isCurrent() -> Bool {
             !Task.isCancelled && generation == daemonSelfUpdatePollGeneration && identity == overviewIdentity
-                && daemonSelfUpdateAttempts[daemonSelfUpdateKey] != nil
+                && daemonSelfUpdateAttempts[daemonSelfUpdateKey] != nil && !isDaemonSelfUpdateCompleted
         }
         while isCurrent() {
             do { try await Task.sleep(for: daemonSelfUpdatePollInterval) } catch { return }
@@ -3006,7 +3045,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     /// Keeps the attempt in step with what the presentation resolved to: starts the Restarting clock the
-    /// first time Restarting shows, and drops the attempt once the device is on the target version.
+    /// first time Restarting shows. An attempt whose device is on the target version stays, as the Updated
+    /// confirmation, until `dismissCompletedDaemonSelfUpdate`.
     ///
     /// Any in-flight report for a device with no attempt (the update was started from another client)
     /// adopts one and starts the poll, so this app still notices when the device does not come back.
@@ -3025,7 +3065,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             guard let target = presentation.inFlightTargetVersion, let status = daemonStatus else { return }
             daemonSelfUpdateStatuses[key] = status
             daemonSelfUpdateAttempts[key] = DaemonSelfUpdateAttempt(
-                targetVersion: target, restartingSince: presentation.isRestarting ? daemonSelfUpdateNow : nil)
+                targetVersion: target, fromVersion: status.version, restartingSince: presentation.isRestarting ? daemonSelfUpdateNow : nil)
             startDaemonSelfUpdatePolling()
             return
         }
@@ -3754,6 +3794,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard let deviceState = SpacesMobileDeviceStore.select(deviceID: id, installationID: settings.installationID) else { return }
         let previousDeviceID = activeDeviceID
         let previousCommandChannel = commandChannel
+        // Switching away is moving on from the departing device's Updated confirmation. It has to be read
+        // now, while its facts are still the active ones; left alone, it would come back with the device.
+        dismissCompletedDaemonSelfUpdate(shownFor: previousDeviceID)
         // Cleared before the identity moves, not after: what the previous device reported is read as a
         // statement about whichever device `activeDeviceID` names, so the two must never be crossed, not
         // even for the few assignments in between.

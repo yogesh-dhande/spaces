@@ -3776,8 +3776,8 @@
             XCTAssertEqual(hero.eyebrow, "CAN'T CONNECT — UPDATE NEEDED")
             XCTAssertEqual(hero.versionPair, DaemonVersionPair(from: "1.0.0", to: "2.0.0"))
             XCTAssertEqual(hero.whoLine, "2.0.0 is available for builder")
-            XCTAssertEqual(hero.body, "builder downloads and installs it itself. Nothing it's running stops.")
-            XCTAssertEqual(hero.actionTitle, "Update builder")
+            XCTAssertEqual(hero.body, "The device downloads and installs it itself. Nothing it's running stops.")
+            XCTAssertEqual(hero.actionTitle, "Update")
         }
 
         /// Before the daemon has found a release the pair has no target to name and there is nothing to
@@ -3792,7 +3792,7 @@
             else { return XCTFail("A blocked device owns the screen.") }
             XCTAssertEqual(hero.versionPair, DaemonVersionPair(from: "1.0.0", to: "?"))
             XCTAssertNil(hero.actionTitle)
-            XCTAssertEqual(hero.body, DaemonSelfUpdateCopy.noReleaseFoundBody(deviceName: "builder"))
+            XCTAssertEqual(hero.body, DaemonSelfUpdateCopy.noReleaseFoundBody)
         }
 
         /// While the update runs the hero's body is the step, and a failed run swaps the button for Try Again.
@@ -3832,8 +3832,8 @@
             else { return XCTFail("A compatible device with a release available gets the self-update card.") }
             XCTAssertEqual(card.title, "Update available")
             XCTAssertEqual(card.versionPair, DaemonVersionPair(from: "1.0.0", to: "2.0.0"))
-            XCTAssertEqual(card.body, "Spaces 2.0.0 is out for builder. It updates itself, and nothing it's running stops.")
-            XCTAssertEqual(card.actionTitle, "Update builder")
+            XCTAssertEqual(card.body, "Spaces 2.0.0 is out. The device updates itself, and nothing it's running stops.")
+            XCTAssertEqual(card.actionTitle, "Update")
 
             let both = selfUpdatingStatus(installedVersion: "1.5.0")
             guard
@@ -3848,7 +3848,7 @@
         func testAStalledOrFailedSelfUpdateOffersTryAgain() throws {
             let stalled = try XCTUnwrap(DaemonSelfUpdateContent.make(.stillRestarting(from: "1.0.0", to: "2.0.0"), deviceName: "builder"))
             XCTAssertEqual(stalled.title, "Still restarting")
-            XCTAssertEqual(stalled.body, "builder hasn't come back on 2.0.0 yet. Its terminals keep running.")
+            XCTAssertEqual(stalled.body, "The device hasn't come back on 2.0.0 yet. Its terminals keep running.")
             XCTAssertEqual(stalled.actionTitle, "Try Again")
             XCTAssertTrue(stalled.isWarning)
 
@@ -3860,8 +3860,32 @@
             XCTAssertNil(DaemonSelfUpdateContent.make(.none, deviceName: "builder"))
         }
 
+        /// The finished update is confirmed as a quiet card: the pair it went between, nothing to press,
+        /// nothing in progress, and not drawn as a problem.
+        func testAnUpdatedDeviceShowsAQuietConfirmation() throws {
+            let updated = try XCTUnwrap(DaemonSelfUpdateContent.make(.updated(from: "1.0.0", to: "2.0.0"), deviceName: "builder"))
+            XCTAssertEqual(updated.title, "Updated")
+            XCTAssertEqual(updated.versionPair, DaemonVersionPair(from: "1.0.0", to: "2.0.0"))
+            XCTAssertEqual(updated.body, "Running Spaces 2.0.0. Its terminals kept running.")
+            XCTAssertNil(updated.actionTitle)
+            XCTAssertNil(updated.progress)
+            XCTAssertFalse(updated.isWarning)
+            XCTAssertFalse(updated.isAvailable)
+        }
+
+        func testTheUpdatingTitleNamesTheDeviceWhileTheButtonStaysPlain() throws {
+            let long = "spider-exp000-spaces-lsu-1014a.us-central1-a.c.keptune.internal"
+            let downloading = try XCTUnwrap(
+                DaemonSelfUpdateContent.make(.downloading(from: "1.0.0", to: "2.0.0", received: 1, total: 2), deviceName: long))
+            XCTAssertEqual(downloading.title, "Updating \(long)")
+
+            let available = try XCTUnwrap(DaemonSelfUpdateContent.make(.available(from: "1.0.0", to: "2.0.0"), deviceName: long))
+            XCTAssertEqual(available.actionTitle, "Update")
+            XCTAssertFalse(available.body.contains(long))
+        }
+
         /// The attempt follows the update: recorded when Update is pressed, given its Restarting clock the
-        /// first time the device shows Restarting, and dropped once the device is on the target version.
+        /// first time the device shows Restarting, and confirmed as Updated until the user moves on.
         func testSelfUpdateAttemptLifecycleFromStartToTheDeviceReturning() async throws {
             let recorder = SpacesMobileRequestRecorder()
             let box = SelfUpdateStatusBox(selfUpdatingStatus())
@@ -3888,8 +3912,99 @@
             guard case .restarting = model.daemonSelfUpdatePresentation else { return XCTFail("The device reports Restarting.") }
 
             await box.set(selfUpdatingStatus(version: "2.0.0", availableVersion: nil))
-            await waitUntil("the attempt to end") { model.daemonSelfUpdateAttempts.isEmpty }
+            await waitUntil("the update to be confirmed") { model.daemonSelfUpdatePresentation == .updated(from: "1.0.0", to: "2.0.0") }
+            XCTAssertNotNil(model.daemonSelfUpdateAttempts[""], "the confirmation keeps the attempt")
+
+            model.dismissCompletedDaemonSelfUpdate(shownFor: model.activeDeviceID)
+            XCTAssertTrue(model.daemonSelfUpdateAttempts.isEmpty)
             XCTAssertEqual(model.daemonSelfUpdatePresentation, .none)
+        }
+
+        /// Switching devices is moving on from the departing device's Updated confirmation, even though its
+        /// card disappears only after the switch; otherwise it would come back with the device and hide
+        /// that device's next offer.
+        func testSwitchingDevicesRetiresTheDepartingDevicesUpdatedConfirmation() async throws {
+            var settingsA = SpacesMobileConnectionSettings()
+            settingsA.certificateFingerprint = "fp-device-a-updated"
+            settingsA.authToken = "token-a-updated"
+            var settingsB = SpacesMobileConnectionSettings()
+            settingsB.certificateFingerprint = "fp-device-b-updated"
+            settingsB.authToken = "token-b-updated"
+            let afterA = SpacesMobileDeviceStore.upsert(settings: settingsA, name: "device-a-updated")
+            let deviceA = try XCTUnwrap(afterA.devices.first(where: { $0.certificateFingerprint == settingsA.certificateFingerprint }))
+            let afterB = SpacesMobileDeviceStore.upsert(settings: settingsB, name: "device-b-updated")
+            let deviceB = try XCTUnwrap(afterB.devices.first(where: { $0.certificateFingerprint == settingsB.certificateFingerprint }))
+            defer {
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceA.id, fallbackSettings: SpacesMobileConnectionSettings())
+                _ = SpacesMobileDeviceStore.remove(deviceID: deviceB.id, fallbackSettings: SpacesMobileConnectionSettings())
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.paired-devices")
+                UserDefaults.standard.removeObject(forKey: "spaces.mobile.active-device-id")
+            }
+            let client = SpacesDeviceAPIClient(settings: settingsA) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let model = SpacesMobileAppModel(settings: settingsA, bridgeClient: client, daemonSelfUpdatePollInterval: .seconds(60))
+            model.activeDeviceID = deviceA.id
+            model.pairedDevices = [deviceA, deviceB]
+            model.daemonStatus = selfUpdatingStatus()
+            await model.startDaemonSelfUpdate()
+            model.daemonStatus = selfUpdatingStatus(version: "2.0.0", availableVersion: nil)
+            XCTAssertEqual(model.daemonSelfUpdatePresentation, .updated(from: "1.0.0", to: "2.0.0"))
+
+            model.selectDevice(id: deviceB.id)
+            // Device A's card disappears only now, naming the device it showed.
+            model.dismissCompletedDaemonSelfUpdate(shownFor: deviceA.id)
+
+            XCTAssertNil(model.daemonSelfUpdateAttempts[deviceA.id])
+        }
+
+        /// A target build that reports no self-update state still replaces the remembered in-flight status,
+        /// so losing the connection while Updated shows cannot bring Restarting back and hide the outage.
+        func testLosingTheConnectionAfterAnUpdateToABuildWithoutTheFeatureKeepsUpdated() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, daemonSelfUpdatePollInterval: .seconds(60))
+            model.daemonStatus = selfUpdatingStatus()
+            await model.startDaemonSelfUpdate()
+            model.daemonStatus = selfUpdatingStatus(progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .restarting))
+            model.daemonStatus = TerminalServiceDaemonStatus(
+                version: "2.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                protocolVersion: SpacesWireProtocol.version, operatingSystem: "Linux")
+            XCTAssertEqual(model.daemonSelfUpdatePresentation, .updated(from: "1.0.0", to: "2.0.0"))
+
+            model.daemonStatus = nil
+
+            XCTAssertEqual(model.daemonSelfUpdatePresentation, .updated(from: "1.0.0", to: "2.0.0"))
+        }
+
+        /// An update that makes a blocked device compatible swaps the hero for the card. The hero leaving
+        /// in that swap is not the user moving on, so Updated stays until the card itself leaves.
+        func testTheHeroGivingWayToTheCardKeepsUpdated() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, daemonSelfUpdatePollInterval: .seconds(60))
+            model.daemonStatus = selfUpdatingStatus(protocolVersion: SpacesWireProtocol.version - 1)
+            guard case .hero = model.daemonCompatibilityPresentation else { return XCTFail("A too-old device shows the hero.") }
+            await model.startDaemonSelfUpdate()
+            model.daemonStatus = selfUpdatingStatus(version: "2.0.0", availableVersion: nil)
+            guard case .selfUpdateCard = model.daemonCompatibilityPresentation else { return XCTFail("The updated device shows the card.") }
+
+            model.leaveDaemonSelfUpdateSurface(.hero, shownFor: model.activeDeviceID)
+            XCTAssertEqual(model.daemonSelfUpdatePresentation, .updated(from: "1.0.0", to: "2.0.0"))
+
+            model.leaveDaemonSelfUpdateSurface(.card, shownFor: model.activeDeviceID)
+            XCTAssertTrue(model.daemonSelfUpdateAttempts.isEmpty)
+        }
+
+        /// Moving away from the card ends only a finished update's confirmation.
+        func testDismissingLeavesAnUpdateInMotionAlone() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, daemonSelfUpdatePollInterval: .seconds(60))
+            model.daemonStatus = selfUpdatingStatus()
+            await model.startDaemonSelfUpdate()
+
+            model.dismissCompletedDaemonSelfUpdate(shownFor: model.activeDeviceID)
+
+            XCTAssertNotNil(model.daemonSelfUpdateAttempts[""])
         }
 
         /// A failed update keeps its attempt (the failure text and Try Again stay) but stops the poll, and
@@ -3929,8 +4044,8 @@
             await waitUntil("the poll to read again after Try Again") { await statusReads() > readsAfterWaiting }
         }
 
-        /// A failed attempt whose update is finished from elsewhere is retired by the next overview, not
-        /// only by the poll, so it cannot suppress the offers that follow.
+        /// A failed attempt whose update is finished from elsewhere is confirmed by the next overview, not
+        /// only by the poll, and once dismissed it cannot suppress the offers that follow.
         func testAFailedSelfUpdateAttemptIsRetiredByAnOverviewShowingTheTargetVersion() async throws {
             let failed = selfUpdatingStatus(
                 progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .failed, failureReason: "Disk is full."))
@@ -3955,7 +4070,9 @@
 
             await box.set(selfUpdatingStatus(version: "2.0.0", availableVersion: nil))
             await model.refresh()
-            XCTAssertTrue(model.daemonSelfUpdateAttempts.isEmpty, "the overview retires the attempt once the device is on the target")
+            XCTAssertEqual(model.daemonSelfUpdatePresentation, .updated(from: "1.0.0", to: "2.0.0"))
+            model.dismissCompletedDaemonSelfUpdate(shownFor: model.activeDeviceID)
+            XCTAssertTrue(model.daemonSelfUpdateAttempts.isEmpty, "dismissing retires the completed attempt")
 
             await box.set(selfUpdatingStatus(version: "2.0.0", availableVersion: "3.0.0"))
             await model.refresh()

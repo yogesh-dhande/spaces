@@ -859,7 +859,14 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     ///
     /// Returning the version rather than just a flag lets `DaemonUpdateRemedy` carry it, so a client
     /// that has decided an update is staged never has to re-derive which one it is.
+    ///
+    /// A self-update run that is still moving installs its build before it hands off to it, so for that
+    /// window the device reports a newer installed build it is about to apply by itself. That is not a
+    /// staged update: a client that treated it as one would fire its own handoff to race the run's and
+    /// take the self-update block down in favor of a staged-apply surface. A failed run is different: the
+    /// build it left installed is genuinely waiting for a restart.
     public var stagedVersion: String? {
+        if let step = selfUpdate?.progress?.step, step != .failed { return nil }
         guard let installedVersion, SpacesWireProtocol.isVersion(version, olderThan: installedVersion) else { return nil }
         return installedVersion
     }

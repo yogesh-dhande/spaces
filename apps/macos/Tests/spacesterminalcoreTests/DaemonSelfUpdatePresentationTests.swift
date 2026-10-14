@@ -53,21 +53,50 @@ final class DaemonSelfUpdatePresentationTests: XCTestCase {
     }
 
     func testAttemptIsOverOnceTheDeviceReportsTheTargetVersion() {
-        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", restartingSince: now)
+        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", fromVersion: "0.23.0", restartingSince: now)
 
-        XCTAssertEqual(resolve(status(version: "0.24.0", available: nil, progress: progress(.restarting)), attempt: attempt), .none)
-        XCTAssertEqual(resolve(status(version: "0.25.0"), attempt: attempt), .none)
+        XCTAssertEqual(
+            resolve(status(version: "0.24.0", available: nil, progress: progress(.restarting)), attempt: attempt),
+            .updated(from: "0.23.0", to: "0.24.0"))
+        XCTAssertEqual(resolve(status(version: "0.25.0"), attempt: attempt), .updated(from: "0.23.0", to: "0.25.0"))
+    }
+
+    func testTargetBuildWithoutASelfUpdateReportStillConfirmsTheUpdate() {
+        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", fromVersion: "0.23.0")
+
+        XCTAssertEqual(resolve(status(version: "0.24.0", hasSelfUpdate: false), attempt: attempt), .updated(from: "0.23.0", to: "0.24.0"))
+    }
+
+    func testReachingAVersionWithoutAnAttemptShowsNothing() {
+        XCTAssertEqual(resolve(status(version: "0.24.0")), .none)
+        XCTAssertEqual(resolve(status(version: "0.24.0", hasSelfUpdate: false)), .none)
+    }
+
+    func testUpdatedIsNotInFlightAndHasNoTarget() {
+        let updated = DaemonSelfUpdatePresentation.updated(from: "0.23.0", to: "0.24.0")
+
+        XCTAssertFalse(updated.isInFlight)
+        XCTAssertFalse(updated.isRestarting)
+        XCTAssertNil(updated.inFlightTargetVersion)
+    }
+
+    func testFollowingARetargetKeepsTheVersionTheAttemptBeganFrom() {
+        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.25.0", fromVersion: "0.23.0")
+        let retargeted = attempt.following(status(progress: progress(.downloading)))
+
+        XCTAssertEqual(retargeted.targetVersion, "0.24.0")
+        XCTAssertEqual(retargeted.fromVersion, "0.23.0")
     }
 
     func testUnreachableDeviceWithAnAttemptReadsAsRestarting() {
-        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0")
+        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", fromVersion: "0.23.0")
 
         XCTAssertEqual(
             resolve(status(progress: progress(.installing)), reachable: false, attempt: attempt), .restarting(from: "0.23.0", to: "0.24.0"))
     }
 
     func testUnreachableDeviceWhoseLastStepFailedStaysFailed() {
-        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0")
+        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", fromVersion: "0.23.0")
 
         XCTAssertEqual(
             resolve(status(progress: progress(.failed, reason: "No space left.")), reachable: false, attempt: attempt),
@@ -80,22 +109,22 @@ final class DaemonSelfUpdatePresentationTests: XCTestCase {
 
     func testStillRestartingAppearsAtExactlyOneHundredTwentySeconds() {
         let target = "0.24.0"
-        let justBefore = DaemonSelfUpdateAttempt(targetVersion: target, restartingSince: now.addingTimeInterval(-119.9))
-        let boundary = DaemonSelfUpdateAttempt(targetVersion: target, restartingSince: now.addingTimeInterval(-120))
+        let justBefore = DaemonSelfUpdateAttempt(targetVersion: target, fromVersion: "0.23.0", restartingSince: now.addingTimeInterval(-119.9))
+        let boundary = DaemonSelfUpdateAttempt(targetVersion: target, fromVersion: "0.23.0", restartingSince: now.addingTimeInterval(-120))
 
         XCTAssertEqual(resolve(status(), reachable: false, attempt: justBefore), .restarting(from: "0.23.0", to: target))
         XCTAssertEqual(resolve(status(), reachable: false, attempt: boundary), .stillRestarting(from: "0.23.0", to: target))
     }
 
     func testDaemonReportedRestartingAlsoTurnsIntoStillRestarting() {
-        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", restartingSince: now.addingTimeInterval(-300))
+        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", fromVersion: "0.23.0", restartingSince: now.addingTimeInterval(-300))
 
         XCTAssertEqual(
             resolve(status(progress: progress(.restarting)), attempt: attempt), .stillRestarting(from: "0.23.0", to: "0.24.0"))
     }
 
     func testRestartingWithoutARecordedStartNeverReadsAsStill() {
-        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", restartingSince: nil)
+        let attempt = DaemonSelfUpdateAttempt(targetVersion: "0.24.0", fromVersion: "0.23.0", restartingSince: nil)
 
         XCTAssertEqual(resolve(status(), reachable: false, attempt: attempt), .restarting(from: "0.23.0", to: "0.24.0"))
         XCTAssertTrue(resolve(status(), reachable: false, attempt: attempt).isRestarting)
@@ -112,22 +141,25 @@ final class DaemonSelfUpdatePresentationTests: XCTestCase {
 
     func testApprovedCopy() {
         XCTAssertEqual(
-            DaemonSelfUpdateCopy.availableBody(version: "0.24.0", deviceName: "build-box"),
-            "Spaces 0.24.0 is out for build-box. It updates itself, and nothing it's running stops.")
-        XCTAssertEqual(DaemonSelfUpdateCopy.updateButtonTitle(deviceName: "build-box"), "Update build-box")
+            DaemonSelfUpdateCopy.availableBody(version: "0.24.0"), "Spaces 0.24.0 is out. The device updates itself, and nothing it's running stops.")
+        XCTAssertEqual(DaemonSelfUpdateCopy.updateButtonTitle, "Update")
+        XCTAssertEqual(DaemonSelfUpdateCopy.updatedTitle, "Updated")
+        XCTAssertEqual(DaemonSelfUpdateCopy.updatedBody(version: "0.24.0"), "Running Spaces 0.24.0. Its terminals kept running.")
         XCTAssertEqual(DaemonSelfUpdateCopy.downloadingTitle(deviceName: "build-box"), "Updating build-box")
         XCTAssertEqual(DaemonSelfUpdateCopy.installingBody(version: "0.24.0"), "Checking the signature and installing 0.24.0.")
         XCTAssertEqual(DaemonSelfUpdateCopy.restartingBody(version: "0.24.0"), "Restarting on 0.24.0. Its terminals keep running.")
         XCTAssertEqual(
-            DaemonSelfUpdateCopy.stillRestartingBody(deviceName: "build-box", version: "0.24.0"),
-            "build-box hasn't come back on 0.24.0 yet. Its terminals keep running.")
+            DaemonSelfUpdateCopy.stillRestartingBody(version: "0.24.0"),
+            "The device hasn't come back on 0.24.0 yet. Its terminals keep running.")
         XCTAssertEqual(DaemonSelfUpdateCopy.macWhoLine(deviceName: "build-box", channel: .stable), "build-box · stable releases")
         XCTAssertEqual(DaemonSelfUpdateCopy.macWhoLine(deviceName: "build-box", channel: .prerelease), "build-box · pre-release updates")
         XCTAssertEqual(
-            DaemonSelfUpdateCopy.macBody(deviceName: "build-box", version: "0.24.0"),
-            "build-box downloads and installs Spaces 0.24.0 itself. Nothing it's running stops.")
+            DaemonSelfUpdateCopy.macBody(version: "0.24.0"),
+            "The device downloads and installs Spaces 0.24.0 itself. Nothing it's running stops.")
         XCTAssertEqual(DaemonSelfUpdateCopy.heroWhoLine(availableVersion: "0.24.0", deviceName: "build-box"), "0.24.0 is available for build-box")
+        XCTAssertEqual(DaemonSelfUpdateCopy.heroBody, "The device downloads and installs it itself. Nothing it's running stops.")
         XCTAssertEqual(
-            DaemonSelfUpdateCopy.heroBody(deviceName: "build-box"), "build-box downloads and installs it itself. Nothing it's running stops.")
+            DaemonSelfUpdateCopy.noReleaseFoundBody,
+            "The device checks for a newer Spaces release on its own and offers Update here once it finds one.")
     }
 }

@@ -34,8 +34,8 @@ struct DaemonSelfUpdateContent: Equatable {
         case .available(let from, let to):
             return DaemonSelfUpdateContent(
                 title: DaemonSelfUpdateCopy.availableTitle, versionPair: pair(from, to),
-                body: DaemonSelfUpdateCopy.availableBody(version: to, deviceName: deviceName), footnote: nil, progress: nil,
-                actionTitle: DaemonSelfUpdateCopy.updateButtonTitle(deviceName: deviceName), isWarning: false, isAvailable: true)
+                body: DaemonSelfUpdateCopy.availableBody(version: to), footnote: nil, progress: nil,
+                actionTitle: DaemonSelfUpdateCopy.updateButtonTitle, isWarning: false, isAvailable: true)
         case .downloading(let from, let to, let received, let total):
             let progress: Progress
             if let total, total > 0 { progress = .determinate(min(1, max(0, Double(received) / Double(total)))) } else { progress = .indeterminate }
@@ -53,8 +53,12 @@ struct DaemonSelfUpdateContent: Equatable {
         case .stillRestarting(let from, let to):
             return DaemonSelfUpdateContent(
                 title: DaemonSelfUpdateCopy.stillRestartingTitle, versionPair: pair(from, to),
-                body: DaemonSelfUpdateCopy.stillRestartingBody(deviceName: deviceName, version: to), footnote: nil, progress: nil,
+                body: DaemonSelfUpdateCopy.stillRestartingBody(version: to), footnote: nil, progress: nil,
                 actionTitle: DaemonSelfUpdateCopy.tryAgainTitle, isWarning: true, isAvailable: false)
+        case .updated(let from, let to):
+            return DaemonSelfUpdateContent(
+                title: DaemonSelfUpdateCopy.updatedTitle, versionPair: pair(from, to), body: DaemonSelfUpdateCopy.updatedBody(version: to),
+                footnote: nil, progress: nil, actionTitle: nil, isWarning: false, isAvailable: false)
         case .failed(let from, let to, let reason):
             return DaemonSelfUpdateContent(
                 title: DaemonSelfUpdateCopy.failedTitle, versionPair: pair(from, to), body: reason, footnote: nil, progress: nil,

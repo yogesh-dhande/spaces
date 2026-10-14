@@ -129,7 +129,7 @@ enum DaemonCompatibilityPresentation: Equatable {
         status: DaemonSelfUpdateStatus, selfUpdate: DaemonSelfUpdatePresentation, runningVersion: String, deviceName: String
     ) -> Hero {
         let eyebrow = "CAN'T CONNECT — UPDATE NEEDED"
-        let startButton = DaemonSelfUpdateCopy.updateButtonTitle(deviceName: deviceName)
+        let startButton = DaemonSelfUpdateCopy.updateButtonTitle
         guard let content = DaemonSelfUpdateContent.make(selfUpdate, deviceName: deviceName), !content.isAvailable else {
             // No newer release reported yet (the device's check has not run or could not reach the
             // feed): there is nothing to update to, so no button that would only be refused.
@@ -137,12 +137,12 @@ enum DaemonCompatibilityPresentation: Equatable {
                 return Hero(
                     eyebrow: eyebrow, versionPair: DaemonVersionPair(from: runningVersion, to: DaemonVersionPair.unknown),
                     whoLine: "nothing newer is installed on \(deviceName)",
-                    body: DaemonSelfUpdateCopy.noReleaseFoundBody(deviceName: deviceName), actionTitle: nil)
+                    body: DaemonSelfUpdateCopy.noReleaseFoundBody, actionTitle: nil)
             }
             return Hero(
                 eyebrow: eyebrow, versionPair: DaemonVersionPair(from: runningVersion, to: available),
                 whoLine: DaemonSelfUpdateCopy.heroWhoLine(availableVersion: available, deviceName: deviceName),
-                body: DaemonSelfUpdateCopy.heroBody(deviceName: deviceName), actionTitle: startButton)
+                body: DaemonSelfUpdateCopy.heroBody, actionTitle: startButton)
         }
         return Hero(
             eyebrow: eyebrow, versionPair: content.versionPair,

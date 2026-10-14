@@ -2158,15 +2158,9 @@ private struct DeviceSyncState {
         if let compatibility = section?.compatibility, !compatibility.isCompatible {
             // Device headers are non-selectable, so an incompatible device's only affordance is this
             // caption button, which opens the compatibility block (restart/update) in the detail pane.
-            let button = NSButton(
-                title: compatibility == .clientTooOld ? "Update app" : "Resolve", target: self, action: #selector(compatibilityActionClicked(_:)))
-            button.bezelStyle = .inline
-            button.controlSize = .small
-            button.font = Typography.metadataTitle
-            button.contentTintColor = .systemOrange
-            button.identifier = NSUserInterfaceItemIdentifier("compat:\(deviceID)")
-            button.setContentHuggingPriority(.required, for: .horizontal)
-            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+            let button = deviceHeaderCaptionButton(
+                title: compatibility == .clientTooOld ? "Update app" : "Resolve", color: .systemOrange,
+                action: #selector(compatibilityActionClicked(_:)), identifier: "compat:\(deviceID)")
             contentRow.addArrangedSubview(button)
         } else {
             // The offline reason (e.g. the daemon startup error) is surfaced on hover wherever the state
@@ -2189,15 +2183,9 @@ private struct DeviceSyncState {
                 // Device headers are non-selectable, so this caption button is an offline device's only
                 // per-device recovery; without it the user's only option is reloading the whole sidebar. It
                 // also stands in for the offline caption, so it keeps the failed tint and the reason tooltip.
-                let button = NSButton(title: title, target: self, action: #selector(deviceRetryClicked(_:)))
-                button.bezelStyle = .inline
-                button.controlSize = .small
-                button.font = Typography.metadataTitle
-                button.contentTintColor = sidebarFailedIndicatorColor()
-                button.identifier = NSUserInterfaceItemIdentifier("retry:\(deviceID)")
+                let button = deviceHeaderCaptionButton(
+                    title: title, color: sidebarFailedIndicatorColor(), action: #selector(deviceRetryClicked(_:)), identifier: "retry:\(deviceID)")
                 button.toolTip = offlineReason
-                button.setContentHuggingPriority(.required, for: .horizontal)
-                button.setContentCompressionResistancePriority(.required, for: .horizontal)
                 contentRow.addArrangedSubview(button)
             case .none: break
             }
@@ -2206,14 +2194,9 @@ private struct DeviceSyncState {
             {
                 // Accent, not orange: the device works, and an update is on offer or under way. It opens
                 // the same block the incompatible device's button does.
-                let button = NSButton(title: "Update", target: self, action: #selector(selfUpdateActionClicked(_:)))
-                button.bezelStyle = .inline
-                button.controlSize = .small
-                button.font = Typography.metadataTitle
-                button.contentTintColor = Theme.accent
-                button.identifier = NSUserInterfaceItemIdentifier("selfupdate:\(deviceID)")
-                button.setContentHuggingPriority(.required, for: .horizontal)
-                button.setContentCompressionResistancePriority(.required, for: .horizontal)
+                let button = deviceHeaderCaptionButton(
+                    title: DaemonSelfUpdateCopy.updateButtonTitle, color: Theme.accent, action: #selector(selfUpdateActionClicked(_:)),
+                    identifier: "selfupdate:\(deviceID)")
                 contentRow.addArrangedSubview(button)
             }
         }
@@ -2970,6 +2953,19 @@ private struct DeviceSyncState {
     func sidebarRunningIndicatorColor() -> NSColor { sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.95) }
 
     func sidebarFailedIndicatorColor() -> NSColor { Theme.statusFailed }
+
+    /// A device header's tinted caption button. The color is carried by an attributed title because an
+    /// `.inline` bezel ignores `contentTintColor` for its title and would draw it gray.
+    private func deviceHeaderCaptionButton(title: String, color: NSColor, action: Selector, identifier: String) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .inline
+        button.controlSize = .small
+        button.attributedTitle = NSAttributedString(string: title, attributes: [.font: Typography.metadataTitle, .foregroundColor: color])
+        button.identifier = NSUserInterfaceItemIdentifier(identifier)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return button
+    }
 
     func sidebarIdleIndicatorColor() -> NSColor { SidebarAttentionStatus.inactive.indicatorColor }
 
