@@ -1621,8 +1621,9 @@ private struct DeviceSyncState {
     /// so the outline is reloaded wholesale only when the rows themselves changed (added, removed, or
     /// reordered); otherwise each row whose rendered content changed is reloaded on its own.
     func applySidebarDataChange() {
-        // Device load-state transitions land here. The Devices settings pane paints a status dot per device,
-        // so it repaints from them when it is open and no-ops otherwise.
+        // Device load-state and update-channel changes land here. The Devices settings pane paints a status
+        // dot and a pre-release checkbox per device, so it repaints from them when it is open and no-ops
+        // otherwise.
         host.devicePairing.refreshDeviceSettingsForDeviceStatusChange()
         rebuildFlatSidebarData()
         // An agent changing state, an alert arriving or being dismissed, or a workspace appearing
