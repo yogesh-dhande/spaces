@@ -536,10 +536,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
         try server.start()
         defer { server.stop() }
 
-        // Start a slow non-ping request that occupies a connection worker, without waiting for it.
-        DispatchQueue.global().async {
-            _ = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .list), socketPath: socketPath, timeout: 10)
-        }
+        // Start a slow non-ping request that occupies a connection worker, without waiting for it. Its own thread,
+        // for the reason `LongCommandServerHarness.sendInBackground` gives.
+        Thread { _ = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .list), socketPath: socketPath, timeout: 10) }.start()
         XCTAssertEqual(slowRequestStarted.wait(timeout: .now() + 2), .success, "Slow request never reached the server")
 
         let start = Date()
@@ -588,7 +587,12 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .profileCommand(.workspaceCreate(TerminalServiceWorkspaceCreatePayload(projectID: "p", branch: "feature"))))
         XCTAssertEqual(harness.started.wait(timeout: .now() + 2), .success)
 
-        let startAnswered = harness.sendInBackground(.profileCommand(.workspaceStart(TerminalServiceWorkspaceLifecyclePayload(cwd: "/tmp/w"))))
+        let startAnswered = try harness.sendQueued(.profileCommand(.workspaceStart(TerminalServiceWorkspaceLifecyclePayload(cwd: "/tmp/w"))))
+        // The accept loop is serial and reads each request before accepting the next, so this answer proves the start
+        // request was already handed to the lifecycle lane; without it the check below could pass before start arrived.
+        let listed = try TerminalServiceClient.send(
+            request: TerminalServiceRequest(command: .profileCommand(.projectList)), socketPath: harness.socketPath, timeout: 2)
+        XCTAssertEqual(listed.message, "listed")
         XCTAssertEqual(harness.started.wait(timeout: .now() + 0.5), .timedOut, "A second workspace command ran while the first was in flight")
 
         let cloneAnswered = harness.sendInBackground(.profileCommand(.projectCreate(.gitURL("https://example.com/repo.git"))))
@@ -1098,14 +1102,66 @@ private final class LongCommandServerHarness {
         try server.start()
     }
 
-    /// Sends `command` from a background thread; the returned semaphore is signalled once it is answered.
+    /// Sends `command` from a dedicated thread; the returned semaphore is signalled once it is answered.
+    ///
+    /// Not `DispatchQueue.global()`: that pool is width-limited and shared with every other test in the parallel worker
+    /// process, which can fill it. The server's serial queues are overcommit and keep running, so a client queued there
+    /// stalls on its own and the server looks like it held the request behind another one.
     func sendInBackground(_ command: TerminalServiceCommand) -> DispatchSemaphore {
         let answered = DispatchSemaphore(value: 0)
         let socketPath = socketPath
-        DispatchQueue.global().async {
+        Thread {
             _ = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: command), socketPath: socketPath, timeout: 10)
             answered.signal()
+        }.start()
+        return answered
+    }
+
+    /// Connects, writes `command` and closes the write side on the calling thread before returning, so the request is
+    /// already in the server's socket buffer; a dedicated thread then waits for the answer and signals the returned semaphore.
+    func sendQueued(_ command: TerminalServiceCommand) throws -> DispatchSemaphore {
+        #if canImport(Darwin)
+            let streamType = SOCK_STREAM
+        #else
+            let streamType = Int32(SOCK_STREAM.rawValue)
+        #endif
+        let fd = socket(AF_UNIX, streamType, 0)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        do {
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            let path = socketPath.utf8CString
+            guard path.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw POSIXError(.ENAMETOOLONG) }
+            withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                path.withUnsafeBufferPointer { buffer in if let base = buffer.baseAddress { memcpy(pointer, base, buffer.count) } }
+            }
+            let connected = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+            }
+            guard connected == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            var timeout = timeval(tv_sec: 10, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            let payload = try TerminalServiceCodec.encodeRequest(TerminalServiceRequest(command: command))
+            try payload.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < raw.count {
+                    let written = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                    if written < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                    offset += written
+                }
+            }
+            shutdown(fd, Int32(SHUT_WR))
+        } catch {
+            close(fd)
+            throw error
         }
+        let answered = DispatchSemaphore(value: 0)
+        Thread {
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while read(fd, &buffer, buffer.count) > 0 {}
+            close(fd)
+            answered.signal()
+        }.start()
         return answered
     }
 
