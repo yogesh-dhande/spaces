@@ -34,7 +34,8 @@ struct SidebarRowDeviceTreatment: Hashable, Sendable {
 /// reports and recovers it. `offersRetry` and `isUpdatePending` are the two remaining inputs
 /// `SidebarDeviceSectionStatus.resolve` takes beyond the load state, and `compatibilityActionTitle` is
 /// the whole compatibility branch the cell takes ahead of that caption (nil when the device is
-/// compatible, otherwise the button's title).
+/// compatible, otherwise the button's title). `offersSelfUpdate` is whether the header shows the accent
+/// "Update" pill.
 struct SidebarDeviceRowSignature: Hashable, Sendable {
     let displayName: String
     let loadState: AppKitController.SidebarDeviceLoadState
@@ -42,6 +43,7 @@ struct SidebarDeviceRowSignature: Hashable, Sendable {
     let isLocal: Bool
     let offersRetry: Bool
     let isUpdatePending: Bool
+    let offersSelfUpdate: Bool
 }
 
 /// A project row. A non-git project's row stands in for its single workspace, so it also renders that
