@@ -1776,7 +1776,15 @@ private struct DeviceSyncState {
             SidebarDeviceRowSignature(
                 displayName: section.displayName, loadState: section.loadState, compatibilityActionTitle: compatibilityActionTitle,
                 isLocal: section.isLocal, offersRetry: deviceSectionOffersRetry(deviceID: section.deviceID),
-                isUpdatePending: section.daemonStatus?.isUpdatePending == true))
+                isUpdatePending: section.daemonStatus?.isUpdatePending == true,
+                offersSelfUpdate: deviceHeaderOffersSelfUpdate(deviceID: section.deviceID, section: section)))
+    }
+
+    /// Shared by the header cell and its row signature so the pill and the repaint trigger cannot disagree.
+    private func deviceHeaderOffersSelfUpdate(deviceID: String, section: DeviceSection?) -> Bool {
+        SidebarDeviceSectionStatus.offersSelfUpdate(
+            compatibility: section?.compatibility, isUpdateStaged: section?.daemonStatus?.isUpdatePending == true,
+            presentation: host.daemonUpdate.selfUpdatePresentation(deviceID: deviceID))
     }
 
     private func projectRowSignature(project: ProjectSummary, device: SidebarRowDeviceTreatment) -> SidebarRowSignature {
@@ -2190,10 +2198,7 @@ private struct DeviceSyncState {
                 contentRow.addArrangedSubview(button)
             case .none: break
             }
-            if SidebarDeviceSectionStatus.offersSelfUpdate(
-                compatibility: section?.compatibility, isUpdateStaged: section?.daemonStatus?.isUpdatePending == true,
-                presentation: host.daemonUpdate.selfUpdatePresentation(deviceID: deviceID))
-            {
+            if deviceHeaderOffersSelfUpdate(deviceID: deviceID, section: section) {
                 // Accent, not orange: the device works, and an update is on offer or under way. It opens
                 // the same block the incompatible device's button does.
                 let button = deviceHeaderCaptionButton(
