@@ -1,0 +1,21 @@
+{
+  "functions": [
+    {
+      "source": ".",
+      "codebase": "push-relay",
+      "ignore": ["node_modules", ".git", "firebase.json", "test", "lib/test", "**/*.map", "public"],
+      "predeploy": ["npm --prefix \"$RESOURCE_DIR\" ci", "npm --prefix \"$RESOURCE_DIR\" run build"]
+    }
+  ],
+  "hosting": {
+    "target": "push",
+    "public": "public",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "/v1/**",
+        "function": { "functionId": "pushRelay", "region": "us-central1" }
+      }
+    ]
+  }
+}

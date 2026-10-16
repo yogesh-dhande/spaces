@@ -1,0 +1,53 @@
+name: Push Relay
+
+on:
+  pull_request:
+    paths:
+      - 'apps/push-relay/**'
+      - '.github/workflows/push-relay.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/push-relay/**'
+      - '.github/workflows/push-relay.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/push-relay
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/push-relay/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  # Deploys the function and the `push` Hosting site (rewrites /v1/** to the function). Secrets
+  # live in Secret Manager and are bound to the function at deploy time, never passed from CI.
+  deploy:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    concurrency: push-relay-deploy
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/push-relay/package-lock.json
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
+      - run: npx --yes firebase-tools@14 deploy --only functions:push-relay,hosting:push --project spaces-a1814 --non-interactive
+        working-directory: apps/push-relay

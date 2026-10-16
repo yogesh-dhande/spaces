@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "default": "spaces-a1814"
+  },
+  "targets": {
+    "spaces-a1814": {
+      "hosting": {
+        "push": ["spaces-push"]
+      }
+    }
+  }
+}
