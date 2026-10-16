@@ -1232,6 +1232,31 @@ The Agents and Alerts tabs derive from every paired device's overview at once (`
 
 A bug is tested at the lowest layer that reproduces it: model logic in `SpacesMobileTests`, rendered-hierarchy defects in XCUITests. `SpacesMobileSmokeUITests` drives Demo Mode offline and is blocking; `SpacesMobileUITests` needs a paired Mac (lanes in [dev.md](dev.md)). Ghostty refuses link hit-tests on column-cropped demo frames, so link coverage uses the E2E command request `TerminalDetailView` consumes.
 
+## Push Relay
+
+`apps/push-relay` is a Firebase Cloud Functions v2 HTTPS function (`pushRelay`, Node 22, `us-central1`) served at `https://push.usespaces.dev/v1/**` through a dedicated Hosting site. It exists because the APNs `.p8` key is team-wide and cannot ship in the daemon; the relay holds it (Secret Manager: `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`) and talks to APNs directly over HTTP/2 (`api.push.apple.com` / `api.sandbox.push.apple.com`) with a provider JWT cached for 50 minutes. The topic is the iOS bundle id `dev.usespaces.spacesmobile`.
+
+Structure: a pure core (`src/core`: validation, sealing, totals, body text, push decision, request handler), a `PhoneStateStore` interface (`FirestoreStore`, `MemoryStore` for tests), and an `ApnsSender` interface (`Http2ApnsSender`), so the handler can move to Cloud Run unchanged.
+
+Contract (JSON, POST only; errors are `{ "error": code }`):
+
+- `POST /v1/register` (phone): `{ apnsToken: hex, environment: "sandbox"|"production", installID: string }` returns `{ capability }`. The capability is base64url of `nonce(12) | AES-256-GCM ciphertext | tag(16)` over `{v:1, token, env, installID}`, keyed by `CAPABILITY_KEY` (base64 of 32 bytes). The phone hands it to each paired daemon.
+- `POST /v1/report` (daemon): `{ capability, deviceID (1..128 chars), total (int >= 0), blockedAgents (int, 0..total), notify: bool }` returns `200 { ok: true }`; `400` invalid input (or more than 64 devices for one phone); `401` capability does not unseal; `410` APNs reported the token gone (the reporting device's entry is already removed; the daemon drops the registration); `502` APNs failed transiently (state kept).
+- `POST /v1/unregister` (daemon, phone unpaired): `{ capability, deviceID }` removes that device's entry, then pushes the recomputed totals. Same status codes as report.
+
+State: Firestore `phones/{sha256("phone:" + installID)}` holds `devices: [{ deviceID, total, blockedAgents, updatedAt }]` and `deliveredTotal` (the badge total of the last push APNs accepted), counts only. The APNs token is only ever inside the sealed capability, which daemons hold; it is never stored relay-side. Each report runs in a Firestore transaction so concurrent reports from one phone's devices cannot lose updates; the push is decided inside the transaction and sent after commit (a transaction body can retry, a push cannot be undone).
+
+`deliveredTotal` advances in a second transaction only after APNs accepts a push, so a failed send (502) leaves the decision intact and an identical retry sends again. Push rules per report, with T and B the totals summed across the phone's devices and P the `deliveredTotal`:
+
+- T = 0: if P > 0, an alert-type push (APNs forbids badge keys in a background-type push), priority 10, `{"aps": {"badge": 0, "content-available": 1}, "spaces": {"withdraw": true}}`; the app removes the delivered notification. Otherwise nothing.
+- `notify` and T > 0: alert push, title `Spaces`, body `"<T> alert(s)"` plus `", <B> agent(s) need(s) input"` only when B > 0, `aps.badge = T`, default sound, `interruption-level: active`.
+- T != P and T > 0: badge-only push (`aps` holds only `badge`, push type `alert`).
+- Otherwise nothing.
+
+Every push carries `apns-collapse-id: spaces-alerts`, so the phone shows one notification that each push replaces. Content is counts only: no names, project, or agent text. APNs `410`, `Unregistered`, or `BadDeviceToken` removes only the reporting device's entry (the document goes when no devices remain; other devices may have reported through a rotated token) and answers `410`.
+
+There is no relay-side rate limit. Daemons report only on count changes and debounce them, APNs coalesces by collapse id, and a capability is an unguessable bearer limited to one phone's own daemons. A device that vanishes without unregistering keeps its last counts in the phone's totals until its daemon reports or unregisters.
+
 ## Hard-Earned Learnings
 
 Non-obvious constraints that span several files or govern how to work in an area. A lesson that matters at one decision site lives in a code comment there instead, and removing the guard that comment describes brings the bug back.

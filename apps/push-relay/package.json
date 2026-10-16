@@ -1,0 +1,24 @@
+{
+  "name": "spaces-push-relay",
+  "private": true,
+  "version": "1.0.0",
+  "description": "APNs push relay for the Spaces iOS app",
+  "main": "lib/src/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test \"lib/test/*.test.js\"",
+    "deploy": "firebase deploy --only functions,hosting:push"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0",
+    "firebase-functions": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}

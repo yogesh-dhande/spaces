@@ -533,6 +533,27 @@ Inherited projects/workspaces keep their real `dir`, so they are material to rea
 
 `deploy-remote` reads the installed app's version from its `Info.plist`, downloads and sha256-verifies the matching `spacesd-linux-<arch>` release artifact, and runs `install.sh --profile qa` on the configured device (`~/.spaces-dev/profiles/spaces/qa/`, `spacesd@qa.service`), then pairs with the installed `spaces` CLI bound to the QA database. Tear down with `spacese2e profile remove --remote qa`.
 
+## Push Relay
+
+`apps/push-relay` is the APNs relay for iOS notifications (design in [implementation.md](implementation.md#push-relay)). It is a standalone TypeScript package (Node 22) with its own `firebase.json` and `.firebaserc` for project `spaces-a1814`.
+
+```bash
+cd apps/push-relay
+npm ci
+npm run lint   # tsc --noEmit
+npm test       # builds to lib/, then node --test against the in-memory store and a fake APNs sender
+```
+
+[`.github/workflows/push-relay.yml`](../.github/workflows/push-relay.yml) lints and tests on pull requests touching the package, and on pushes to `main` also deploys the function and the `push` Hosting site with `firebase deploy --only functions:push-relay,hosting:push`, authenticated by `FIREBASE_SERVICE_ACCOUNT_SPACES_A1814` (the `github-action-1154053519` service account). Beyond Hosting admin, that account holds Cloud Functions Developer, Cloud Run Viewer, Secret Manager Viewer, and Service Account User on the runtime service account. The function runs as the default compute service account (`909607115526-compute@developer.gserviceaccount.com`), which holds Cloud Build Builder (it is also the build service account), Cloud Datastore User (Firestore read/write), and Secret Manager Secret Accessor on each of the four secrets (granted by the first deploy). Manual deploy: `npm run deploy` from `apps/push-relay` after `firebase login`.
+
+One-time setup:
+
+1. Put project `spaces-a1814` on the Blaze plan (Functions v2, Secret Manager, and Artifact Registry require it) and enable the Cloud Functions, Cloud Run, Cloud Build, Artifact Registry, Secret Manager, and Firestore APIs. Create the Firestore database (Native mode, `us-central1`).
+2. Create the four secrets with `firebase functions:secrets:set` from `apps/push-relay`: `APNS_KEY_P8` (the team-wide APNs `.p8` file contents), `APNS_KEY_ID`, `APNS_TEAM_ID`, and `CAPABILITY_KEY` (`openssl rand -base64 32`). Rotating `CAPABILITY_KEY` invalidates every issued capability, so phones must re-register and re-pair daemons.
+3. Create the Hosting site: `firebase hosting:sites:create spaces-push --project spaces-a1814` (site id `spaces-push`, mapped to target `push` in `.firebaserc`; use another id there if taken).
+4. Add the custom domain `push.usespaces.dev` to that site in the Firebase console (Hosting > spaces-push > Add custom domain) and create the DNS records it lists.
+5. Set the image cleanup policy (`firebase functions:artifacts:setpolicy --location us-central1`) and deploy once manually so the function exists before the first CI run.
+
 ## Website
 
 Local commands, the `prebuild` step, and where content lives are in [`apps/web/README.md`](../apps/web/README.md). `scripts/make-readme-device-art.py` regenerates the README's device-framed product shot (`docs/media/readme-ios.png`) from the screenshots in `apps/web/public/media/`.
