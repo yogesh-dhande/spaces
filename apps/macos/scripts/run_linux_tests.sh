@@ -82,6 +82,11 @@ for suite in \
   FileSystemWatcherInotifyRoutingTests \
   SpacesDeviceWorkspaceWatchLinuxTests \
   DeviceOverviewStreamServerSigpipeTests \
+  SpacesDevicePushNotifierTests \
+  SpacesDevicePushAlertEvaluationTests \
+  SpacesDevicePushRelayClientTests \
+  SpacesDeviceAlertsTests \
+  SpacesDevicePushRelayDeviceIDTests \
   GhosttyRemoteSessionStateStreamServerSigpipeTests \
   GhosttyLinuxHeadlessSessionAttachmentAuthorityTests \
   GhosttyLinuxHeadlessKeyEncodingTests \

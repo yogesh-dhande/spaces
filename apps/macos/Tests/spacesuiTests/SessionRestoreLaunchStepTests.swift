@@ -463,6 +463,9 @@ private final class AlwaysAuthorizedOfferPairingStore: SpacesDevicePairingStoreP
     func listDevices() throws -> [SpacesDevicePairedClient] { [] }
     func revoke(installationID _: String) throws {}
     func removeAll() throws {}
+    func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+    func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+    func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
     func authorize(clientApp _: SpacesDeviceClientApp?, authToken _: String?) throws {}
     func validate(clientApp _: SpacesDeviceClientApp) throws {}
 }

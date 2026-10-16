@@ -16,6 +16,9 @@ import workspacecore
     private let liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider?
     private let liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])?
 
+    private let pushRelayClient: any SpacesDevicePushRelayClient
+    private let pushScheduler: any SpacesDevicePushScheduler
+
     private var server: SpacesDeviceAPIServer?
     private var advertiser: (any SpacesDeviceAPIBonjourAdvertising)?
     private var controlServer: SpacesDeviceAPIControlServer?
@@ -23,7 +26,8 @@ import workspacecore
     private var isStopped = false
     private var lastFailureDescription: String?
 
-    public init(
+    /// The daemons' entry point: pushes go to the real relay on real timers.
+    public convenience init(
         settingsStore: SpacesDeviceAPISettingsStore = SpacesDeviceAPISettingsStore(),
         environment: [String: String] = ProcessInfo.processInfo.environment, restartInterval: TimeInterval = 5,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
@@ -33,6 +37,27 @@ import workspacecore
         liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider? = nil,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil
     ) {
+        self.init(
+            settingsStore: settingsStore, environment: environment, restartInterval: restartInterval,
+            builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
+            agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
+            selfUpdateController: selfUpdateController, liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
+            liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider, pushRelayClient: SpacesDevicePushRelayCurlClient(),
+            pushScheduler: SpacesDevicePushDispatchScheduler())
+    }
+
+    init(
+        settingsStore: SpacesDeviceAPISettingsStore, environment: [String: String], restartInterval: TimeInterval,
+        builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?,
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)?, automationOperations: AutomationOperations?,
+        onRestartRequested: (@Sendable () -> Void)?, selfUpdateController: (any DaemonSelfUpdateControlling)?,
+        liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider?,
+        liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])?, pushRelayClient: any SpacesDevicePushRelayClient,
+        pushScheduler: any SpacesDevicePushScheduler
+    ) {
+        self.pushRelayClient = pushRelayClient
+        self.pushScheduler = pushScheduler
         self.settingsStore = settingsStore
         self.environment = environment
         self.restartInterval = restartInterval
@@ -131,7 +156,9 @@ import workspacecore
             builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
             agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
             selfUpdateController: selfUpdateController, liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
-            liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider)
+            liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider, pushRelayClient: pushRelayClient,
+            pushScheduler: pushScheduler
+        )
         do {
             try createdServer.start()
             return createdServer
@@ -222,13 +249,21 @@ import workspacecore
 
     private func revokePairing(installationID: String) throws -> [SpacesDevicePairedClient] {
         let store = try SpacesDevicePairingStore()
+        let registrations = server?.pushRegistrationsToUnregister(installationID: installationID) ?? [:]
         try store.revoke(installationID: installationID)
+        server?.unregisterPushNotifications(for: registrations)
         server?.closeStreamRelays(forInstallationID: installationID)
         return try store.listDevices()
     }
 
     private func resetPairings() throws {
+        let registrations = server?.pushRegistrationsToUnregister(installationID: nil) ?? [:]
         try SpacesDevicePairingStore().removeAll()
+        // Accepted risk: a reset that lands while a relay report is in flight can lose this queued unregister when
+        // the stopped server (and its notifier) is released, leaving the device's counts at the relay. A reset is
+        // rare, it already leaves the phone's pairing broken, and removing the device on the phone calls the
+        // relay's /v1/unregister directly, which clears those counts.
+        server?.unregisterPushNotifications(for: registrations)
         server?.stop()
         server = nil
     }
