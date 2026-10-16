@@ -544,7 +544,7 @@ npm run lint   # tsc --noEmit
 npm test       # builds to lib/, then node --test against the in-memory store and a fake APNs sender
 ```
 
-[`.github/workflows/push-relay.yml`](../.github/workflows/push-relay.yml) lints and tests on pull requests touching the package, and on pushes to `main` also deploys the function and the `push` Hosting site with `firebase deploy --only functions:push-relay,hosting:push`, authenticated by `FIREBASE_SERVICE_ACCOUNT_SPACES_A1814`. That service account needs, beyond Hosting admin, Cloud Functions Admin, Cloud Run Admin, Service Account User (on the runtime service account), Artifact Registry Writer, Cloud Build Editor, and Secret Manager Admin (deploy grants the runtime service account access to each secret). The function's runtime service account needs Firestore read/write and Secret Manager Secret Accessor. Manual deploy: `npm run deploy` from `apps/push-relay` after `firebase login`.
+[`.github/workflows/push-relay.yml`](../.github/workflows/push-relay.yml) lints and tests on pull requests touching the package, and on pushes to `main` also deploys the function and the `push` Hosting site with `firebase deploy --only functions:push-relay,hosting:push`, authenticated by `FIREBASE_SERVICE_ACCOUNT_SPACES_A1814` (the `github-action-1154053519` service account). Beyond Hosting admin, that account holds Cloud Functions Developer, Cloud Run Viewer, Secret Manager Viewer, and Service Account User on the runtime service account. The function runs as the default compute service account (`909607115526-compute@developer.gserviceaccount.com`), which holds Cloud Build Builder (it is also the build service account), Cloud Datastore User (Firestore read/write), and Secret Manager Secret Accessor on each of the four secrets (granted by the first deploy). Manual deploy: `npm run deploy` from `apps/push-relay` after `firebase login`.
 
 One-time setup:
 
@@ -552,7 +552,7 @@ One-time setup:
 2. Create the four secrets with `firebase functions:secrets:set` from `apps/push-relay`: `APNS_KEY_P8` (the team-wide APNs `.p8` file contents), `APNS_KEY_ID`, `APNS_TEAM_ID`, and `CAPABILITY_KEY` (`openssl rand -base64 32`). Rotating `CAPABILITY_KEY` invalidates every issued capability, so phones must re-register and re-pair daemons.
 3. Create the Hosting site: `firebase hosting:sites:create spaces-push --project spaces-a1814` (site id `spaces-push`, mapped to target `push` in `.firebaserc`; use another id there if taken).
 4. Add the custom domain `push.usespaces.dev` to that site in the Firebase console (Hosting > spaces-push > Add custom domain) and create the DNS records it lists.
-5. Deploy once manually so the function exists before the first CI run.
+5. Set the image cleanup policy (`firebase functions:artifacts:setpolicy --location us-central1`) and deploy once manually so the function exists before the first CI run.
 
 ## Website
 
