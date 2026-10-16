@@ -40,7 +40,13 @@ import Foundation
         /// Runs a command without Foundation's run-loop-backed `Process` monitor. Every wait,
         /// including termination and pipe draining, has a deadline so a wedged monitor or a child
         /// that inherits the output pipe cannot strand the Swift Testing host.
-        static func run(executablePath: String, arguments: [String], environment: [String: String], timeoutSeconds: TimeInterval) throws -> Result {
+        ///
+        /// `now` is the clock the deadline is measured on. A test that needs the timeout to fire only after
+        /// the child has reached a known point supplies a clock that holds still until then, since a
+        /// wall-clock timeout can expire before a loaded machine has even started the child.
+        static func run(
+            executablePath: String, arguments: [String], environment: [String: String], timeoutSeconds: TimeInterval, now: () -> UInt64 = monotonicNow
+        ) throws -> Result {
             var outputPipe: [Int32] = [-1, -1]
             #if os(Linux)
                 let pipeResult = outputPipe.withUnsafeMutableBufferPointer { spaces_pipe2($0.baseAddress, O_CLOEXEC) }
@@ -82,7 +88,7 @@ import Foundation
             close(outputPipe[1])
             defer { close(outputPipe[0]) }
 
-            let deadline = monotonicDeadline(after: timeoutSeconds)
+            let deadline = now() + UInt64(max(0, timeoutSeconds) * 1_000_000_000)
             var output = Data()
             var waitStatus: Int32?
             var outputReachedEOF = false
@@ -97,7 +103,7 @@ import Foundation
                         try drain(outputPipe[0], into: &output, reachedEOF: &outputReachedEOF)
                         break
                     }
-                    guard monotonicNow() < deadline else { throw RunError.timedOut }
+                    guard now() < deadline else { throw RunError.timedOut }
                     try waitForOutput(outputReachedEOF ? -1 : outputPipe[0], until: deadline)
                 }
             } catch {

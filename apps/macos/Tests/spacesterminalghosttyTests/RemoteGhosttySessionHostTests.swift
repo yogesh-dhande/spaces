@@ -6127,6 +6127,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// Delivers the host terminal's current frame and waits for the pane to paint it.
     /// `paints: false` is for a frame the pane keeps underneath its replay: it waits for the host to
     /// observe the frame's output end instead.
+    ///
+    /// The recorder only answers a `.state` fetch, and nothing but a fetch delivers the payload set here,
+    /// so both waits ask for one on every pass. Without that, delivery rides on whatever fetch the
+    /// fixture's viewport-resize and scroll bookkeeping happens to issue after `setPayload`; a fetch
+    /// issued just before it reads the previous payload, and a loaded machine can leave no later one.
     @MainActor private func publishNewestFrame(_ fixture: SelectionFixture, reportedOutputEnd: Int? = nil, paints: Bool = true) {
         fixture.revision += 1
         let frame = fixture.terminal.frame(revision: fixture.revision)
@@ -6135,7 +6140,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 fixture.session, frame: frame, revision: fixture.revision, outputEnd: reportedOutputEnd ?? fixture.terminal.bytes.count))
         guard paints else {
             let end = UInt64(reportedOutputEnd ?? fixture.terminal.bytes.count)
-            waitForCondition("the host observes the frame") { fixture.host.debugLatestTranscriptEndByteOffset == end }
+            waitForCondition("the host observes the frame") {
+                fixture.host.requestSurfaceRefresh()
+                return fixture.host.debugLatestTranscriptEndByteOffset == end
+            }
             return
         }
         let newest = fixture.terminal.rowTexts().last { StampedHostTerminal.lineNumber($0) != nil } ?? ""
