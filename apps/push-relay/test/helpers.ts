@@ -16,6 +16,9 @@ export class FakeSender implements ApnsSender {
 
 export const TOKEN = "ab".repeat(32);
 
+/** The paired devices a test phone registers with unless a test lists its own. */
+export const PAIRED = ["mac", "linux", "new-daemon", "old-daemon", "a", "b", "c", "d", "ghost"];
+
 export function makeRelay() {
   const store = new MemoryStore();
   const sender = new FakeSender();
@@ -23,11 +26,13 @@ export function makeRelay() {
   const deps: RelayDeps = { store, sender, capabilityKey: randomBytes(32), now: () => clock++ };
   const call = (path: string, body: unknown, method = "POST"): Promise<RelayResponse> =>
     handleRequest(deps, { method, path, body });
-  const register = async (installID = "install-1") => {
-    const res = await call("/v1/register", { apnsToken: TOKEN, environment: "sandbox", installID });
+  const registerRaw = (installID: string, deviceIDs: string[]) =>
+    call("/v1/register", { apnsToken: TOKEN, environment: "sandbox", installID, deviceIDs });
+  const register = async (installID = "install-1", deviceIDs = PAIRED) => {
+    const res = await registerRaw(installID, deviceIDs);
     return res.body.capability as string;
   };
   const report = (capability: string, deviceID: string, total: number, blockedAgents: number, notify: boolean) =>
     call("/v1/report", { capability, deviceID, total, blockedAgents, notify });
-  return { store, sender, deps, call, register, report };
+  return { store, sender, deps, call, register, registerRaw, report };
 }

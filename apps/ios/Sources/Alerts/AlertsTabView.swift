@@ -18,7 +18,16 @@ struct AlertsTabView: View {
                         .accessibilityIdentifier("alerts.clear")
                 }
             }.terminalSessionNavigation(model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
-        }.accessibilityIdentifier("tab.alerts")
+        }.accessibilityIdentifier("tab.alerts").onChange(of: model.pendingAlertTerminalRoute, initial: true) { _, route in
+            // A tapped in-app banner stages its terminal on the model, because the tab may not have been
+            // on screen yet when it was tapped; `initial` covers a tab that mounts after that.
+            guard let route else { return }
+            selectedSession = route
+            model.pendingAlertTerminalRoute = nil
+        }.onChange(of: model.alertsNavigationResetCount) {
+            selectedSession = nil
+            pendingTerminalLaunch = nil
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -77,8 +86,8 @@ struct AlertsTabView: View {
 
     @ViewBuilder private func eventRow(_ event: SpacesMobileAttentionEvent) -> some View {
         let row = BandRow(
-            dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType),
-            title: event.title, detail: event.detail, detailIsMonospaced: false
+            dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType), title: event.title, detail: event.detail,
+            detailIsMonospaced: false
         ) {
             // Reads the shared 30-second label clock rather than `Date()` so this age keeps advancing on
             // its own cadence even when the overview payload itself is unchanged (#540) — see

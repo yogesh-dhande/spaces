@@ -3,8 +3,8 @@ import type { ApnsSender } from "../apns/sender";
 import type { PhoneStateStore } from "../store/store";
 import { decidePush, sumTotals, type ApnsPush } from "./decide";
 import { sealCapability, unsealCapability } from "./seal";
-import type { DeviceCounts, PhoneState } from "./types";
-import { MAX_DEVICES_PER_PHONE, parseRegister, parseReport, parseUnregister } from "./validate";
+import type { Capability, DeviceCounts, PhoneState } from "./types";
+import { parseRegister, parseReport, parseUnregister } from "./validate";
 
 export interface RelayDeps {
   store: PhoneStateStore;
@@ -44,33 +44,48 @@ export async function handleRequest(deps: RelayDeps, req: RelayRequest): Promise
   if (route === "/v1/register") {
     const parsed = parseRegister(body);
     if (!parsed.ok) return err(400, parsed.error);
-    const { apnsToken, environment, installID } = parsed.value;
-    const capability = sealCapability(deps.capabilityKey, { v: 1, token: apnsToken, env: environment, installID });
-    return reply(200, { capability });
+    const { apnsToken, environment, installID, deviceIDs } = parsed.value;
+    const capability: Capability = { v: 1, token: apnsToken, env: environment, installID };
+    // The phone's list is authoritative: a device it no longer lists loses its counts here, which
+    // is the only way an unpaired daemon that was offline at the time stops contributing.
+    const res = await applyChange(deps, capability, undefined, false, (state) => ({
+      ...state,
+      pairedDeviceIDs: deviceIDs,
+      devices: state.devices.filter((d) => deviceIDs.includes(d.deviceID)),
+    }));
+    return res.status === 200 ? reply(200, { capability: sealCapability(deps.capabilityKey, capability) }) : res;
   }
 
   if (route === "/v1/report") {
     const parsed = parseReport(body);
     if (!parsed.ok) return err(400, parsed.error);
     const { capability, deviceID, total, blockedAgents, notify } = parsed.value;
-    return applyChange(deps, capability, deviceID, notify, (devices) => {
-      const others = devices.filter((d) => d.deviceID !== deviceID);
-      if (others.length >= MAX_DEVICES_PER_PHONE) return undefined;
+    return applyChange(deps, unsealCapability(deps.capabilityKey, capability), deviceID, notify, (state) => {
+      if (!state.pairedDeviceIDs.includes(deviceID)) return "device_unpaired";
       const entry: DeviceCounts = { deviceID, total, blockedAgents, updatedAt: deps.now() };
-      return [...others, entry];
+      return { ...state, devices: [...state.devices.filter((d) => d.deviceID !== deviceID), entry] };
     });
   }
 
   const parsed = parseUnregister(body);
   if (!parsed.ok) return err(400, parsed.error);
   const { capability, deviceID } = parsed.value;
-  return applyChange(deps, capability, deviceID, false, (devices) => devices.filter((d) => d.deviceID !== deviceID));
+  return applyChange(deps, unsealCapability(deps.capabilityKey, capability), deviceID, false, (state) => ({
+    ...state,
+    devices: state.devices.filter((d) => d.deviceID !== deviceID),
+  }));
 }
 
-type TransactionOutcome = { rejected: true } | { rejected: false; push: ApnsPush | undefined };
+interface TransactionOutcome {
+  rejected?: "device_unpaired";
+  push?: ApnsPush;
+}
+
+/** A change returns the next state, or the reason it is refused (nothing is written then). */
+type Change = (state: PhoneState) => PhoneState | "device_unpaired";
 
 /**
- * A phone document with no devices and nothing delivered carries no information.
+ * A phone document with no devices, no paired list, and nothing delivered carries no information.
  *
  * Accepted risk: if the last device unregisters while another request's push to that phone is
  * still in flight, the document is dropped before that push records its badge, so the phone can
@@ -79,7 +94,7 @@ type TransactionOutcome = { rejected: true } | { rejected: false; push: ApnsPush
  * own count whenever it opens.
  */
 function keepOrDrop(state: PhoneState): PhoneState | undefined {
-  return state.devices.length === 0 && state.deliveredTotal === 0 ? undefined : state;
+  return state.devices.length === 0 && state.pairedDeviceIDs.length === 0 && state.deliveredTotal === 0 ? undefined : state;
 }
 
 /**
@@ -95,34 +110,36 @@ function keepOrDrop(state: PhoneState): PhoneState | undefined {
  */
 async function applyChange(
   deps: RelayDeps,
-  sealed: string,
-  deviceID: string,
+  capability: Capability | undefined,
+  deviceID: string | undefined,
   notify: boolean,
-  change: (devices: DeviceCounts[]) => DeviceCounts[] | undefined,
+  change: Change,
 ): Promise<RelayResponse> {
-  const capability = unsealCapability(deps.capabilityKey, sealed);
   if (!capability) return err(401, "invalid_capability");
   const key = phoneKey(capability.installID);
 
   const outcome = await deps.store.transact<TransactionOutcome>(key, (current) => {
-    const devices = change(current?.devices ?? []);
-    if (devices === undefined) return { next: current, result: { rejected: true } };
-    const next: PhoneState = { devices, deliveredTotal: current?.deliveredTotal ?? 0 };
+    const state: PhoneState = current ?? { devices: [], pairedDeviceIDs: [], deliveredTotal: 0 };
+    const next = change(state);
+    // A refused change writes nothing, not even the empty state a phone with no document would get.
+    if (typeof next === "string") return { next: current, result: { rejected: next } };
     const push = decidePush(next.deliveredTotal, sumTotals(next), notify);
-    return { next: keepOrDrop(next), result: { rejected: false, push } };
+    return { next: keepOrDrop(next), result: { push } };
   });
-  if (outcome.rejected) return err(400, "too_many_devices");
+  if (outcome.rejected === "device_unpaired") return err(410, "device_unpaired");
   if (!outcome.push) return reply(200, { ok: true });
   const { push } = outcome;
 
   const result = await deps.sender.send(capability.token, capability.env, push);
   if (result.status === "gone") {
     // Only this device's entry goes: after a token rotation, other devices have been reporting
-    // through the new token and their counts are still valid.
+    // through the new token and their counts are still valid. The paired list stays, since it is
+    // the phone's and not tied to the token.
     await deps.store.transact<void>(key, (current) => {
-      const devices = (current?.devices ?? []).filter((d) => d.deviceID !== deviceID);
+      if (!current) return { next: undefined, result: undefined };
+      const devices = current.devices.filter((d) => d.deviceID !== deviceID);
       // With no devices left, deliveredTotal described a token that no longer exists.
-      return { next: current && devices.length > 0 ? { ...current, devices } : undefined, result: undefined };
+      return { next: keepOrDrop({ ...current, devices, deliveredTotal: devices.length > 0 ? current.deliveredTotal : 0 }), result: undefined };
     });
     return err(410, "apns_unregistered");
   }

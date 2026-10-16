@@ -50,6 +50,12 @@ struct RootTabView: View {
                 }.badge(model.automationRunningRunCount)
                 SettingsTabView(model: model).tag(SpacesMobileTab.settings).tabItem { Label("Settings", systemImage: "gearshape") }
             }
+        }.overlay(alignment: .top) {
+            if let event = model.alertBanner {
+                AlertBannerView(event: event, onOpen: { model.openAlertBanner() }, onDismiss: { model.dismissAlertBanner() })
+            }
+        }.animation(.easeOut(duration: 0.2), value: model.alertBanner?.id).onChange(of: model.undismissedAlertCount, initial: true) {
+            Task { await model.syncApplicationBadge() }
         }.tint(Theme.accent).alert("Connection Error", isPresented: errorAlertBinding) {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {

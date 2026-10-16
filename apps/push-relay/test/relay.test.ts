@@ -3,12 +3,101 @@ import test from "node:test";
 import { phoneKey } from "../src/core/relay";
 import { TOKEN, makeRelay } from "./helpers";
 
-test("register returns a capability and stores nothing", async () => {
+test("register returns a capability and stores only the paired device list, never the token", async () => {
   const r = makeRelay();
-  const res = await r.call("/v1/register", { apnsToken: TOKEN.toUpperCase(), environment: "production", installID: "x" });
+  const res = await r.registerRaw("x", ["mac", "mac", "linux"]);
   assert.equal(res.status, 200);
   assert.equal(typeof res.body.capability, "string");
+  const [state] = [...r.store.states.values()];
+  assert.deepEqual(state.pairedDeviceIDs, ["mac", "linux"]);
+  assert.deepEqual(state.devices, []);
+  assert.ok(!JSON.stringify(state).includes(TOKEN));
+  assert.equal(r.sender.sent.length, 0);
+});
+
+test("a report from a device the phone no longer lists is 410 and writes nothing", async () => {
+  const r = makeRelay();
+  const cap = await r.register("install-1", ["mac"]);
+  const res = await r.report(cap, "linux", 2, 1, true);
+  assert.equal(res.status, 410);
+  assert.equal(res.body.error, "device_unpaired");
+  assert.deepEqual([...r.store.states.values()][0].devices, []);
+  assert.equal(r.sender.sent.length, 0);
+});
+
+test("a report for a phone with no state is 410 device_unpaired and creates none", async () => {
+  const r = makeRelay();
+  const cap = await r.register("install-1", ["mac"]);
+  r.store.states.clear();
+  const res = await r.report(cap, "mac", 1, 0, true);
+  assert.equal(res.status, 410);
   assert.equal(r.store.states.size, 0);
+});
+
+test("re-registering without a device prunes its counts and pushes the new badge", async () => {
+  const r = makeRelay();
+  const cap = await r.register("install-1", ["mac", "linux"]);
+  await r.report(cap, "mac", 3, 0, false);
+  await r.report(cap, "linux", 2, 0, false);
+  assert.equal(r.sender.sent.length, 2);
+
+  assert.equal((await r.registerRaw("install-1", ["mac"])).status, 200);
+
+  const state = [...r.store.states.values()][0];
+  assert.deepEqual(state.devices.map((d) => d.deviceID), ["mac"]);
+  assert.deepEqual(state.pairedDeviceIDs, ["mac"]);
+  assert.equal(state.deliveredTotal, 3);
+  const last = r.sender.sent.at(-1)!;
+  assert.equal(last.push.kind, "badge");
+  assert.equal((last.push.payload as any).aps.badge, 3);
+  // The unpaired daemon coming back online is refused rather than restoring its counts.
+  assert.equal((await r.report(cap, "linux", 2, 0, true)).status, 410);
+  assert.equal(r.sender.sent.length, 3);
+});
+
+test("re-registering that drops the last counting device withdraws the notification", async () => {
+  const r = makeRelay();
+  const cap = await r.register("install-1", ["mac"]);
+  await r.report(cap, "mac", 2, 0, false);
+
+  await r.registerRaw("install-1", []);
+
+  assert.equal(r.sender.sent.at(-1)!.push.kind, "withdraw");
+  assert.equal(r.store.states.size, 0, "nothing paired, nothing counted, nothing delivered");
+});
+
+test("re-registering with the same devices sends nothing", async () => {
+  const r = makeRelay();
+  const cap = await r.register("install-1", ["mac"]);
+  await r.report(cap, "mac", 2, 0, false);
+  const before = r.sender.sent.length;
+
+  await r.registerRaw("install-1", ["mac"]);
+
+  assert.equal(r.sender.sent.length, before);
+});
+
+test("pairing the device again lets its reports through", async () => {
+  const r = makeRelay();
+  const cap = await r.register("install-1", ["mac", "linux"]);
+  await r.report(cap, "linux", 2, 0, false);
+  await r.registerRaw("install-1", ["mac"]);
+  assert.equal((await r.report(cap, "linux", 2, 0, false)).status, 410);
+
+  await r.registerRaw("install-1", ["mac", "linux"]);
+
+  assert.equal((await r.report(cap, "linux", 2, 0, false)).status, 200);
+  assert.deepEqual([...r.store.states.values()][0].devices.map((d) => d.deviceID), ["linux"]);
+});
+
+test("register requires a valid bounded device list", async () => {
+  const r = makeRelay();
+  const reg = { apnsToken: TOKEN, environment: "sandbox", installID: "i" };
+  for (const deviceIDs of [undefined, "mac", [1], [""], ["x".repeat(129)], Array.from({ length: 65 }, (_, i) => `d${i}`)]) {
+    assert.equal((await r.call("/v1/register", { ...reg, deviceIDs })).status, 400, JSON.stringify(deviceIDs));
+  }
+  const sixtyFour = Array.from({ length: 64 }, (_, i) => `d${i}`);
+  assert.equal((await r.call("/v1/register", { ...reg, deviceIDs: sixtyFour })).status, 200);
 });
 
 test("report stores counts keyed by hashed installID, never the token", async () => {
@@ -63,14 +152,17 @@ test("concurrent reports from several devices do not lose updates", async () => 
   assert.equal([...r.store.states.values()][0].devices.length, 4);
 });
 
-test("APNs 410 deletes state and answers 410", async () => {
+test("APNs 410 clears the counts and the delivered badge, keeps the paired list, and answers 410", async () => {
   const r = makeRelay();
-  const cap = await r.register();
+  const cap = await r.register("install-1", ["mac"]);
   await r.report(cap, "mac", 1, 0, false);
   r.sender.next = { status: "gone", reason: "Unregistered" };
   const res = await r.report(cap, "mac", 2, 0, true);
   assert.equal(res.status, 410);
-  assert.equal(r.store.states.size, 0);
+  const state = [...r.store.states.values()][0];
+  assert.deepEqual(state.devices, []);
+  assert.equal(state.deliveredTotal, 0);
+  assert.deepEqual(state.pairedDeviceIDs, ["mac"]);
 });
 
 test("APNs transient failure keeps state and answers 502", async () => {
@@ -92,7 +184,7 @@ test("unregister removes the device and pushes the recomputed total", async () =
   assert.equal((r.sender.sent.at(-1)!.push.payload as any).aps.badge, 2);
   res = await r.call("/v1/unregister", { capability: cap, deviceID: "linux" });
   assert.equal(r.sender.sent.at(-1)!.push.kind, "withdraw");
-  assert.equal(r.store.states.size, 0);
+  assert.deepEqual([...r.store.states.values()][0].devices, []);
   const before = r.sender.sent.length;
   await r.call("/v1/unregister", { capability: cap, deviceID: "ghost" });
   assert.equal(r.sender.sent.length, before);
@@ -128,7 +220,7 @@ test("strict input validation", async () => {
   for (const body of bad) assert.equal((await r.call("/v1/report", body)).status, 400, JSON.stringify(body));
   assert.equal((await r.call("/v1/report", ok)).status, 200);
 
-  const reg = { apnsToken: TOKEN, environment: "sandbox", installID: "i" };
+  const reg = { apnsToken: TOKEN, environment: "sandbox", installID: "i", deviceIDs: [] };
   for (const body of [
     { ...reg, apnsToken: "zz" },
     { ...reg, apnsToken: "ab" },
@@ -149,12 +241,13 @@ test("routing: unknown path 404, wrong method 405, non-object body 400", async (
   assert.equal((await r.call("/v1/report", null)).status, 400);
 });
 
-test("a phone cannot grow unbounded device entries", async () => {
+test("a phone's device entries are bounded by its paired list", async () => {
   const r = makeRelay();
-  const cap = await r.register();
-  for (let i = 0; i < 64; i++) await r.report(cap, `d${i}`, 0, 0, false);
-  assert.equal((await r.report(cap, "one-too-many", 1, 0, false)).status, 400);
-  assert.equal((await r.report(cap, "d0", 1, 0, false)).status, 200);
+  const ids = Array.from({ length: 64 }, (_, i) => `d${i}`);
+  const cap = await r.register("install-1", ids);
+  for (const id of ids) assert.equal((await r.report(cap, id, 0, 0, false)).status, 200);
+  assert.equal((await r.report(cap, "one-too-many", 1, 0, false)).status, 410);
+  assert.equal([...r.store.states.values()][0].devices.length, 64);
 });
 
 test("a failed send is retried by an identical report", async () => {
@@ -180,7 +273,7 @@ test("a failed withdraw on unregister is retried", async () => {
   r.sender.next = { status: "sent" };
   assert.equal((await r.call("/v1/unregister", { capability: cap, deviceID: "mac" })).status, 200);
   assert.deepEqual(r.sender.sent.slice(-2).map((s) => s.push.kind), ["withdraw", "withdraw"]);
-  assert.equal(r.store.states.size, 0);
+  assert.deepEqual([...r.store.states.values()][0].devices, []);
 });
 
 test("410 removes only the reporting device's entry", async () => {

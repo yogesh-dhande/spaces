@@ -37,6 +37,22 @@ export default function IOSDocsPage() {
         </Prose>
       </Section>
 
+      <Section id="notifications" title="Notifications">
+        <Prose>
+          Once a device is paired, the app asks to send notifications the next time it opens, or when
+          you turn on a notification setting. When you allow it, the
+          app icon always shows how many alerts you have across every paired device, and your phone
+          buzzes about 10 seconds after an agent needs input, unless you have handled it by then. The
+          notification is a single count (&ldquo;4 alerts, 1 agent needs input&rdquo;) that later ones
+          replace; tapping it opens Alerts. Under Settings, Notifications, you can also have finished
+          agents buzz, or turn blocked agents off. While the app is open, a new alert of a kind you
+          turned on slides in as a banner at the top instead; tap it to open that terminal, or swipe it
+          up to dismiss it. If you denied notifications, Settings links to the iOS setting that turns
+          them back on. Notifications go through a small relay that stores only alert counts; see the{" "}
+          <a className="text-accent hover:underline" href="/privacy">privacy policy</a>.
+        </Prose>
+      </Section>
+
       <Section title="Pairing">
         <Prose>
           See <DocLink href="/docs/remote-access#pair-your-iphone">Pair your iPhone</DocLink>.
@@ -52,7 +68,7 @@ export default function IOSDocsPage() {
               <li>• <strong>Spaces</strong>: your projects and workspaces, with their targets, for the device you have selected.</li>
               <li>• <strong>Agents</strong>: running coding agents across every paired device, grouped Blocked, Done, and Working; an agent that isn&apos;t running stays reachable from its workspace on the Spaces tab.</li>
               <li>• <strong>Automations</strong>: your automations and their runs.</li>
-              <li>• <strong>Settings</strong>: paired devices, subscription, appearance, and Demo Mode.</li>
+              <li>• <strong>Settings</strong>: paired devices, notifications, subscription, appearance, and Demo Mode.</li>
             </ul>
           </div>
 

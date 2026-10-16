@@ -39,6 +39,13 @@ targets:
       - path: ../macos/.local/ghosttykit/Resources/ghostty
         type: folder
         buildPhase: resources
+    # `development` in every configuration: the release archive is signed for development and
+    # `-exportArchive` re-signs it for distribution, which rewrites this to production. The app reads
+    # the environment of the profile it was actually signed with (`PushEnvironment.current`).
+    entitlements:
+      path: SpacesMobile.entitlements
+      properties:
+        aps-environment: development
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.usespaces.spacesmobile
