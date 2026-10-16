@@ -327,21 +327,25 @@ enum SpacesMobileAutomations {
 }
 
 enum SpacesMobileAutomationAlerts {
-    /// `deviceText` is stamped onto every entry this call produces (nil hides the device segment); the
-    /// Alerts tab merges the result with every other device's own call and with attention events into one
-    /// flat, newest-first list (see `SpacesMobileAppModel.automationAlerts`), so entries are returned in
-    /// this device's own newest-first order rather than the caller having to re-sort a single device's run.
-    static func entries(deviceID: String, deviceText: String?, runs: [TerminalServiceAutomationRunSummary], isDeviceOffline: Bool = false)
+    /// Entries for the visible automation-run candidates of `overview` (see
+    /// `SpacesDeviceOverviewPayload.visibleAlertCandidates()`), so the list and badge agree with the
+    /// device's own count. `deviceText` is stamped onto every entry this call produces (nil hides the
+    /// device segment); the Alerts tab merges the result with every other device's own call and with
+    /// attention events into one flat, newest-first list (see `SpacesMobileAppModel.automationAlerts`), so
+    /// entries are returned in this device's own newest-first order.
+    static func entries(deviceID: String, deviceText: String?, in overview: SpacesDeviceOverviewPayload, isDeviceOffline: Bool = false)
         -> [SpacesMobileAutomationAlertEntry]
     {
-        runs.filter { run in
-            let status = AutomationRunStatus(rawValue: run.status)
-            return status == .failed || status == .timedOut
-        }.map { run in
-            SpacesMobileAutomationAlertEntry(
-                key: "automationrun:\(run.id):\(run.status)", deviceID: deviceID, automationName: run.automationName ?? "Automation",
-                runID: run.id, status: run.status, date: TerminalSessionTimestamp.date(from: run.endedAt ?? run.createdAt), deviceText: deviceText,
-                isDeviceOffline: isDeviceOffline)
+        let runByID = Dictionary(overview.automationRuns.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return overview.visibleAlertCandidates().compactMap { candidate -> SpacesMobileAutomationAlertEntry? in
+            switch candidate.kind {
+            case .automationRunFailed, .automationRunTimedOut: break
+            default: return nil
+            }
+            guard let run = runByID[candidate.subjectID] else { return nil }
+            return SpacesMobileAutomationAlertEntry(
+                key: candidate.key, deviceID: deviceID, automationName: run.automationName ?? "Automation", runID: run.id, status: run.status,
+                date: candidate.date, deviceText: deviceText, isDeviceOffline: isDeviceOffline)
         }.sorted { lhs, rhs in
             switch (lhs.date, rhs.date) {
             case (let a?, let b?): return a > b
@@ -350,5 +354,4 @@ enum SpacesMobileAutomationAlerts {
             }
         }
     }
-
 }

@@ -8,21 +8,16 @@ import spacesterminalcore
 /// which are left to the consumer to filter.
 @Suite struct SpacesDeviceAlertsTests {
     @Test func agentWaitingAndDoneAlertWithKeysThatChangeWithStateAndTime() throws {
-        let overview = Fixture.overview(
-            workspaces: [
-                Fixture.workspace(
-                    agents: [
-                        Fixture.agent(id: "a-wait", sessionID: "s1", state: .waiting, updatedAt: "2026-07-14T09:00:00Z"),
-                        Fixture.agent(id: "a-done", sessionID: "s2", state: .done, updatedAt: "2026-07-14T09:05:00.250Z"),
-                        Fixture.agent(id: "a-busy", sessionID: "s3", state: .spinning, updatedAt: "2026-07-14T09:06:00Z"),
-                        Fixture.agent(id: "a-gone", sessionID: "s4", state: .exited, updatedAt: "2026-07-14T09:07:00Z"),
-                    ])
+        let overview = Fixture.overview(workspaces: [
+            Fixture.workspace(agents: [
+                Fixture.agent(id: "a-wait", sessionID: "s1", state: .waiting, updatedAt: "2026-07-14T09:00:00Z"),
+                Fixture.agent(id: "a-done", sessionID: "s2", state: .done, updatedAt: "2026-07-14T09:05:00.250Z"),
+                Fixture.agent(id: "a-busy", sessionID: "s3", state: .spinning, updatedAt: "2026-07-14T09:06:00Z"),
+                Fixture.agent(id: "a-gone", sessionID: "s4", state: .exited, updatedAt: "2026-07-14T09:07:00Z"),
             ])
+        ])
         let candidates = overview.alertCandidates()
-        #expect(
-            candidates.map(\.key).sorted() == [
-                "agent:a-done:done:2026-07-14T09:05:00.250Z", "agent:a-wait:waiting:2026-07-14T09:00:00Z",
-            ])
+        #expect(candidates.map(\.key).sorted() == ["agent:a-done:done:2026-07-14T09:05:00.250Z", "agent:a-wait:waiting:2026-07-14T09:00:00Z"])
         let waiting = try #require(candidates.first { $0.kind == .agentWaiting })
         #expect(waiting.workspaceID == "w1")
         #expect(waiting.sessionID == "s1")
@@ -33,16 +28,15 @@ import spacesterminalcore
     }
 
     @Test func exitedProcessAlertsEvenWhenItsWorkspaceIsStopped() throws {
-        let overview = Fixture.overview(
-            workspaces: [
-                Fixture.workspace(
-                    isRunning: false,
-                    processes: [
-                        Fixture.process(id: "p-exit", sessionID: "s1", runState: .exited, exitedAt: "2026-07-14T09:00:00Z"),
-                        Fixture.process(id: "p-live", sessionID: "s2", runState: .running, exitedAt: nil),
-                        Fixture.process(id: "p-never", sessionID: nil, runState: .notStarted, exitedAt: nil),
-                    ])
-            ])
+        let overview = Fixture.overview(workspaces: [
+            Fixture.workspace(
+                isRunning: false,
+                processes: [
+                    Fixture.process(id: "p-exit", sessionID: "s1", runState: .exited, exitedAt: "2026-07-14T09:00:00Z"),
+                    Fixture.process(id: "p-live", sessionID: "s2", runState: .running, exitedAt: nil),
+                    Fixture.process(id: "p-never", sessionID: nil, runState: .notStarted, exitedAt: nil),
+                ])
+        ])
         let candidates = overview.alertCandidates()
         #expect(candidates.map(\.key) == ["process:p-exit:2026-07-14T09:00:00Z"])
         #expect(candidates[0].kind == .processExited)
@@ -55,8 +49,7 @@ import spacesterminalcore
                 Fixture.workspace(
                     processes: [Fixture.process(id: "p", sessionID: "s2", runState: .exited, exitedAt: "not a date")],
                     agents: [Fixture.agent(id: "a", sessionID: "s1", state: .done, updatedAt: nil)])
-            ],
-            sessions: [Fixture.session(id: "loose", state: .exited, updatedAt: "")])
+            ], sessions: [Fixture.session(id: "loose", state: .exited, updatedAt: "")])
         #expect(overview.alertCandidates().isEmpty)
     }
 
@@ -67,8 +60,7 @@ import spacesterminalcore
                     terminals: [
                         Fixture.terminal(id: "t-exit", sessionID: "s-exit", runState: .exited),
                         Fixture.terminal(id: "t-fail", sessionID: "s-fail", runState: .exited),
-                    ],
-                    agents: [Fixture.agent(id: "a", sessionID: "s-agent", state: .idle, updatedAt: "2026-07-14T09:00:00Z")])
+                    ], agents: [Fixture.agent(id: "a", sessionID: "s-agent", state: .idle, updatedAt: "2026-07-14T09:00:00Z")])
             ],
             sessions: [
                 Fixture.session(id: "s-exit", state: .exited, updatedAt: "2026-07-14T10:00:00Z"),
@@ -94,9 +86,14 @@ import spacesterminalcore
     @Test func hiddenWorkspacesAndTheirBellsAreIncluded() throws {
         let overview = Fixture.overview(
             workspaces: [
-                Fixture.workspace(id: "w-hidden", isHidden: true, agents: [Fixture.agent(id: "a", sessionID: "s1", state: .done, updatedAt: "2026-07-14T09:00:00Z")])
+                Fixture.workspace(
+                    id: "w-hidden", isHidden: true, agents: [Fixture.agent(id: "a", sessionID: "s1", state: .done, updatedAt: "2026-07-14T09:00:00Z")]
+                )
             ],
-            sessions: [Fixture.session(id: "s1", workspaceID: "w-hidden", state: .running, updatedAt: "2026-07-14T09:00:00Z", bellAt: "2026-07-14T09:30:00.500Z")])
+            sessions: [
+                Fixture.session(
+                    id: "s1", workspaceID: "w-hidden", state: .running, updatedAt: "2026-07-14T09:00:00Z", bellAt: "2026-07-14T09:30:00.500Z")
+            ])
         let candidates = overview.alertCandidates()
         #expect(Set(candidates.map(\.kind)) == [.agentDone, .bell])
         let bell = try #require(candidates.first { $0.kind == .bell })
@@ -108,7 +105,10 @@ import spacesterminalcore
     @Test func aBellForASessionWhoseWorkspaceIsGoneIsNotACandidate() {
         let overview = Fixture.overview(
             workspaces: [Fixture.workspace()],
-            sessions: [Fixture.session(id: "orphan", workspaceID: "deleted", state: .running, updatedAt: "2026-07-14T09:00:00Z", bellAt: "2026-07-14T09:30:00Z")])
+            sessions: [
+                Fixture.session(
+                    id: "orphan", workspaceID: "deleted", state: .running, updatedAt: "2026-07-14T09:00:00Z", bellAt: "2026-07-14T09:30:00Z")
+            ])
         #expect(overview.alertCandidates().isEmpty)
     }
 
@@ -171,6 +171,36 @@ import spacesterminalcore
         #expect(SpacesDeviceComeBackLaterFlag.rowReference(fromAlertKey: "agent:a:done:x") == nil)
     }
 
+    @Test func visibleAlertsExcludeDismissedKeysAndHiddenWorkspacesAndProjects() {
+        let overview = Fixture.overview(
+            projects: [Fixture.project(id: "project-hidden", isHidden: true)],
+            workspaces: [
+                Fixture.workspace(
+                    id: "w1", processes: [Fixture.process(id: "p-dismissed", sessionID: "s2", runState: .exited, exitedAt: "2026-07-14T09:01:00Z")],
+                    agents: [Fixture.agent(id: "a-wait", sessionID: "s1", state: .waiting, updatedAt: "2026-07-14T09:00:00Z")]),
+                Fixture.workspace(
+                    id: "w-hidden", isHidden: true,
+                    agents: [Fixture.agent(id: "a-hidden", sessionID: "s3", state: .done, updatedAt: "2026-07-14T09:02:00Z")]),
+                Fixture.workspace(
+                    id: "w-hidden-project", projectID: "project-hidden",
+                    agents: [Fixture.agent(id: "a-project", sessionID: "s4", state: .done, updatedAt: "2026-07-14T09:03:00Z")]),
+            ], dismissed: ["process:p-dismissed:2026-07-14T09:01:00Z"])
+        #expect(overview.alertCandidates().count == 4)
+        #expect(overview.visibleAlertCandidates().map(\.key) == ["agent:a-wait:waiting:2026-07-14T09:00:00Z"])
+    }
+
+    @Test func aFailedAutomationRunCountsWithoutAWorkspace() {
+        let overview = Fixture.overview(workspaces: [], runs: [Fixture.run(id: "r-fail", status: "failed", endedAt: "2026-07-14T09:00:00Z")])
+        #expect(overview.visibleAlertCandidates().map(\.key) == ["automationrun:r-fail:failed"])
+    }
+
+    @Test func aDismissedAutomationRunIsNotVisible() {
+        let overview = Fixture.overview(
+            workspaces: [], runs: [Fixture.run(id: "r-fail", status: "failed", endedAt: "2026-07-14T09:00:00Z")],
+            dismissed: ["automationrun:r-fail:failed"])
+        #expect(overview.visibleAlertCandidates().isEmpty)
+    }
+
     @Test func overviewDecodesWithoutTheAlertStateFields() throws {
         let encoded = try JSONEncoder().encode(Fixture.overview(workspaces: [Fixture.workspace()]))
         var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
@@ -185,23 +215,28 @@ import spacesterminalcore
 /// Overview fixtures shared with the alert-mutation tests through copy: kept small and explicit.
 private enum Fixture {
     static func overview(
-        workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary] = [],
+        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary] = [],
         runs: [TerminalServiceAutomationRunSummary] = [], dismissed: [String] = [], flags: [SpacesDeviceComeBackLaterFlag] = []
     ) -> SpacesDeviceOverviewPayload {
         SpacesDeviceOverviewPayload(
-            workspaces: workspaces, sessions: sessions,
+            projects: projects, workspaces: workspaces, sessions: sessions,
             daemonStatus: TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0),
             automationRuns: runs, dismissedAlertKeys: dismissed, comeBackLaterFlags: flags)
     }
 
     static func workspace(
-        id: String = "w1", isRunning: Bool = true, isHidden: Bool = false, terminals: [SpacesDeviceWorkspaceTerminalRow] = [],
-        processes: [SpacesDeviceWorkspaceProcessRow] = [], agents: [SpacesDeviceWorkspaceCodingAgentRow] = []
+        id: String = "w1", projectID: String = "project-1", isRunning: Bool = true, isHidden: Bool = false,
+        terminals: [SpacesDeviceWorkspaceTerminalRow] = [], processes: [SpacesDeviceWorkspaceProcessRow] = [],
+        agents: [SpacesDeviceWorkspaceCodingAgentRow] = []
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
-            id: id, projectID: "project-1", projectName: "Project", branch: "main", baseBranch: nil, dir: "/tmp/\(id)", isRunning: isRunning,
+            id: id, projectID: projectID, projectName: "Project", branch: "main", baseBranch: nil, dir: "/tmp/\(id)", isRunning: isRunning,
             isHidden: isHidden, isDefault: false, hasTrackedRuntimeIndicators: false, processRows: processes, codingAgentRows: agents,
             terminalRows: terminals)
+    }
+
+    static func project(id: String, isHidden: Bool) -> SpacesDeviceProjectSummary {
+        SpacesDeviceProjectSummary(id: id, name: id, dir: "/tmp/\(id)", isGitRepo: true, defaultBranch: "main", isHidden: isHidden)
     }
 
     static func agent(id: String, sessionID: String?, state: SpacesDeviceCodingAgentActivityState, updatedAt: String?)

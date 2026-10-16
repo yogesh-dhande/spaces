@@ -56,7 +56,7 @@ extension ProcessProfileEnvironmentSuites {
                 items: Self.attentionIDs.enumerated().map { index, attentionID in
                     AppKitController.AlertsAttentionEntry(
                         attentionID: attentionID, kind: .bell, icon: "terminal", iconTint: .terminal, label: "box \(index + 1)",
-                        detail: "vim file\(index).swift", shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                        detail: "vim file\(index).swift", shortcut: "", processStatus: nil, agentStatus: nil, eventDate: nil,
                         focusRequest: .terminalSession(workspaceID: "workspace-1", sessionID: "session-\(index + 1)"))
                 })
         }

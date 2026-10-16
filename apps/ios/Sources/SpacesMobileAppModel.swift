@@ -1269,17 +1269,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private static func watchedBellDismissalID(deviceID: String, key: String) -> String { "\(deviceID)|\(key)" }
 
     /// Failed/timed-out automation-run alert entries across every paired device with a cached overview,
-    /// newest first, with dismissed entries filtered out. Automation runs are workspace-less, so these join
+    /// newest first. Automation runs are workspace-less, so these join
     /// `attentionEvents` in one flat Alerts list with "Automation" standing in for a project/workspace;
     /// see `SpacesMobileAutomationAlerts`.
     var automationAlerts: [SpacesMobileAutomationAlertEntry] {
         let showsDeviceSegment = showsDeviceSegment
         return deviceOverviewContexts.flatMap { device -> [SpacesMobileAutomationAlertEntry] in
             let deviceText = showsDeviceSegment ? SpacesMobileDeviceDisplay.text(name: device.deviceName, isOffline: device.isOffline) : nil
-            let dismissed = Set(device.overview.dismissedAlertKeys)
             return SpacesMobileAutomationAlerts.entries(
-                deviceID: device.deviceID, deviceText: deviceText, runs: device.overview.automationRuns, isDeviceOffline: device.isOffline
-            ).filter { !dismissed.contains($0.key) }
+                deviceID: device.deviceID, deviceText: deviceText, in: device.overview, isDeviceOffline: device.isOffline)
         }.sorted { lhs, rhs in
             switch (lhs.date, rhs.date) {
             case (let a?, let b?): return a > b
@@ -1307,20 +1305,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func canChangeAlerts(onDeviceID deviceID: String) -> Bool { !offlineDeviceIDs.contains(deviceID) }
 
     /// Whether Clear would dismiss anything: only online devices' items count.
-    var canClearAlerts: Bool {
-        attentionEvents.contains { !$0.isDeviceOffline } || automationAlerts.contains { !$0.isDeviceOffline }
-    }
+    var canClearAlerts: Bool { attentionEvents.contains { !$0.isDeviceOffline } || automationAlerts.contains { !$0.isDeviceOffline } }
 
     /// Dismisses every listed attention event and automation alert of every online device.
     func clearAlerts() async {
         for device in deviceOverviewContexts where !device.isOffline {
-            let dismissed = Set(device.overview.dismissedAlertKeys)
             let eventKeys = SpacesMobileAttention.events(
                 deviceID: device.deviceID, deviceText: nil, in: device.overview, focusedSessionID: watchedTerminalSessionID,
                 watchWindowsBySessionID: terminalWatchWindowsBySessionID
             ).map(\.key)
-            let automationKeys = SpacesMobileAutomationAlerts.entries(deviceID: device.deviceID, deviceText: nil, runs: device.overview.automationRuns)
-                .map(\.key).filter { !dismissed.contains($0) }
+            let automationKeys = SpacesMobileAutomationAlerts.entries(deviceID: device.deviceID, deviceText: nil, in: device.overview).map(\.key)
             await dismissAlerts(keys: eventKeys + automationKeys, deviceID: device.deviceID)
         }
     }
@@ -1329,9 +1323,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func dismissAlert(_ event: SpacesMobileAttentionEvent) async { await dismissAlerts(keys: [event.key], deviceID: event.deviceID) }
 
     /// Dismisses one failed/timed-out automation run on its device.
-    func dismissAutomationAlert(_ entry: SpacesMobileAutomationAlertEntry) async {
-        await dismissAlerts(keys: [entry.key], deviceID: entry.deviceID)
-    }
+    func dismissAutomationAlert(_ entry: SpacesMobileAutomationAlertEntry) async { await dismissAlerts(keys: [entry.key], deviceID: entry.deviceID) }
 
     /// `row`'s own currently undismissed attention events on `deviceID`: its exited/waiting/finished
     /// event (if any), a bell on its session, and its Come Back Later flag, derived with the same bell
@@ -1448,9 +1440,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Removes the per-phone dismissal sets earlier versions kept. Dismissals now live on each device, and
     /// the old sets keyed alerts by an identity that does not map onto the device's, so the upgrade
     /// starts with nothing dismissed rather than carrying them over.
-    static func discardLegacyDismissedAlerts(defaults: UserDefaults = .standard) {
-        defaults.removeObject(forKey: legacyDismissedAlertsDefaultsKey)
-    }
+    static func discardLegacyDismissedAlerts(defaults: UserDefaults = .standard) { defaults.removeObject(forKey: legacyDismissedAlertsDefaultsKey) }
 
     static let legacyDismissedAlertsDefaultsKey = "spaces.mobile.dismissed-alert-ids-by-device"
 
@@ -4300,8 +4290,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func dismissStartedWorkspaceNotice() { startedWorkspaceNotice = nil }
 
     /// Returns the daemon's response when the mutation completed, so a caller can read a notice from it.
-    @discardableResult
-    private func performWorkspaceMutation(_ operation: () async throws -> SpacesDeviceAPIResponse) async -> SpacesDeviceAPIResponse? {
+    @discardableResult private func performWorkspaceMutation(_ operation: () async throws -> SpacesDeviceAPIResponse) async
+        -> SpacesDeviceAPIResponse?
+    {
         guard !isMutating else { return nil }
         isMutating = true
         defer { isMutating = false }
@@ -4897,7 +4888,8 @@ extension SpacesMobileAppModel: SpacesMobileTerminalVisitHost {
     func sendVisit(sessionID: String, focusedForSeconds: Double, keys: Set<String>) async {
         guard let deviceID = deviceID(forSessionID: sessionID) else { return }
         await performAlertMutation(deviceID: deviceID) { client, channel in
-            try await client.visitTerminalSession(sessionID: sessionID, focusedForSeconds: focusedForSeconds, keys: keys.sorted(), commandChannel: channel)
+            try await client.visitTerminalSession(
+                sessionID: sessionID, focusedForSeconds: focusedForSeconds, keys: keys.sorted(), commandChannel: channel)
         }
     }
 }

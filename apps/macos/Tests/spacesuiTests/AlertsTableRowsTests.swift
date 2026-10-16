@@ -16,8 +16,8 @@ import workspacecore
         automationRunTarget: AlertsController.AutomationRunAlertTarget? = nil
     ) -> AlertsController.AlertsAttentionEntry {
         AlertsController.AlertsAttentionEntry(
-            attentionID: id, kind: .bell, icon: "terminal", iconTint: .terminal, label: label, detail: detail, shortcut: "", countsTowardBadge: true,
-            eventDate: eventDate, focusRequest: focusRequest, automationRunTarget: automationRunTarget)
+            attentionID: id, kind: .bell, icon: "terminal", iconTint: .terminal, label: label, detail: detail, shortcut: "", eventDate: eventDate,
+            focusRequest: focusRequest, automationRunTarget: automationRunTarget)
     }
 
     private func group(
@@ -167,8 +167,7 @@ import workspacecore
 @Suite struct AlertsCombinedSegmentsTests {
     private func entry(label: String, detail: String?) -> AlertsController.AlertsAttentionEntry {
         AlertsController.AlertsAttentionEntry(
-            attentionID: "a", kind: .bell, icon: "terminal", iconTint: .terminal, label: label, detail: detail, shortcut: "", countsTowardBadge: true,
-            eventDate: nil)
+            attentionID: "a", kind: .bell, icon: "terminal", iconTint: .terminal, label: label, detail: detail, shortcut: "", eventDate: nil)
     }
 
     private func row(

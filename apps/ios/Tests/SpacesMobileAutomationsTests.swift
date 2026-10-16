@@ -472,7 +472,7 @@
                 makeRun(id: "run-timeout", automationID: "b", automationName: "Nightly", status: "timed_out", endedAt: "2026-01-01T01:00:00Z"),
             ]
 
-            let entries = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, runs: runs)
+            let entries = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, in: makeOverview(automationRuns: runs))
 
             XCTAssertEqual(entries.map(\.runID), ["run-timeout", "run-failed"])
             XCTAssertEqual(entries.first?.automationName, "Nightly")
@@ -484,7 +484,9 @@
                 makeRun(id: "newer", automationID: "a", automationName: "Deploy", status: "failed", endedAt: "2026-01-01T00:00:00.875Z"),
             ]
 
-            XCTAssertEqual(SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, runs: runs).map(\.runID), ["newer", "older"])
+            XCTAssertEqual(
+                SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, in: makeOverview(automationRuns: runs)).map(\.runID),
+                ["newer", "older"])
         }
 
         /// The Alerts row's detail line is `detail` ("Automation" or "Automation · device"), the
@@ -493,8 +495,9 @@
         func testAlertEntryDetailStandsInForProjectWorkspaceAndFoldsInDeviceText() {
             let run = makeRun(id: "run-failed", automationID: "a", automationName: "Deploy", status: "failed", exitCode: 3)
 
-            let soloDeviceEntry = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, runs: [run])
-            let namedDeviceEntry = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: "Other Mac", runs: [run])
+            let soloDeviceEntry = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, in: makeOverview(automationRuns: [run]))
+            let namedDeviceEntry = SpacesMobileAutomationAlerts.entries(
+                deviceID: "device-a", deviceText: "Other Mac", in: makeOverview(automationRuns: [run]))
 
             XCTAssertEqual(soloDeviceEntry.first?.detail, "Automation")
             XCTAssertEqual(namedDeviceEntry.first?.detail, "Automation · Other Mac")
@@ -1058,7 +1061,8 @@
         private func makeModel(device: FakeAlertDevice? = nil) -> SpacesMobileAppModel {
             let settings = SpacesMobileConnectionSettings()
             let client =
-                device?.client(settings: settings) ?? SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                device?.client(settings: settings)
+                ?? SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.pairedDevices = [
                 SpacesMobilePairedDeviceRecord(

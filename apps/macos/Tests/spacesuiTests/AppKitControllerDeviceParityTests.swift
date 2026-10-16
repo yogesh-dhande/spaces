@@ -544,7 +544,7 @@ import workspacecore
                 items: [
                     AppKitController.AlertsAttentionEntry(
                         attentionID: "alert:\(workspaceID)", kind: .bell, icon: "terminal", iconTint: .terminal, label: "shell-1", detail: nil,
-                        shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                        shortcut: "", processStatus: nil, agentStatus: nil, eventDate: nil,
                         focusRequest: .terminalSession(workspaceID: workspaceID, sessionID: "session-1"))
                 ])
         }
@@ -748,8 +748,8 @@ import workspacecore
                 items: [
                     AppKitController.AlertsAttentionEntry(
                         attentionID: "remote-agent-alert", kind: .bell, icon: "cpu.fill", iconTint: .warning, label: "Remote Codex",
-                        detail: "  waiting for review  ", shortcut: "", processStatus: nil, agentStatus: .waiting, countsTowardBadge: true,
-                        eventDate: nil, focusRequest: focusRequest)
+                        detail: "  waiting for review  ", shortcut: "", processStatus: nil, agentStatus: .waiting, eventDate: nil,
+                        focusRequest: focusRequest)
                 ])
         ]
 
@@ -769,8 +769,8 @@ import workspacecore
                 items: [
                     AppKitController.AlertsAttentionEntry(
                         attentionID: "remote-bell-alert", kind: .bell, icon: "terminal", iconTint: .terminal, label: "shell-1",
-                        detail: "  vim remote.swift  ", shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
-                        focusRequest: focusRequest)
+                        detail: "  vim remote.swift  ", shortcut: "", processStatus: nil, agentStatus: nil, eventDate: nil, focusRequest: focusRequest
+                    )
                 ])
         ]
 

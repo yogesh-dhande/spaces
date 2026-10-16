@@ -27,8 +27,8 @@ struct AlertsControllerBuilderTests {
 
     private func exitedProcess(id: String, processID: String, exitedAt: String?) -> SpacesDeviceWorkspaceProcessRow {
         SpacesDeviceWorkspaceProcessRow(
-            id: id, workspaceID: "ws", name: "web", command: "npm run dev", templateID: id, processID: processID, sessionID: "proc-session", runState: .exited,
-            exitedAt: exitedAt, canRun: true, canStop: false, canRestart: true)
+            id: id, workspaceID: "ws", name: "web", command: "npm run dev", templateID: id, processID: processID, sessionID: "proc-session",
+            runState: .exited, exitedAt: exitedAt, canRun: true, canStop: false, canRestart: true)
     }
 
     private func runningProcess(id: String) -> SpacesDeviceWorkspaceProcessRow {
@@ -46,19 +46,20 @@ struct AlertsControllerBuilderTests {
     }
 
     private func overview(
-        _ workspaces: [SpacesDeviceWorkspaceSummary], projects: [SpacesDeviceProjectSummary] = [], sessions: [SpacesDeviceTerminalSessionSummary] = [],
-        dismissed: [String] = [], flags: [SpacesDeviceComeBackLaterFlag] = []
+        _ workspaces: [SpacesDeviceWorkspaceSummary], projects: [SpacesDeviceProjectSummary] = [],
+        sessions: [SpacesDeviceTerminalSessionSummary] = [], runs: [TerminalServiceAutomationRunSummary] = [], dismissed: [String] = [],
+        flags: [SpacesDeviceComeBackLaterFlag] = []
     ) -> SpacesDeviceOverviewPayload {
         SpacesDeviceOverviewPayload(
             projects: projects, workspaces: workspaces, sessions: sessions,
             daemonStatus: TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0),
-            dismissedAlertKeys: dismissed, comeBackLaterFlags: flags)
+            automationRuns: runs, dismissedAlertKeys: dismissed, comeBackLaterFlags: flags)
     }
 
     private func terminalRow(id: String, sessionID: String?, runState: SpacesDeviceRunState = .exited) -> SpacesDeviceWorkspaceTerminalRow {
         SpacesDeviceWorkspaceTerminalRow(
-            id: id, workspaceID: "ws", title: "scratch", workingDirectory: "/device/ws", sessionID: sessionID, runState: runState, canOpenTerminal: true,
-            liveTitle: "vim")
+            id: id, workspaceID: "ws", title: "scratch", workingDirectory: "/device/ws", sessionID: sessionID, runState: runState,
+            canOpenTerminal: true, liveTitle: "vim")
     }
 
     private func workspace(id: String, terminalRows: [SpacesDeviceWorkspaceTerminalRow]) -> SpacesDeviceWorkspaceSummary {
@@ -102,7 +103,6 @@ struct AlertsControllerBuilderTests {
         let item = groups[0].items[0]
         #expect(item.kind == .processExited)
         #expect(item.processStatus == .exited)
-        #expect(item.countsTowardBadge)
         #expect(item.attentionID == "alert:local:process:p1:2026-06-28T10:00:00Z")
         #expect(item.alertKey == "process:p1:2026-06-28T10:00:00Z")
         #expect(item.deviceID == "local")
@@ -154,8 +154,7 @@ struct AlertsControllerBuilderTests {
         let groups = AlertsController.buildOverviewAlertsGroups(from: overview([wsB, wsA]), deviceID: "local")
 
         #expect(groups.map(\.workspaceID) == ["ws-a", "ws-b"])
-        #expect(
-            groups[0].items.map(\.alertKey) == ["process:p-new:2026-06-28T12:00:00Z", "process:p-old:2026-06-28T08:00:00Z"])
+        #expect(groups[0].items.map(\.alertKey) == ["process:p-new:2026-06-28T12:00:00Z", "process:p-old:2026-06-28T08:00:00Z"])
     }
 
     @Test func workspaceWithoutAttentionItemsProducesNoGroup() {
@@ -257,15 +256,16 @@ struct AlertsControllerBuilderTests {
     @Test func aProcessExitReadsAcknowledgedExactlyWhenTheDeviceDismissedIt() {
         let workspaces = [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")])]
         let live = AlertsController.buildOverviewAlertsGroups(from: overview(workspaces), deviceID: "local")
-        let dismissed = AlertsController.buildOverviewAlertsGroups(from: overview(workspaces, dismissed: ["process:p1:2026-06-28T10:00:00Z"]), deviceID: "local")
+        let dismissed = AlertsController.buildOverviewAlertsGroups(
+            from: overview(workspaces, dismissed: ["process:p1:2026-06-28T10:00:00Z"]), deviceID: "local")
         #expect(!AlertsController.isProcessExitAcknowledged(processID: "run-1", workspaceID: "ws", alertsGroups: live))
         #expect(AlertsController.isProcessExitAcknowledged(processID: "run-1", workspaceID: "ws", alertsGroups: dismissed))
 
         // A later exit carries a new key, so the earlier dismissal no longer applies.
         let exitedAgain = AlertsController.buildOverviewAlertsGroups(
             from: overview(
-                [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T11:00:00Z")])], dismissed: ["process:p1:2026-06-28T10:00:00Z"]),
-            deviceID: "local")
+                [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T11:00:00Z")])],
+                dismissed: ["process:p1:2026-06-28T10:00:00Z"]), deviceID: "local")
         #expect(!AlertsController.isProcessExitAcknowledged(processID: "run-1", workspaceID: "ws", alertsGroups: exitedAgain))
     }
 
@@ -273,7 +273,8 @@ struct AlertsControllerBuilderTests {
         let flag = SpacesDeviceComeBackLaterFlag(rowKind: .process, rowID: "p1", flaggedAt: "2026-06-28T11:00:00Z")
         let groups = AlertsController.buildOverviewAlertsGroups(
             from: overview(
-                [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")])], flags: [flag]), deviceID: "local")
+                [workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")])], flags: [flag]),
+            deviceID: "local")
         #expect(groups[0].items.count == 2)
         #expect(!AlertsController.isProcessExitAcknowledged(processID: "run-1", workspaceID: "ws", alertsGroups: groups))
     }
@@ -294,9 +295,12 @@ struct AlertsControllerBuilderTests {
         #expect(items[0].label == "loose")
         #expect(items[1].label == "scratch")
         #expect(items[1].detail == "vim")
-        #expect(items.allSatisfy { $0.countsTowardBadge })
         if case .terminalSession(_, let sessionID)? = items[1].focusRequest { #expect(sessionID == "s-row") } else { Issue.record("expected focus") }
-        if case .terminalSession(_, let sessionID)? = items[0].focusRequest { #expect(sessionID == "s-loose") } else { Issue.record("expected focus") }
+        if case .terminalSession(_, let sessionID)? = items[0].focusRequest {
+            #expect(sessionID == "s-loose")
+        } else {
+            Issue.record("expected focus")
+        }
     }
 
     // MARK: - Come Back Later
@@ -321,7 +325,7 @@ struct AlertsControllerBuilderTests {
 
         let items = groups[0].items
         #expect(items.map(\.label) == ["scratch", "web", "Codex"], "newest mark first, each named after its row")
-        #expect(items.allSatisfy { $0.kind == .comeBackLater && $0.countsTowardBadge })
+        #expect(items.allSatisfy { $0.kind == .comeBackLater })
         #expect(items.map(\.icon) == ["terminal", "terminal", "cpu.fill"], "each mark keeps its row kind's icon")
         #expect(items.map(\.iconTint) == [.terminal, .terminal, .accent])
         #expect(items[0].attentionID == "alert:local:comebacklater:terminal:t1")
@@ -334,8 +338,10 @@ struct AlertsControllerBuilderTests {
         let flag = SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "a-done", flaggedAt: "2026-06-28T11:00:00Z")
         let groups = AlertsController.buildOverviewAlertsGroups(
             from: overview(
-                [workspace(id: "ws", codingAgentRows: [agent(id: "a-done", agentID: "ag-2", activityState: .done, updatedAt: "2026-06-28T09:30:00Z")])],
-                flags: [flag]), deviceID: "local")
+                [
+                    workspace(
+                        id: "ws", codingAgentRows: [agent(id: "a-done", agentID: "ag-2", activityState: .done, updatedAt: "2026-06-28T09:30:00Z")])
+                ], flags: [flag]), deviceID: "local")
 
         let owned = AlertsController.rowAlertsAttentionEntries(in: groups, workspaceID: "ws", agentID: "ag-2")
         #expect(Set(owned.map(\.kind)) == [.agentDone, .comeBackLater])
@@ -385,7 +391,7 @@ struct AlertsControllerBuilderTests {
         let visible = AlertsController.visibleAlertsGroups(in: groups)
         #expect(visible.count == 1)
         #expect(visible.first?.workspaceID == "ws-visible")
-        #expect(visible.reduce(0) { $0 + $1.items.filter(\.countsTowardBadge).count } == 1)
+        #expect(visible.reduce(0) { $0 + $1.items.count } == 1)
     }
 
     // MARK: - Watched bells
@@ -401,7 +407,10 @@ struct AlertsControllerBuilderTests {
                 session(id: "s3", title: "ended", state: .exited, updatedAt: "2026-06-28T09:00:02Z"),
             ])
         let groups = AlertsController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
-        #expect(AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z")) == ["alert:local:bell:s1:2026-06-28T09:00:00Z"])
+        #expect(
+            AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z")) == [
+                "alert:local:bell:s1:2026-06-28T09:00:00Z"
+            ])
         #expect(AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s3", "2026-06-28T08:59:00Z")).isEmpty)
 
         let alreadyDismissed = AlertsController.buildOverviewAlertsGroups(
@@ -447,5 +456,34 @@ struct AlertsControllerBuilderTests {
         let secondArrival = firstArrival.addingTimeInterval(180)
         let returned = AlertsController.updatedFocusedBellWatch(nil, focusedSessionID: "s1", now: secondArrival)
         #expect(returned == AlertsController.FocusedBellWatch(sessionID: "s1", since: secondArrival))
+    }
+
+    /// The Mac list and the shared `visibleAlertCandidates()` rule, which iOS and the daemon's push badge
+    /// derive from, never disagree about which alerts are visible.
+    @Test func visibleGroupsHaveTheSameAlertKeysAsTheSharedVisibleCandidates() {
+        let overview = overview(
+            [
+                workspace(
+                    id: "ws", processRows: [exitedProcess(id: "p-dismissed", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z")],
+                    codingAgentRows: [
+                        agent(id: "a-wait", agentID: "ag-1", activityState: .waiting, updatedAt: "2026-06-28T09:00:00Z"),
+                        agent(id: "a-done", agentID: "ag-2", activityState: .done, updatedAt: "2026-06-28T09:30:00Z"),
+                    ]),
+                workspace(
+                    id: "ws-hidden", isHidden: true,
+                    codingAgentRows: [agent(id: "a-hidden", agentID: "ag-3", activityState: .done, updatedAt: "2026-06-28T09:40:00Z")]),
+            ], sessions: [session(id: "s1", bellAt: "2026-06-28T11:00:00Z")],
+            runs: [
+                TerminalServiceAutomationRunSummary(
+                    id: "run-fail", automationID: "auto", automationName: "Nightly", kind: "script", status: "failed", trigger: "manual",
+                    skipReason: nil, exitCode: 1, terminalSessionID: nil, startedAt: nil, endedAt: "2026-06-28T12:00:00Z",
+                    createdAt: "2026-06-28T08:00:00Z")
+            ], dismissed: ["process:p-dismissed:2026-06-28T10:00:00Z"])
+
+        let groups = AlertsController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+        let shown = Set(AlertsController.visibleAlertsGroups(in: groups).flatMap(\.items).map(\.alertKey))
+
+        #expect(shown == Set(overview.visibleAlertCandidates().map(\.key)))
+        #expect(shown.count == 4)
     }
 }

@@ -29,6 +29,43 @@
             XCTAssertEqual(bySource["agent:agent-waiting"]?.date, SpacesMobileAttention.date(fromISO8601: "2026-01-01T00:10:00Z"))
         }
 
+        /// The iOS list (attention events plus automation alerts) and the shared `visibleAlertCandidates()`
+        /// rule behind the daemon's badge count agree on which alerts are visible, absent any focus rule.
+        func testListedAlertKeysEqualTheSharedVisibleCandidateKeys() {
+            let base = makeOverview(
+                workspaces: [
+                    makeWorkspace(
+                        id: "workspace-feature", branch: "feature",
+                        codingAgentRows: [
+                            makeAgentRow(id: "agent-waiting", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z"),
+                            makeAgentRow(id: "agent-done", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
+                        ], processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")]),
+                    makeWorkspace(
+                        id: "workspace-hidden", branch: "hidden", isHidden: true,
+                        codingAgentRows: [
+                            makeAgentRow(id: "agent-hidden", workspaceID: "workspace-hidden", activityState: .done, updatedAt: "2026-01-01T00:30:00Z")
+                        ]),
+                ],
+                sessions: [
+                    makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:01:00Z", bellAt: "2026-01-01T00:40:00Z")
+                ])
+            let run = TerminalServiceAutomationRunSummary(
+                id: "run-fail", automationID: "auto", automationName: "Nightly", kind: "script", status: "failed", trigger: "manual", skipReason: nil,
+                exitCode: 1, terminalSessionID: nil, startedAt: nil, endedAt: "2026-01-01T01:00:00Z", createdAt: "2026-01-01T00:00:00Z")
+            let dismissedKey = base.alertCandidates().first { $0.subjectID == "process-web" }!.key
+            let overview = SpacesDeviceOverviewPayload(
+                projects: base.projects, workspaces: base.workspaces, sessions: base.sessions, daemonStatus: base.daemonStatus, automationRuns: [run],
+                dismissedAlertKeys: [dismissedKey])
+
+            let eventKeys = SpacesMobileAttention.events(
+                deviceID: "device-a", deviceText: nil, in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]
+            ).map(\.key)
+            let automationKeys = SpacesMobileAutomationAlerts.entries(deviceID: "device-a", deviceText: nil, in: overview).map(\.key)
+
+            XCTAssertEqual(Set(eventKeys + automationKeys), Set(overview.visibleAlertCandidates().map(\.key)))
+            XCTAssertEqual(eventKeys.count + automationKeys.count, 4)
+        }
+
         func testSkipsSourcesWithoutUsableTimestamps() {
             let overview = makeOverview(
                 codingAgentRows: [makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: nil)],
@@ -1196,14 +1233,18 @@
             clock.advance(2)
 
             await waitUntilAsync("the visit reaches the device") { !device.commands.isEmpty }
-            guard case .visit(let sessionID, let seconds, _)? = device.commands.first else { return XCTFail("Expected a visit, got \(device.commands)") }
+            guard case .visit(let sessionID, let seconds, _)? = device.commands.first else {
+                return XCTFail("Expected a visit, got \(device.commands)")
+            }
             XCTAssertEqual(sessionID, "session-agent-a")
             XCTAssertEqual(seconds, 2, accuracy: 0.01)
         }
 
         func testVisitingATerminalWithNothingToClearSendsNothing() async {
             let clock = ManualVisitClock()
-            let device = FakeAlertDevice(overview: makeOverview(sessions: [makeSession(id: "session-quiet", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z")]))
+            let device = FakeAlertDevice(
+                overview: makeOverview(sessions: [makeSession(id: "session-quiet", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z")])
+            )
             let model = makeDeviceModel(device, clock: clock)
 
             model.setActiveTerminalSession("session-quiet")
@@ -1231,8 +1272,9 @@
         func testABlockedAgentsAlertDoesNotStartAVisit() async {
             let clock = ManualVisitClock()
             let device = FakeAlertDevice(
-                overview: makeOverview(
-                    codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")]))
+                overview: makeOverview(codingAgentRows: [
+                    makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+                ]))
             let model = makeDeviceModel(device, clock: clock)
 
             model.setActiveTerminalSession("session-agent-a")

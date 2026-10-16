@@ -224,24 +224,23 @@ import workspacecore
             AppKitController.AlertsAttentionEntry(
                 attentionID: "alert:local:process:row-web:\(processExitedAt)", kind: .processExited, alertKey: "process:row-web:\(processExitedAt)",
                 isDismissed: dismissProcessExit, icon: "terminal", iconTint: .terminal, label: "web", detail: "npm run dev", shortcut: "",
-                processStatus: .exited, countsTowardBadge: true, eventDate: nil,
-                focusRequest: .workspaceProcess(workspaceID: "workspace", processID: "proc-web")),
+                processStatus: .exited, eventDate: nil, focusRequest: .workspaceProcess(workspaceID: "workspace", processID: "proc-web")),
             AppKitController.AlertsAttentionEntry(
                 attentionID: "alert:local:agent:agent-1:waiting:t1", kind: .agentWaiting, icon: "cpu.fill", iconTint: .warning, label: "claude",
-                detail: nil, shortcut: "", agentStatus: .waiting, countsTowardBadge: true, eventDate: nil,
+                detail: nil, shortcut: "", agentStatus: .waiting, eventDate: nil,
                 focusRequest: .agentWindow(
                     AgentWindowRecord(
                         id: "agent-1", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "sess-agent",
                         sessionKey: nil, status: .waiting, createdAt: "t1", updatedAt: "t1"))),
             AppKitController.AlertsAttentionEntry(
                 attentionID: "alert:local:bell:\(bellSessionID):t1", kind: .bell, icon: "terminal", iconTint: .terminal, label: "zsh", detail: nil,
-                shortcut: "", countsTowardBadge: true, eventDate: nil, focusRequest: .terminalSession(workspaceID: "workspace", sessionID: bellSessionID)),
+                shortcut: "", eventDate: nil, focusRequest: .terminalSession(workspaceID: "workspace", sessionID: bellSessionID)),
         ]
         if terminalMarked {
             items.append(
                 AppKitController.AlertsAttentionEntry(
                     attentionID: "alert:local:comebacklater:terminal:term-1", kind: .comeBackLater, alertKey: "comebacklater:terminal:term-1",
-                    icon: "terminal", iconTint: .terminal, label: "zsh", detail: nil, shortcut: "", countsTowardBadge: true, eventDate: nil,
+                    icon: "terminal", iconTint: .terminal, label: "zsh", detail: nil, shortcut: "", eventDate: nil,
                     focusRequest: .terminalSession(workspaceID: "workspace", sessionID: "sess-term")))
         }
         return AppKitController.AlertsGroup(
