@@ -177,6 +177,31 @@
             try await waitAsync { Self.bellAt(of: core) != firstBellAt }
         }
 
+        // MARK: - Seed transcript
+
+        /// A lost shell's replacement starts from a seed transcript; a bell in it is history, so it raises no
+        /// alert, and the seed stays in `output.log` exactly once ahead of the new shell's output.
+        @Test func aBellInASeedTranscriptRaisesNoAlertAndTheSeedIsKeptOnce() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+            let seed = Data("SEED_MARKER_OLD\r\n\u{07}\r\n".utf8)
+            try seed.write(to: URL(fileURLWithPath: paths.outputPath))
+
+            let core = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(
+                    GhosttyEmbeddedSessionCore(
+                        launchConfiguration: makeConfiguration(named: "bell-seed", script: "printf 'SETTLED\\n'"), paths: paths))
+            }.value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+            try await core.startReplayingSeedTranscript(columns: 80, rows: 24)
+
+            try await waitForSettledTranscript(paths.outputPath)
+            #expect(TerminalEngineActor.runSynchronously { Self.bellAt(of: core) } == nil)
+            let transcript = try String(contentsOfFile: paths.outputPath, encoding: .utf8)
+            #expect(transcript.hasPrefix(String(decoding: seed, as: UTF8.self)))
+            #expect(transcript.components(separatedBy: "SEED_MARKER_OLD").count - 1 == 1)
+        }
+
         // MARK: - Handoff
 
         /// A daemon update rebuilds the session around a fresh core and a fresh coalescer while the

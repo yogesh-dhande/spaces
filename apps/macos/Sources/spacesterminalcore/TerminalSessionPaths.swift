@@ -85,6 +85,10 @@ public struct TerminalSessionPaths: Sendable, Equatable {
         try fileManager.createDirectory(atPath: rootDirectory, withIntermediateDirectories: true)
     }
 
+    /// Names the session that replaced this one when it was a lost shell (`WorkspaceOrchestrator.resumeLostShell`).
+    /// Lives in the replaced session's own directory, so it is released with the session it describes.
+    public var replacementSessionPath: String { URL(fileURLWithPath: rootDirectory).appendingPathComponent("replaced-by").path }
+
     private static func spacesRuntimeDirectory(fileManager: FileManager = .default) throws -> URL {
         URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
     }

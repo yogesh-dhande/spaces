@@ -96,6 +96,10 @@ import spacesterminalui
 
     var holdsOwnerAttachedSurface: Bool { pane.holdsOwnerAttachedSurface }
 
+    func showLostShellFolderMissing() { pane.showLostShellFolderMissing() }
+
+    func lostShellResumeHoldDidChange() { pane.lostShellResumeHoldDidChange() }
+
     func deactivate() { pane.hideEmbedded() }
 
     func close() {

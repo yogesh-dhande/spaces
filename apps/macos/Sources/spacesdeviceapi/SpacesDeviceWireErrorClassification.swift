@@ -20,6 +20,9 @@ public enum SpacesDeviceWireErrorClassification {
             // `daemonHandoffInProgress` predicate) — never by a shutdown — so it always carries the
             // handoff code, not the generic teardown one.
             case .daemonHandoffInProgress: return .handingOff
+            case .sessionNotResumable: return .conflict
+            case .restorePending: return .restorePending
+            case .workingDirectoryMissing: return .workingDirectoryMissing
             }
         }
         // Automation boundary rejections (bad cron, empty field, unknown enum, missing automation/run) are

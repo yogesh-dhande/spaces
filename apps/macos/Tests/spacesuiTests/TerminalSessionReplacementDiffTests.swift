@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import spacesdevicecore
+import spacesterminalcore
 import spacestestsupport
 
 @testable import spacesui
@@ -28,9 +29,9 @@ import spacestestsupport
     /// A session list entry naming a `createdAt`, which is how the diff orders a replacement against what
     /// it replaced. A session absent from an overview's `sessions` (an exited session drops out) is
     /// simply not built here, matching the daemon's own behavior.
-    private func sessionSummary(id: String, createdAt: String) -> SpacesDeviceTerminalSessionSummary {
+    private func sessionSummary(id: String, createdAt: String, state: TerminalSessionState = .running) -> SpacesDeviceTerminalSessionSummary {
         SpacesDeviceTerminalSessionSummary(
-            id: id, title: "shell", workingDirectory: "/tmp/workspace", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
+            id: id, title: "shell", workingDirectory: "/tmp/workspace", shell: "/bin/zsh", command: nil, state: state, backend: .ghosttyEmbedded,
             lifetimePolicy: .persistent, servicePID: 1234, childPID: 5678, workspaceID: "ws", workspaceTitle: "Workspace", projectID: "project",
             projectName: "Project", createdAt: createdAt, updatedAt: createdAt, isControlAvailable: true, isSubscriptionAvailable: true,
             attachmentSnapshot: .init())
@@ -235,6 +236,23 @@ import spacestestsupport
 
     /// Several rows restarting in the same refresh are reported in a fixed order across workspaces, because
     /// the caller applies them one after another against a panel layout it is mutating as it goes.
+    /// A lost shell is replaced under the same terminal row: the previous overview still lists the failed
+    /// session (a session a row names stays retained), and the new one is created after it. This is how a
+    /// client that did not send the resume request, and the one that did, learn which pane to retarget.
+    @Test func aLostShellsTerminalRowNamesItsReplacement() {
+        let before = overview(
+            [workspace(id: "ws", terminalRows: [terminalRow(id: "terminal-window:1", workspaceID: "ws", sessionID: "lost")])],
+            sessions: [sessionSummary(id: "lost", createdAt: "2026-10-15T09:00:00.123Z", state: .failed)])
+        let after = overview(
+            [workspace(id: "ws", terminalRows: [terminalRow(id: "terminal-window:1", workspaceID: "ws", sessionID: "fresh")])],
+            sessions: [sessionSummary(id: "fresh", createdAt: "2026-10-15T21:24:05.456Z")])
+
+        #expect(
+            TerminalSessionReplacementDiff.replacements(previous: before, current: after) == [
+                .init(workspaceID: "ws", replacedSessionID: "lost", replacementSessionID: "fresh")
+            ])
+    }
+
     @Test func replacementsAcrossWorkspacesAreReportedInAStableOrder() {
         let before = overview([
             workspace(id: "ws-b", processRows: [processRow(id: "api", workspaceID: "ws-b", sessionID: "b-ended", runState: .exited)]),

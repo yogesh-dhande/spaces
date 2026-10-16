@@ -46,11 +46,17 @@ import Foundation
                 action_cb: { _, target, action in
                     guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
                     guard let event = GhosttyActionEventParser.parse(action) else { return true }
-                    // A handoff replay re-raises every report the transcript carried, and replaying them
-                    // would settle old turns into done notifications. Like the clipboard write, the decision
-                    // is read where the action fires: delivery below is a later engine turn, after the
-                    // replay bracket has closed.
-                    if case .programStatus = event, let surface = target.target.surface, let userdata = ghostty_surface_userdata(surface),
+                    // A transcript replay (handoff, lost-shell seed) re-raises every report and bell the
+                    // transcript carried; replaying them would settle old turns into done notifications and
+                    // alert on a shell that just started. Like the clipboard write, the decision is read where
+                    // the action fires: delivery below is a later engine turn, after the replay bracket has
+                    // closed.
+                    let isReplayedEvent: Bool
+                    switch event {
+                    case .programStatus, .ringBell: isReplayedEvent = true
+                    default: isReplayedEvent = false
+                    }
+                    if isReplayedEvent, let surface = target.target.surface, let userdata = ghostty_surface_userdata(surface),
                         Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue().isReplayingHistoricalOutput
                     {
                         return true

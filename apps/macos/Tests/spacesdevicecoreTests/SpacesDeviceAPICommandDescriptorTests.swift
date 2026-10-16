@@ -96,7 +96,7 @@ import Testing
         case .archiveWorkspace, .deleteProject: .workspaceTeardown
         case .stopWorkspace: .workspaceStop
         case .runWorkspaceSetup: .workspaceSetup
-        case .startWorkspaceCommandSession: .workspaceTerminalLaunch
+        case .startWorkspaceCommandSession, .resumeLostShell: .workspaceTerminalLaunch
         case .createWorkspace: .workspaceCreate
         case .createProject, .previewGitProject: .projectClone
         case .importProject, .exportProject: .projectConfigFile
@@ -131,11 +131,11 @@ import Testing
         switch command {
         case .createProject: 600
         case .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
-            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .stopWorkspaceTerminal,
-            .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
-            .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation,
-            .setAutomationNextRun, .deleteAutomation, .triggerAutomation, .cancelAutomationRun, .endAutomationAgents, .restoreSessions,
-            .discardRestorableSessions, .workspaceFileDelete, .workspaceFileCreateDirectory, .workspaceFileRename:
+            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .resumeLostShell,
+            .stopWorkspaceTerminal, .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess,
+            .stopCodingAgent, .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer, .spawnAgentSession, .killAgentSession, .createAutomation,
+            .updateAutomation, .setAutomationNextRun, .deleteAutomation, .triggerAutomation, .cancelAutomationRun, .endAutomationAgents,
+            .restoreSessions, .discardRestorableSessions, .workspaceFileDelete, .workspaceFileCreateDirectory, .workspaceFileRename:
             60
         case .agentHooksStatus: 20
         // Clamped to `TerminalScrollbackBudget.defaultMaxBytes`, written out here as its literal value for
