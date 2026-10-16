@@ -7,7 +7,7 @@ const githubDiscussionsURL = "https://github.com/yogesh-dhande/spaces/discussion
 export const metadata: Metadata = {
   title: "Privacy Policy",
   description:
-    "The Spaces apps have no accounts and collect no personal data. Terminal and workspace data never touches developer-operated servers; the optional iPhone alert notifications use a small relay that stores only alert counts. The website counts visits without cookies.",
+    "The Spaces apps have no accounts, analytics, or tracking. Terminal and workspace data never touches developer-operated servers; the optional iPhone alert notifications use a small relay that stores only device identifiers and alert counts. The website counts visits without cookies.",
 };
 
 export default function PrivacyPolicyPage() {
@@ -39,13 +39,13 @@ export default function PrivacyPolicyPage() {
           </article>
 
           <article className="border-t border-line/70 pt-8">
-            <h2 className="text-2xl font-semibold tracking-tight">No data collection in the apps</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">No analytics or tracking in the apps</h2>
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
-              The developer collects no personal data from the Spaces apps or the daemon. They
-              contain no analytics, no usage tracking, and no third-party SDK phoning data home,
-              and they do not report what you run, what you type, or which projects and
-              workspaces you have. The optional notification relay below receives alert counts
-              and nothing else.
+              The Spaces apps and the daemon contain no analytics, no usage tracking, and no
+              third-party SDK phoning data home, and they do not report what you run, what you
+              type, or which projects and workspaces you have. The only data the developer
+              receives is what the optional notification relay below needs to deliver
+              notifications: device identifiers and alert counts.
             </p>
           </article>
 
@@ -72,21 +72,28 @@ export default function PrivacyPolicyPage() {
               devices, so the developer runs a small relay at push.usespaces.dev for this one job.
             </p>
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
-              Your iPhone gives the relay its Apple push token and an identifier of the app
-              installation, and gets back a sealed code that only the relay can open. The token
-              lives inside that code, which your iPhone hands to your paired Macs and Linux boxes;
-              the relay never stores the token. Each paired device then reports to the relay how
-              many alerts it has and how many are agents waiting for input. The relay stores only
-              those counts, per phone and per device, filed under a hash of the installation
-              identifier. It stores no names, no project, workspace, or agent text, no terminal
-              output, and no account, and the notification it sends contains only counts, such as
-              &ldquo;4 alerts, 1 agent needs input&rdquo;. Like any web service, its hosting provider
-              (Google Cloud) may keep standard request logs.
+              Your iPhone gives the relay its Apple push token and an identifier of the
+              app installation, and gets back a sealed code that only the relay can open.
+              The token lives inside that code, which your iPhone hands to your paired
+              Macs and Linux boxes; the relay never stores the token. Each paired device
+              then reports to the relay how many alerts it has and how many are agents
+              waiting for input. The relay stores only those counts, when each device last
+              reported, and the list of devices paired with the phone, filed under a hash
+              of the installation identifier, with each device known by an identifier
+              derived from its pairing certificate. It stores no names, no project,
+              workspace, or agent text, no terminal output, and no account, and the
+              notification it sends contains only counts, such as &ldquo;4 alerts, 1 agent
+              needs input&rdquo;. Like any web service, its hosting provider (Google
+              Cloud) may keep standard request logs. The device identifier and alert
+              counts are used only to deliver notifications; they are not linked to you
+              and not used for tracking.
             </p>
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
-              In Settings you can choose which alerts buzz your phone (agents waiting for input, and
-              agents that finished), and you can turn notifications off entirely in iOS Settings.
-              Unpairing a device removes its counts from the relay. If you never allow
+              In Settings you can choose which alerts buzz your phone (agents waiting for
+              input, and agents that finished), and you can turn notifications off
+              entirely in iOS Settings. Unpairing a device removes its counts from the
+              relay; if that device is offline while notifications are turned off, the
+              removal happens once notifications are back on. If you never allow
               notifications, the iOS app never contacts the relay.
             </p>
           </article>
