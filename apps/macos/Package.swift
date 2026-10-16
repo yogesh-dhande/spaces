@@ -288,7 +288,15 @@ let executableTargets: [Target] = [
                 "WorkspaceFileWriteModePreservationTests.swift",
                 "SpacesDeviceWorkspaceGitHashingKnownAnswerTests.swift",
                 "SpacesDeviceWorkspaceWatchLinuxTests.swift",
+                "SpacesDevicePushNotifierTests.swift",
+                "SpacesDevicePushTestSupport.swift",
             ]
+        ),
+        // spacesdevicecoreTests holds Foundation-only suites alongside client-facing ones, so the Linux target
+        // compiles only the alert-derivation suites the daemon-side push notifier depends on.
+        .testTarget(
+            name: "spacesdevicecoreTests", dependencies: ["spacesdevicecore", "spacesterminalcore"],
+            sources: ["SpacesDeviceAlertsTests.swift", "SpacesDevicePushRelayDeviceIDTests.swift"]
         ),
         // workspacecoreTests otherwise pulls in AppKit-only test support (TestSupport.swift), so the
         // Linux target compiles only the one file that needs none of it.

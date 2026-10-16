@@ -138,6 +138,91 @@ final class SpacesDevicePairingStoreTests: XCTestCase {
         }
     }
 
+    /// The registration lives on the pairing record, so it must survive the record being rebuilt by every
+    /// later authorize and re-bootstrap, and it must reach disk (a second store instance reads it back).
+    func testPushRegistrationRoundTripsAndSurvivesReauthorizeAndRebootstrap() throws {
+        try withTemporaryProfile {
+            let store = try SpacesDevicePairingStore()
+            let phone = SpacesDeviceClientApp(
+                installationID: "PHONE-1", bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+            let token = try store.issueToken(for: phone)
+            let registration = SpacesDevicePushRegistration(capability: "cap-1", notifyBlocked: true, notifyFinished: false)
+
+            try store.setPushRegistration(registration, forInstallationID: "PHONE-1")
+            XCTAssertEqual(try SpacesDevicePairingStore().pushRegistrations(), ["PHONE-1": registration])
+
+            // A renamed device and a new app version force the rebuilt record to persist.
+            let renamed = SpacesDeviceClientApp(
+                installationID: "PHONE-1", bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios", deviceName: "Renamed iPhone",
+                appVersion: "2.0")
+            try store.authorize(clientApp: renamed, authToken: token)
+            XCTAssertEqual(try store.pushRegistrations(), ["PHONE-1": registration])
+            _ = try store.issueToken(for: renamed, presentedToken: token)
+            XCTAssertEqual(try store.pushRegistrations(), ["PHONE-1": registration])
+
+            let updated = SpacesDevicePushRegistration(capability: "cap-2", notifyBlocked: false, notifyFinished: true)
+            try store.setPushRegistration(updated, forInstallationID: "PHONE-1")
+            XCTAssertEqual(try SpacesDevicePairingStore().pushRegistrations(), ["PHONE-1": updated])
+        }
+    }
+
+    /// The push capability in the pairings file is a bearer credential: the file is owner-only after every save,
+    /// whatever the process umask and whatever mode an earlier version left it with.
+    func testThePairingsFileIsOwnerOnlyAfterEverySave() throws {
+        let previousUmask = umask(0o022)
+        defer { umask(previousUmask) }
+        try withTemporaryProfile {
+            let store = try SpacesDevicePairingStore()
+            let phone = SpacesDeviceClientApp(
+                installationID: "PHONE-1", bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+            _ = try store.issueToken(for: phone)
+            let path = try TerminalServicePaths.terminalRootDirectory().appendingPathComponent("device-pairings.json").path
+            func mode() throws -> Int { (try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.intValue ?? -1 }
+            XCTAssertEqual(try mode(), 0o600)
+
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
+            try store.setPushRegistration(
+                SpacesDevicePushRegistration(capability: "cap", notifyBlocked: true, notifyFinished: false), forInstallationID: "PHONE-1")
+            XCTAssertEqual(try mode(), 0o600)
+        }
+    }
+
+    func testClearingAPushRegistrationHonorsTheCapabilityItIsAskedToClear() throws {
+        try withTemporaryProfile {
+            let store = try SpacesDevicePairingStore()
+            let phone = SpacesDeviceClientApp(
+                installationID: "PHONE-1", bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+            _ = try store.issueToken(for: phone)
+            let registration = SpacesDevicePushRegistration(capability: "cap-new", notifyBlocked: true, notifyFinished: true)
+            try store.setPushRegistration(registration, forInstallationID: "PHONE-1")
+
+            XCTAssertNil(try store.clearPushRegistration(forInstallationID: "PHONE-1", matchingCapability: "cap-old"))
+            XCTAssertEqual(try store.pushRegistrations(), ["PHONE-1": registration])
+            XCTAssertEqual(try store.clearPushRegistration(forInstallationID: "PHONE-1"), registration)
+            XCTAssertTrue(try store.pushRegistrations().isEmpty)
+        }
+    }
+
+    func testRevokingAPairingRemovesItsPushRegistration() throws {
+        try withTemporaryProfile {
+            let store = try SpacesDevicePairingStore()
+            let phone = SpacesDeviceClientApp(
+                installationID: "PHONE-1", bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+            _ = try store.issueToken(for: phone)
+            try store.setPushRegistration(
+                SpacesDevicePushRegistration(capability: "cap", notifyBlocked: true, notifyFinished: false), forInstallationID: "PHONE-1")
+            try store.revoke(installationID: "PHONE-1")
+            XCTAssertTrue(try store.pushRegistrations().isEmpty)
+            XCTAssertThrowsError(
+                try store.setPushRegistration(
+                    SpacesDevicePushRegistration(capability: "cap", notifyBlocked: true, notifyFinished: false), forInstallationID: "PHONE-1"))
+        }
+    }
+
     func testAuthorizeRejectsUnsupportedBundle() throws {
         try withTemporaryProfile {
             let store = try SpacesDevicePairingStore()

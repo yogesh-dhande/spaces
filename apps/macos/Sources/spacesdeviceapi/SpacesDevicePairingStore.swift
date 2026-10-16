@@ -18,12 +18,16 @@ public struct SpacesDevicePairedInstallation: Codable, Equatable {
     let tokenHash: String
     let createdAt: String
     let lastUsedAt: String
+    /// Set by a phone's `registerPushNotifications`; absent for a phone that never registered and for every
+    /// non-phone pairing. A record rebuilt without carrying this field forward silently unregisters the phone.
+    var pushRegistration: SpacesDevicePushRegistration?
 
     /// True when two records describe the same pairing in the same terms and differ at most in when it
     /// was last seen — the condition under which persisting is pure timestamp churn.
     func differsOnlyInLastUsedAt(from other: SpacesDevicePairedInstallation) -> Bool {
         installationID == other.installationID && bundleID == other.bundleID && platform == other.platform && deviceName == other.deviceName
             && appVersion == other.appVersion && tokenHash == other.tokenHash && createdAt == other.createdAt
+            && pushRegistration == other.pushRegistration
     }
 }
 
@@ -142,7 +146,7 @@ public final class SpacesDevicePairingStore: @unchecked Sendable {
         let paired = SpacesDevicePairedInstallation(
             installationID: clientApp.installationID, bundleID: clientApp.bundleID, platform: clientApp.platform, deviceName: clientApp.deviceName,
             appVersion: clientApp.appVersion, tokenHash: Self.hash(token), createdAt: existing?.createdAt ?? Self.timestamp(now),
-            lastUsedAt: Self.timestamp(now))
+            lastUsedAt: Self.timestamp(now), pushRegistration: existing?.pushRegistration)
         try replace(existing: existing, with: paired, in: &pairings, at: now)
         return token
     }
@@ -192,8 +196,49 @@ public final class SpacesDevicePairingStore: @unchecked Sendable {
         let now = Date()
         let refreshed = SpacesDevicePairedInstallation(
             installationID: paired.installationID, bundleID: paired.bundleID, platform: clientApp.platform, deviceName: clientApp.deviceName,
-            appVersion: clientApp.appVersion, tokenHash: paired.tokenHash, createdAt: paired.createdAt, lastUsedAt: Self.timestamp(now))
+            appVersion: clientApp.appVersion, tokenHash: paired.tokenHash, createdAt: paired.createdAt, lastUsedAt: Self.timestamp(now),
+            pushRegistration: paired.pushRegistration)
         try replace(existing: paired, with: refreshed, in: &pairings, at: now)
+    }
+
+    /// Every pairing that holds a push registration, by installation ID.
+    public func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] {
+        lock.lock()
+        defer { lock.unlock() }
+        var registrations: [String: SpacesDevicePushRegistration] = [:]
+        for pairing in try loadPairings() { if let registration = pairing.pushRegistration { registrations[pairing.installationID] = registration } }
+        return registrations
+    }
+
+    /// Stores (or replaces) the registration on an existing pairing. A pairing revoked while the request was in
+    /// flight is not resurrected.
+    public func setPushRegistration(_ registration: SpacesDevicePushRegistration, forInstallationID installationID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        var pairings = try loadPairings()
+        guard let index = pairings.firstIndex(where: { $0.installationID == installationID }) else {
+            throw SpacesDevicePairingError.unpairedInstallation(installationID)
+        }
+        guard pairings[index].pushRegistration != registration else { return }
+        pairings[index].pushRegistration = registration
+        try savePairings(pairings)
+    }
+
+    /// Clears the registration and returns what was cleared. With `matchingCapability`, clears only a registration
+    /// still holding that capability: a relay answer about a capability the phone has since rotated must not
+    /// erase the new one.
+    @discardableResult public func clearPushRegistration(forInstallationID installationID: String, matchingCapability: String? = nil) throws
+        -> SpacesDevicePushRegistration?
+    {
+        lock.lock()
+        defer { lock.unlock() }
+        var pairings = try loadPairings()
+        guard let index = pairings.firstIndex(where: { $0.installationID == installationID }), let registration = pairings[index].pushRegistration,
+            matchingCapability == nil || matchingCapability == registration.capability
+        else { return nil }
+        pairings[index].pushRegistration = nil
+        try savePairings(pairings)
+        return registration
     }
 
     /// Applies `updated` to `pairings` and persists, unless the only difference from `existing` is a
@@ -237,7 +282,19 @@ public final class SpacesDevicePairingStore: @unchecked Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(pairings.sorted { $0.createdAt < $1.createdAt })
-        try data.write(to: URL(fileURLWithPath: pairingsPath), options: [.atomic])
+        // Owner-only from the first byte: the file holds token hashes and each phone's push capability, a bearer
+        // credential. A plain atomic write creates the temp file with the umask's mode (0644 under 022), so the
+        // temp file is created 0600 here and renamed over the target, which also tightens a file an earlier
+        // version left world-readable.
+        let temporaryPath = pairingsPath + ".\(UUID().uuidString).tmp"
+        guard fileManager.createFile(atPath: temporaryPath, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: temporaryPath])
+        }
+        guard rename(temporaryPath, pairingsPath) == 0 else {
+            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+            try? fileManager.removeItem(atPath: temporaryPath)
+            throw POSIXError(code)
+        }
     }
 
     private static func hash(_ token: String) -> String {

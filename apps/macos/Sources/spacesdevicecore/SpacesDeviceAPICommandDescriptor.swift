@@ -167,6 +167,10 @@ extension SpacesDeviceAPICommand {
         case .renameAgentSession:
             return Self.descriptor(wireKey: "renameAgentSession", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .dismissAlerts: return Self.descriptor(wireKey: "dismissAlerts", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .registerPushNotifications:
+            return Self.descriptor(wireKey: "registerPushNotifications", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .unregisterPushNotifications:
+            return Self.descriptor(wireKey: "unregisterPushNotifications", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .visitTerminalSession:
             return Self.descriptor(wireKey: "visitTerminalSession", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .setComeBackLater:

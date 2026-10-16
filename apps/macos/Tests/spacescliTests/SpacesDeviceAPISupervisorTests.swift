@@ -648,6 +648,42 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         }
     }
 
+    /// Both daemons build their Device API server through the supervisor, so this is the path a phone's
+    /// registration takes in production: it must be accepted and stored on the phone's real pairing record.
+    func testAPhoneRegistersPushNotificationsThroughTheSupervisorsServer() throws {
+        try withTemporaryProfileSynchronously { root in
+            let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(try makeAvailablePort())"]
+            let settingsStore = temporaryProfileSettingsStore(root: root, environment: environment)
+            let phone = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-PUSH", bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+            let authToken = try SpacesDevicePairingStore().issueToken(for: phone)
+
+            let supervisor = SpacesDeviceAPISupervisor(
+                settingsStore: settingsStore, environment: environment, restartInterval: 60, builtInTerminalSessionTerminator: nil,
+                builtInTerminalSessionLauncher: nil, agentSessionKiller: nil, automationOperations: nil, onRestartRequested: nil,
+                liveTerminalSessionStateProvider: nil, liveInMemoryTerminalSessionsProvider: nil, pushRelayClient: DiscardingPushRelayClient(),
+                pushScheduler: SpacesDevicePushDispatchScheduler())
+            supervisor.start()
+            defer { supervisor.stop() }
+
+            let status = try supervisor.status()
+            let client = try SpacesDeviceAPIRequestSessionClient(
+                resolver: SpacesDeviceEndpointResolver(hosts: ["127.0.0.1"], port: status.port, certificateFingerprint: status.certificateFingerprint)
+            )
+            defer { client.cancel() }
+
+            let response = try client.send(
+                SpacesDeviceAPIRequest(
+                    command: .registerPushNotifications(.init(capability: "cap-1", notifyBlocked: true, notifyFinished: true)), authToken: authToken,
+                    clientApp: phone))
+            XCTAssertTrue(response.ok, response.message)
+            XCTAssertEqual(
+                try SpacesDevicePairingStore().pushRegistrations(),
+                ["INSTALLATION-PUSH": SpacesDevicePushRegistration(capability: "cap-1", notifyBlocked: true, notifyFinished: true)])
+        }
+    }
+
     func testRevokeDeviceClosesActiveSubscribeConnection() throws {
         try withTemporaryProfileSynchronously { root in
             let sessionID = "session-revoke-\(UUID().uuidString)"
@@ -1424,6 +1460,10 @@ private final class BlockingAuthorizePairingStore: SpacesDevicePairingStoreProto
         lock.unlock()
     }
 
+    func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+    func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+    func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
+
     /// Holds `lock` across the blocked window, which is what makes this double faithful to
     /// `SpacesDevicePairingStore`: that store does its whole read-modify-write of the pairings file inside
     /// one lock of its own, so a revoke or reset cannot save on top of an authorization already in flight.
@@ -1573,4 +1613,9 @@ private final class DeviceAPITestSubscriptionServer: @unchecked Sendable {
         }
         return address
     }
+}
+
+/// A relay that accepts everything and sends nothing, so a supervisor test never reaches the network.
+private final class DiscardingPushRelayClient: SpacesDevicePushRelayClient {
+    func send(_: SpacesDevicePushRelayRequest, completion: @escaping @Sendable (SpacesDevicePushRelayOutcome) -> Void) { completion(.delivered) }
 }
