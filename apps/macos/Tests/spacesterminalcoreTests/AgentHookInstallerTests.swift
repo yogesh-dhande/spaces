@@ -1061,6 +1061,9 @@
             #expect(outcome.agents.first { $0.kind == .codex }?.installState == .outdated)
         }
 
+        /// The timeout's clock holds still until the wrapper has written its child's pid, so the timeout can
+        /// only fire once the child exists. A wall-clock timeout can expire before a loaded machine has
+        /// started the wrapper at all, which leaves no child to check.
         @Test func codexFeatureCommandTimeoutKillsTheWrapperAndItsChild() throws {
             let home = try makeHome()
             defer { try? FileManager.default.removeItem(at: home) }
@@ -1075,14 +1078,26 @@
                     printf '%s\n' "$child" > "$CODEX_HOME/child.pid"
                     wait "$child"
                     """#)
-
-            let startedAt = Date()
-            #expect(throws: (any Error).self) {
-                try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: executable.path, codexHome: codexHome, timeoutSeconds: 2)
+            let childPIDFile = codexHome.appendingPathComponent("child.pid")
+            func recordedChildPID() -> pid_t? {
+                (try? String(contentsOf: childPIDFile, encoding: .utf8)).flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            }
+            let startedAt = AgentHookSubprocess.monotonicNow()
+            // The first reading is the one the deadline is computed from, so it must be the base even if the
+            // child has already written its pid by the time `run` asks.
+            var deadlineComputed = false
+            let clock: () -> UInt64 = {
+                defer { deadlineComputed = true }
+                return deadlineComputed && recordedChildPID() != nil ? startedAt + 10_000_000_000 : startedAt
             }
 
-            #expect(Date().timeIntervalSince(startedAt) < 5)
-            let childPID = try #require(pid_t(read(codexHome.appendingPathComponent("child.pid")).trimmingCharacters(in: .whitespacesAndNewlines)))
+            #expect(throws: AgentHookSubprocess.RunError.timedOut) {
+                try AgentHookSubprocess.run(
+                    executablePath: executable.path, arguments: ["features", "enable", "hooks"],
+                    environment: AgentHookCodexCLI.environment(executablePath: executable.path, codexHome: codexHome), timeoutSeconds: 2, now: clock)
+            }
+
+            let childPID = try #require(recordedChildPID())
             let processExitDeadline = Date().addingTimeInterval(1)
             while processExists(childPID) && Date() < processExitDeadline { usleep(10_000) }
             #expect(!processExists(childPID))
@@ -1208,8 +1223,7 @@
             [
                 home.appendingPathComponent(".claude/settings.json"), home.appendingPathComponent(".codex/hooks.json"),
                 home.appendingPathComponent(".codex/config.toml"), home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"),
-                home.appendingPathComponent(".copilot/hooks/spaces.json"), piExtensionFile(home: home),
-                ampPluginFile(home: home),
+                home.appendingPathComponent(".copilot/hooks/spaces.json"), piExtensionFile(home: home), ampPluginFile(home: home),
             ]
         }
 
@@ -1261,7 +1275,10 @@
             let dev = try makeDevBuildCLI(home: home)
             try FileManager.default.removeItem(at: installedCLILink(home: home))
             let files = hookFiles(home: home)
-            let userConfigs = ["{ \"model\": \"opus\" }\n", "{}\n", "[features]\nhooks = true\n", "// user plugin\n", "{ \"version\": 1 }\n", "// user extension\n", "// user plugin\n"]
+            let userConfigs = [
+                "{ \"model\": \"opus\" }\n", "{}\n", "[features]\nhooks = true\n", "// user plugin\n", "{ \"version\": 1 }\n", "// user extension\n",
+                "// user plugin\n",
+            ]
             for (file, contents) in zip(files, userConfigs) {
                 try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try contents.write(to: file, atomically: true, encoding: .utf8)
@@ -1623,7 +1640,8 @@
             #expect(agentStop["timeoutSec"] as? Int == 10)
             #expect(
                 agentStop["bash"] as? String
-                    == "'\(spacesCLIPath(home: home))' agent signal done --agent copilot >/dev/null 2>&1 || true # \(AgentHookCommand.versionedMarker())")
+                    == "'\(spacesCLIPath(home: home))' agent signal done --agent copilot >/dev/null 2>&1 || true # \(AgentHookCommand.versionedMarker())"
+            )
         }
 
         @Test func copilotHooksAreOutdatedWhenTheyNameAnotherSpacesCLI() throws {
