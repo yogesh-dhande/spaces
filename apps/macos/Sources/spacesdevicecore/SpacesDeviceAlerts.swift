@@ -98,6 +98,21 @@ extension SpacesDeviceOverviewPayload {
         return candidates
     }
 
+    /// The candidates every client's Alerts list and badge show, before the client's own focus rule: the
+    /// key is not dismissed, and the candidate is either workspace-less (an automation run) or belongs to
+    /// a workspace that exists and is visible. The focus rule, which each client applies on top, hides a
+    /// bell rung in the terminal the user is watching.
+    public func visibleAlertCandidates() -> [SpacesDeviceAlertCandidate] {
+        let dismissed = Set(dismissedAlertKeys)
+        let workspaceByID = Dictionary(workspaces.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return alertCandidates().filter { candidate in
+            guard !dismissed.contains(candidate.key) else { return false }
+            guard let workspaceID = candidate.workspaceID else { return true }
+            guard let workspace = workspaceByID[workspaceID] else { return false }
+            return isWorkspaceVisible(workspace)
+        }
+    }
+
     /// The keys of the end-of-session alerts (a terminal or configured process that exited or failed) that
     /// belong to `sessionIDs`. Bells, agent alerts, automation runs, and flags are never included: a
     /// session ending does not answer them.

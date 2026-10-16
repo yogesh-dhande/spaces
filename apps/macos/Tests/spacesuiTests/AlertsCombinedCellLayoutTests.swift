@@ -11,10 +11,10 @@ import Testing
 @Suite @MainActor struct AlertsCombinedCellLayoutTests {
     private func row(projectName: String, workspaceName: String, name: String) -> AlertsController.AlertsRenderPlan.Row {
         let entry = AlertsController.AlertsAttentionEntry(
-            attentionID: "a", kind: .bell, icon: "terminal", iconTint: .terminal, label: name, detail: nil, shortcut: "", countsTowardBadge: true, eventDate: nil)
+            attentionID: "a", kind: .bell, icon: "terminal", iconTint: .terminal, label: name, detail: nil, shortcut: "", eventDate: nil)
         return AlertsController.AlertsRenderPlan.Row(
-            entry: entry, projectName: projectName, isAutomationsRow: false, workspaceName: workspaceName, deviceText: nil, isOffline: false, canDismiss: true,
-            ageText: "now", shortcutIndex: 1)
+            entry: entry, projectName: projectName, isAutomationsRow: false, workspaceName: workspaceName, deviceText: nil, isOffline: false,
+            canDismiss: true, ageText: "now", shortcutIndex: 1)
     }
 
     /// Pins `cell` to `width` inside a bare host view and forces a real Auto Layout pass, off-screen, the
@@ -62,11 +62,10 @@ import Testing
     @Test func aLongTitleCompressesBeforeWorkspaceOrName() throws {
         let entry = AlertsController.AlertsAttentionEntry(
             attentionID: "a", kind: .bell, icon: "terminal", iconTint: .terminal, label: "build box",
-            detail: "a very long live title that would never fit in the remaining column space on its own", shortcut: "", countsTowardBadge: true,
-            eventDate: nil)
+            detail: "a very long live title that would never fit in the remaining column space on its own", shortcut: "", eventDate: nil)
         let row = AlertsController.AlertsRenderPlan.Row(
-            entry: entry, projectName: "spaces", isAutomationsRow: false, workspaceName: "feature-x", deviceText: nil, isOffline: false, canDismiss: true,
-            ageText: "now", shortcutIndex: 1)
+            entry: entry, projectName: "spaces", isAutomationsRow: false, workspaceName: "feature-x", deviceText: nil, isOffline: false,
+            canDismiss: true, ageText: "now", shortcutIndex: 1)
         let (cell, nameField, detailField) = AlertsController.alertsCombinedCell(row: row, automationID: nil)
         let titleField = try #require(detailField, "a row with a title must build a detail field")
         let titleIntrinsicWidth = titleField.intrinsicContentSize.width

@@ -58,8 +58,8 @@ extension ProcessProfileEnvironmentSuites {
                 isFromHiddenWorkspace: false,
                 items: [
                     AppKitController.AlertsAttentionEntry(
-                        attentionID: Self.bellAttentionID, kind: .bell, icon: "terminal", iconTint: .terminal, label: "build box", detail: liveTitle, shortcut: "",
-                        processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                        attentionID: Self.bellAttentionID, kind: .bell, icon: "terminal", iconTint: .terminal, label: "build box", detail: liveTitle,
+                        shortcut: "", processStatus: nil, agentStatus: nil, eventDate: nil,
                         focusRequest: .terminalSession(workspaceID: "workspace-1", sessionID: "session-1"))
                 ])
         }
@@ -73,8 +73,8 @@ extension ProcessProfileEnvironmentSuites {
                 items: [
                     bell,
                     AppKitController.AlertsAttentionEntry(
-                        attentionID: Self.processAttentionID, kind: .bell, icon: "bolt.horizontal.circle", iconTint: .warning, label: "web", detail: "npm run dev",
-                        shortcut: "", processStatus: .exited, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                        attentionID: Self.processAttentionID, kind: .bell, icon: "bolt.horizontal.circle", iconTint: .warning, label: "web",
+                        detail: "npm run dev", shortcut: "", processStatus: .exited, agentStatus: nil, eventDate: nil,
                         focusRequest: .workspaceProcess(workspaceID: "workspace-1", processID: "run-1")),
                 ])
         }
@@ -162,8 +162,8 @@ extension ProcessProfileEnvironmentSuites {
             // Both rows are undated here, so the stable sort keeps them in the order `alertsGroups` lists
             // them: the automation group first, claiming shortcut 1, then the bell group's row at 2.
             let automationEntry = AppKitController.AlertsAttentionEntry(
-                attentionID: "alert:linux:automationrun:run-1:failed", kind: .bell, icon: "xmark.octagon.fill", iconTint: .warning, label: "Nightly audit",
-                detail: "failed (exit 3)", shortcut: "", countsTowardBadge: true, eventDate: nil,
+                attentionID: "alert:linux:automationrun:run-1:failed", kind: .bell, icon: "xmark.octagon.fill", iconTint: .warning,
+                label: "Nightly audit", detail: "failed (exit 3)", shortcut: "", eventDate: nil,
                 automationRunTarget: AlertsController.AutomationRunAlertTarget(deviceID: "linux", runID: "run-1"))
             let automationGroup = AppKitController.AlertsGroup(
                 projectName: "Automations", workspaceID: "automations:linux", workspaceName: "Linux box", workspaceBranch: nil,

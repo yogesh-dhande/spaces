@@ -74,7 +74,7 @@ extension ProcessProfileEnvironmentSuites {
             host.deviceModel.deviceSections = [section("offline-box", isLocal: false, .offline("unreachable"))]
             let entry = AlertsController.AlertsAttentionEntry(
                 attentionID: "alert:offline-box:bell:s1:t1", kind: .bell, deviceID: "offline-box", alertKey: "bell:s1:t1", icon: "terminal",
-                iconTint: .terminal, label: "shell", detail: nil, shortcut: "", countsTowardBadge: true, eventDate: nil)
+                iconTint: .terminal, label: "shell", detail: nil, shortcut: "", eventDate: nil)
             host.deviceModel.alertsGroups = [
                 AlertsController.AlertsGroup(
                     projectName: "p", workspaceID: "ws", workspaceName: "w", workspaceBranch: nil, isFromHiddenWorkspace: false, items: [entry],
@@ -93,7 +93,7 @@ extension ProcessProfileEnvironmentSuites {
         private func bellEntry(device: String, session: String) -> AlertsController.AlertsAttentionEntry {
             AlertsController.AlertsAttentionEntry(
                 attentionID: "alert:\(device):bell:\(session):t1", kind: .bell, deviceID: device, alertKey: "bell:\(session):t1", icon: "terminal",
-                iconTint: .terminal, label: session, detail: nil, shortcut: "", countsTowardBadge: true, eventDate: nil)
+                iconTint: .terminal, label: session, detail: nil, shortcut: "", eventDate: nil)
         }
 
         private func group(device: String, _ entries: [AlertsController.AlertsAttentionEntry], hidden: Bool = false) -> AlertsController.AlertsGroup {

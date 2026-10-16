@@ -71,8 +71,8 @@ struct SpacesMobileTerminalWatchWindow: Equatable, Sendable {
 }
 
 /// Pure derivation of attention events from an overview payload, on top of the shared alert candidates
-/// (`SpacesDeviceOverviewPayload.alertCandidates()`). The device decides what is dismissed and which flags
-/// exist; this decides only what the user can see on this phone.
+/// (`SpacesDeviceOverviewPayload.visibleAlertCandidates()`). The device decides what is dismissed and which
+/// flags exist; this adds only the focus rule for what the user can see on this phone.
 enum SpacesMobileAttention {
     /// Slack added to both ends of a watch window when deciding whether a bell rang inside it. `bellAt`
     /// comes from the daemon's clock while the window comes from this phone's, so an exact comparison
@@ -102,9 +102,11 @@ enum SpacesMobileAttention {
         let workspaceByID = Dictionary(overview.workspaces.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var events: [SpacesMobileAttentionEvent] = []
 
-        for candidate in overview.alertCandidates() {
-            guard !dismissed.contains(candidate.key), let date = candidate.date, let workspaceID = candidate.workspaceID,
-                let workspace = workspaceByID[workspaceID], includingHiddenWorkspaces || overview.isWorkspaceVisible(workspace),
+        // The shared rule decides what is listed; the hidden-workspace path exists only for row-level dismissal.
+        let candidates =
+            includingHiddenWorkspaces ? overview.alertCandidates().filter { !dismissed.contains($0.key) } : overview.visibleAlertCandidates()
+        for candidate in candidates {
+            guard let date = candidate.date, let workspaceID = candidate.workspaceID, let workspace = workspaceByID[workspaceID],
                 let presentation = presentation(of: candidate, in: workspace, sessionByID: sessionByID)
             else { continue }
             if candidate.kind == .bell, let sessionID = candidate.sessionID {
@@ -139,9 +141,8 @@ enum SpacesMobileAttention {
         }
     }
 
-    private static func isWatched(bellAt date: Date, sessionID: String, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]]) -> Bool {
-        watchWindowsBySessionID[sessionID]?.contains(where: { $0.contains(date, tolerance: watchedBellSkewTolerance) }) == true
-    }
+    private static func isWatched(bellAt date: Date, sessionID: String, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]]) -> Bool
+    { watchWindowsBySessionID[sessionID]?.contains(where: { $0.contains(date, tolerance: watchedBellSkewTolerance) }) == true }
 
     private struct Presentation {
         let sourceID: String
@@ -153,7 +154,8 @@ enum SpacesMobileAttention {
     /// How a candidate reads in the list, or nil when its row is gone from the workspace (an automation
     /// run, which `SpacesMobileAutomationAlerts` presents, or a row removed since the candidate was derived).
     private static func presentation(
-        of candidate: SpacesDeviceAlertCandidate, in workspace: SpacesDeviceWorkspaceSummary, sessionByID: [String: SpacesDeviceTerminalSessionSummary]
+        of candidate: SpacesDeviceAlertCandidate, in workspace: SpacesDeviceWorkspaceSummary,
+        sessionByID: [String: SpacesDeviceTerminalSessionSummary]
     ) -> Presentation? {
         switch candidate.kind {
         case .agentWaiting, .agentDone:

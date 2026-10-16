@@ -46,7 +46,6 @@ import workspacecore
         let shortcut: String
         let processStatus: RunningProcessState?
         let agentStatus: AgentWindowStatus?
-        let countsTowardBadge: Bool
         let eventDate: Date?
         let focusRequest: WindowFocusRequest?
         /// Set for a failed/timed-out automation-run alert. Its card deep-links to the Runs tab rather than
@@ -56,7 +55,7 @@ import workspacecore
         init(
             attentionID: String, kind: SpacesDeviceAlertKind, deviceID: String = "", alertKey: String = "", isDismissed: Bool = false, icon: String,
             iconTint: AppKitController.AlertsIconTint, label: String, detail: String?, shortcut: String, processStatus: RunningProcessState? = nil,
-            agentStatus: AgentWindowStatus? = nil, countsTowardBadge: Bool, eventDate: Date?, focusRequest: WindowFocusRequest? = nil,
+            agentStatus: AgentWindowStatus? = nil, eventDate: Date?, focusRequest: WindowFocusRequest? = nil,
             automationRunTarget: AutomationRunAlertTarget? = nil
         ) {
             self.attentionID = attentionID
@@ -71,7 +70,6 @@ import workspacecore
             self.shortcut = shortcut
             self.processStatus = processStatus
             self.agentStatus = agentStatus
-            self.countsTowardBadge = countsTowardBadge
             self.eventDate = eventDate
             self.focusRequest = focusRequest
             self.automationRunTarget = automationRunTarget
@@ -156,7 +154,7 @@ import workspacecore
                 AlertsAttentionEntry(
                     attentionID: attentionID, kind: candidate.kind, deviceID: deviceID, alertKey: candidate.key, isDismissed: isDismissed, icon: icon,
                     iconTint: iconTint, label: label, detail: detail, shortcut: "", processStatus: processStatus, agentStatus: agentStatus,
-                    countsTowardBadge: true, eventDate: candidate.date, focusRequest: focusRequest, automationRunTarget: automationRunTarget)
+                    eventDate: candidate.date, focusRequest: focusRequest, automationRunTarget: automationRunTarget)
             }
             switch candidate.kind {
             case .automationRunFailed, .automationRunTimedOut:
@@ -404,7 +402,7 @@ import workspacecore
         }
     }
 
-    func alertsAttentionCount() -> Int { buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count } }
+    func alertsAttentionCount() -> Int { buildAlertsGroups().reduce(0) { total, group in total + group.items.count } }
 
     // MARK: - Render plan and signature
 
