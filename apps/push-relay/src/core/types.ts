@@ -24,6 +24,14 @@ export interface DeviceCounts {
 export interface PhoneState {
   devices: DeviceCounts[];
   /**
+   * The devices the phone is currently paired with, as of its last register. Only these may report.
+   * A phone cannot reach a daemon that is offline when it unpairs it, so that daemon keeps a valid
+   * capability and would restore its counts when it returned; the phone's own list is what stops it.
+   * Required, not optional: the allowlist ships before any phone registered, so no stored document
+   * predates the field and none needs a default.
+   */
+  pairedDeviceIDs: string[];
+  /**
    * The badge total the phone last received from a successful push. Decisions compare against
    * this rather than the previously stored total, so retrying a report after a failed send
    * still sends.

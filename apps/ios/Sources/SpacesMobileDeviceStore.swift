@@ -495,11 +495,10 @@ struct SpacesMobileDeviceStoreState: Equatable, Sendable {
     /// (`saveSecret`/`secret`, keyed `"<deviceID>.authToken"`) and `BrowserProxyRouteTarget.deviceID`
     /// both key off this id; if it moved whenever a client switched from the LAN address to the
     /// Tailscale address, the device would appear to be a different device and lose its stored token.
-    private static func deviceID(certificateFingerprint: String, port: Int) -> String {
-        let source = "\(certificateFingerprint)|\(port)".lowercased()
-        let slug = source.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
-            in: CharacterSet(charactersIn: "-"))
-        return "device-\(slug.prefix(48))"
+    /// The daemon files its push-relay counts under the same id (`SpacesDevicePushRelayDeviceID`), which is
+    /// how an unpair can drop this device's counts from the badge without reaching the daemon.
+    static func deviceID(certificateFingerprint: String, port: Int) -> String {
+        SpacesDevicePushRelayDeviceID.make(certificateFingerprint: certificateFingerprint, port: port)
     }
 
     private enum SecretKind: String { case authToken }
