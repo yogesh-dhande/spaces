@@ -1,5 +1,6 @@
 #if canImport(UIKit)
     import XCTest
+    import spacesdevicecore
     @testable import SpacesMobile
 
     /// Multi-address device pairing: a paired Mac can be reachable at more than one address (LAN and
@@ -97,6 +98,15 @@
 
             XCTAssertEqual(SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices.count, 1)
             XCTAssertEqual(second.devices.first?.id, firstID, "the rescan must upgrade the existing row, not mint a new id")
+        }
+
+        /// The paired-device id is the id the daemon files its push-relay counts under, so an unpair can
+        /// drop that device's counts from the badge without reaching the daemon.
+        func testPairedDeviceIDMatchesTheDaemonsPushRelayDeviceID() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token-1"), name: "Mac")
+
+            XCTAssertEqual(state.devices.first?.id, SpacesDevicePushRelayDeviceID.make(certificateFingerprint: "SHA256:mac", port: 47_900))
         }
 
         /// Regression: before `deviceID` excluded the address, folding the id on a rescan orphaned the

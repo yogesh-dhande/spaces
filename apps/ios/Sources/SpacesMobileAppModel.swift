@@ -600,6 +600,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// this, pushes the session's detail route, and clears it. Model-driven (rather than a tab-local
     /// binding) so a link handled at the app shell can navigate whichever tab is on screen.
     var pendingTerminalDeepLinkSession: SpacesDeviceTerminalSessionSummary?
+    /// The terminal a tapped in-app alert banner asks to open. The Alerts tab consumes it, the same way it
+    /// opens a terminal from one of its own rows, and clears it.
+    var pendingAlertTerminalRoute: SelectedTerminalSessionRoute?
+    /// Bumped when a notification tap asks the Alerts tab to pop back to its list. A counter rather than a
+    /// flag so a second tap while the tab is already showing the list still changes it.
+    private(set) var alertsNavigationResetCount = 0
+    /// The new alert the in-app banner is showing, if any. Set by `evaluateAlertBanner`, cleared by the
+    /// banner's own timer, swipe, or tap.
+    private(set) var alertBanner: SpacesMobileAttentionEvent?
+    @ObservationIgnored private var alertBannerDiff = AlertBannerDiff()
+    /// Push registration and the two buzz toggles; see `PushNotificationCoordinator`.
+    let push: PushNotificationCoordinator
+    /// Wraps a paired device's client as the endpoint push registrations are sent through. A parameter so a
+    /// test can record what each device was told.
+    @ObservationIgnored private let makePushEndpoint: @Sendable (SpacesDeviceAPIClient) -> any PushDeviceEndpoint
     /// `didSet` rather than a dedicated setter wrapping every assignment site: this is set from many
     /// places (an explicit refresh's own failure path in `performRefresh`, a stream failure, mutation failures, deep-link misses,
     /// authentication recovery), and `RootTabView`'s "Connection Error" alert appears on exactly one
@@ -755,7 +770,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// grace period, and the device keeps its last-known agents/alerts, dimmed, until it recovers. Tracked
     /// explicitly, not derived from `overviewStreamSubscriptions.isLive`, so a device that has never yet
     /// connected (`.opening`) reads as not-offline instead of colliding with one that connected and dropped.
-    private(set) var offlineDeviceIDs: Set<String> = []
+    private(set) var offlineDeviceIDs: Set<String> = [] {
+        didSet {
+            // A device that came back is sent the push registration again, since it may have lost it while
+            // unreachable. (Its banner re-seeds at the stream failure; see `handleDeviceStreamFailure`.)
+            if !oldValue.subtracting(offlineDeviceIDs).isEmpty { Task { await syncPushRegistration() } }
+        }
+    }
     /// Non-selected paired devices a frozen-core probe (`classifyNonSelectedDeviceStreamFailure`) has
     /// found running a wire version this app cannot decode. Kept apart from `offlineDeviceIDs`: a blocked
     /// device is blocked, not offline, so `overview(forDeviceID:)` reads this set to drop its rows and
@@ -943,6 +964,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         #if DEBUG
             SpacesMobileDeviceStore.applyDebugSeed()
         #endif
+        push = PushNotificationCoordinator(
+            system: UserNotificationsPushSystem(), relay: URLSessionPushRelayClient(), preferences: PushNotificationPreferences(),
+            environment: .current())
+        makePushEndpoint = { ClientPushDeviceEndpoint(client: $0) }
         let loadedSettings = SpacesMobileSettingsStore.load()
         let deviceState = SpacesMobileDeviceStore.load(fallbackSettings: loadedSettings)
         // Captured here, on the main actor, rather than read lazily off `ProcessInfo.processInfo.hostName`:
@@ -1001,8 +1026,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         refreshFailureAlertDelay: Duration = .seconds(5), workspaceDeletionReconciliationInterval: Duration = .seconds(2),
         now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }, wallClock: @escaping @Sendable () -> Date = { Date() },
         visitSchedule: @escaping SpacesMobileTerminalVisitTracker.Schedule = SpacesMobileTerminalVisitTracker.sleepingSchedule,
-        overviewStreamClientsForTesting: [String: SpacesDeviceAPIClient] = [:]
+        overviewStreamClientsForTesting: [String: SpacesDeviceAPIClient] = [:], pushCoordinator: PushNotificationCoordinator = .disabled(),
+        makePushEndpoint: @escaping @Sendable (SpacesDeviceAPIClient) -> any PushDeviceEndpoint = { ClientPushDeviceEndpoint(client: $0) }
     ) {
+        push = pushCoordinator
+        self.makePushEndpoint = makePushEndpoint
         self.settings = settings
         pairedDevices = []
         activeDeviceID = nil
@@ -1251,7 +1279,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Runs on every overview a device delivers: dismisses the bells that rang while the user was
     /// watching their session (so every client drops them), and lets the visit tracker see alerts that
     /// arrived on the watched terminal.
-    private func deviceOverviewDidChange(deviceID: String, overview: SpacesDeviceOverviewPayload) {
+    ///
+    /// `isFresh` is false for a cached overview republished on a device switch: it is not something the
+    /// device just reported, so it must not feed the in-app banner.
+    private func deviceOverviewDidChange(deviceID: String, overview: SpacesDeviceOverviewPayload, isFresh: Bool = true) {
         let keys = SpacesMobileAttention.watchedBellKeys(in: overview, watchWindowsBySessionID: watchWindowsIncludingOpenWatch).filter {
             !watchedBellDismissalsInFlight.contains(Self.watchedBellDismissalID(deviceID: deviceID, key: $0))
         }
@@ -1264,6 +1295,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             }
         }
         visitTracker.overviewChanged()
+        if isFresh { evaluateAlertBanner(deviceID: deviceID) }
     }
 
     private static func watchedBellDismissalID(deviceID: String, key: String) -> String { "\(deviceID)|\(key)" }
@@ -1815,6 +1847,90 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overviewStreamSubscriptions.enable()
         startRelativeTimeReferenceClock()
         reconcileDeviceStreams()
+        Task { await startPushNotifications() }
+    }
+
+    // MARK: - Push notifications and the in-app alert banner
+
+    // Push never runs in Demo Mode: the demo device is not a real daemon, and a registration would hand the
+    // phone's relay capability to nothing.
+
+    /// Launch, foreground, and a pairing that just succeeded: asks for the notification permission once a
+    /// device is paired (so a user who paired before notifications existed is asked too), starts APNs when
+    /// allowed, then syncs the registration. With no device paired it only lets the sync retire what the
+    /// relay still holds.
+    func startPushNotifications() async {
+        guard !isDemoModeEnabled else { return }
+        await push.prepare(askIfNeeded: !pairedDevices.isEmpty)
+        await syncPushRegistration()
+    }
+
+    func pushDeviceTokenReceived(_ token: Data) {
+        push.deviceTokenReceived(token)
+        Task { await syncPushRegistration() }
+    }
+
+    func setNotifyBlocked(_ enabled: Bool) async { await setNotifyPreference(enabled) { push.preferences.notifyBlocked = enabled } }
+
+    func setNotifyFinished(_ enabled: Bool) async { await setNotifyPreference(enabled) { push.preferences.notifyFinished = enabled } }
+
+    /// Turning a toggle on is a request for alerts, so it asks for the permission if it was never asked.
+    private func setNotifyPreference(_ enabled: Bool, apply: () -> Void) async {
+        apply()
+        if enabled, !isDemoModeEnabled { await push.prepare(askIfNeeded: true) }
+        await syncPushRegistration()
+    }
+
+    /// Sends the push registration to every paired device that has credentials.
+    func syncPushRegistration() async {
+        guard !isDemoModeEnabled else { return }
+        let targets = pairedDevices.filter { isDeviceCredentialedForStreaming($0) }.compactMap { pushTarget(forDeviceID: $0.id) }
+        await push.sync(installID: settings.installationID, pairedDeviceIDs: pairedDevices.map(\.id), targets: targets)
+    }
+
+    private func pushTarget(forDeviceID deviceID: String) -> PushDeviceTarget? {
+        overviewStreamClient(forDeviceID: deviceID).map { PushDeviceTarget(deviceID: deviceID, endpoint: makePushEndpoint($0)) }
+    }
+
+    /// Mirrors this app's own alert count onto the icon while the app is open. The relay owns the badge the
+    /// rest of the time, from every device's counts.
+    func syncApplicationBadge() async {
+        guard !isDemoModeEnabled else { return }
+        await push.updateBadge(undismissedAlertCount)
+    }
+
+    /// Tapping the system notification, which is one count of alerts, shows the Alerts list: a terminal the
+    /// tab still had open from before the app was backgrounded is closed, whether or not the tab was
+    /// already selected.
+    func openAlertsFromNotification() {
+        selectedTab = .alerts
+        pendingAlertTerminalRoute = nil
+        alertsNavigationResetCount += 1
+    }
+
+    /// Raises the banner for the newest new alert of a toggled-on kind on `deviceID`, which just delivered
+    /// a fresh overview; see `AlertBannerDiff`.
+    private func evaluateAlertBanner(deviceID: String) {
+        let candidateIDs = Set(
+            deviceOverviewContexts.filter { $0.deviceID == deviceID }.flatMap { $0.overview.alertCandidates() }.map { "\(deviceID)|\($0.key)" })
+        if let event = alertBannerDiff.nextBanner(
+            deviceID: deviceID, events: attentionEvents.filter { $0.deviceID == deviceID }, candidateIDs: candidateIDs,
+            notifyBlocked: push.preferences.notifyBlocked, notifyFinished: push.preferences.notifyFinished, watchedSessionID: watchedTerminalSessionID
+        ) {
+            alertBanner = event
+        }
+    }
+
+    func dismissAlertBanner() { alertBanner = nil }
+
+    /// Opens the banner's terminal the way tapping its row in the Alerts tab does.
+    func openAlertBanner() {
+        guard let event = alertBanner else { return }
+        alertBanner = nil
+        selectedTab = .alerts
+        if let sessionID = event.sessionID, let session = session(forSessionID: sessionID, deviceID: event.deviceID) {
+            pendingAlertTerminalRoute = SelectedTerminalSessionRoute(session: session, deviceID: event.deviceID)
+        }
     }
 
     /// Foreground re-preference for every paired device's overview stream: the streaming counterpart of
@@ -1881,6 +1997,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         stopRelativeTimeReferenceClock()
         for handle in overviewStreamSubscriptions.disable() { handle.cancel() }
         noteConnectionMonitoringPaused()
+        // What happens while streams are closed is covered by the system notification, so the first
+        // overview after they reopen only re-seeds the banner's seen set.
+        alertBannerDiff.forgetAll()
+        alertBanner = nil
     }
 
     /// Awaits any retry the coordinator has armed for a paired device's stream. Test-only: the retry
@@ -2292,6 +2412,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// only the classifier's own frozen-core probe (decodable across versions) can tell them apart before
     /// either marking is applied.
     private func handleDeviceStreamFailure(deviceID: String, error: Error?) {
+        // Re-seeds the in-app banner here, at the disconnect itself, rather than through the offline
+        // marking: a non-selected device is marked only after a separate handshake, and a stream that
+        // reconnects first discards that verdict, which would leave the device seeded and banner whatever
+        // it raised during the outage.
+        alertBannerDiff.forget(deviceID: deviceID)
         guard deviceID == activeDeviceID else {
             classifyNonSelectedDeviceStreamFailure(deviceID: deviceID)
             return
@@ -2505,7 +2630,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         errorMessage = nil
         refreshFailureStreak = nil
         if advancesDeliveryGeneration { overviewDeliveryGeneration &+= 1 }
-        publishOverview(acceptedOverview)
+        // Only the republish of a cached overview leaves the delivery generation alone, so it is also the
+        // one publish that is not something the device just reported.
+        publishOverview(acceptedOverview, isFresh: advancesDeliveryGeneration)
         // Rebuilds the live client only after the overview above is already published, deliberately:
         // this can run mid-refresh, and racing the rebuild against the `overviewIdentity` guards earlier
         // in this method could drop the very overview the caller is waiting for. Publishing first means
@@ -3268,6 +3395,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
+        if deviceState.settings.isPaired { Task { await startPushNotifications() } }
     }
 
     /// Rebuilds the live client and command channel after `mergeAdvertisedHosts` backfills a newly
@@ -3580,6 +3708,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         let previousDeviceID = activeDeviceID
         let previousCommandChannel = commandChannel
+        // Built before the record goes: it needs the device's client and credentials.
+        let pushUnpairTarget = pushTarget(forDeviceID: id)
         let deviceState = SpacesMobileDeviceStore.remove(deviceID: id, fallbackSettings: settings)
         // Drops `id`'s own cached overview, client/channel, and mutation identity directly, rather than
         // leaving it to `reconcileDeviceStreams`'s stale-device cleanup: that cleanup only runs while
@@ -3617,6 +3747,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         Task { await browserProxy.updateRoutes(table) }
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
+        // The device is told to forget this phone if it can hear it; the relay learns of the removal from
+        // the paired list `syncPushRegistration` sends, which is what keeps an offline device out.
+        if let pushUnpairTarget { Task { await push.unpair(pushUnpairTarget) } }
+        Task { await syncPushRegistration() }
     }
 
     func renameDevice(id: String, name: String) {
@@ -3696,6 +3830,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         discardUnresolvedWorkspaceDeletions()
         reconcileDeviceStreamsAfterIdentityChange()
         Task { await previousCommandChannel.close() }
+        // The full start, not just a sync: a launch that began in Demo Mode never prepared APNs.
+        Task { await startPushNotifications() }
     }
 
     /// What the active device itself reported: the overview, the wire status, and the verdict derived
@@ -4770,10 +4906,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         retainedTerminalScreens.retainOnly(sessionIDs: keep)
     }
 
-    private func publishOverview(_ payload: SpacesDeviceOverviewPayload?) {
+    private func publishOverview(_ payload: SpacesDeviceOverviewPayload?, isFresh: Bool = true) {
         if payload != overview { overview = payload }
         if let payload {
-            if let activeDeviceID { deviceOverviewDidChange(deviceID: activeDeviceID, overview: payload) }
+            if let activeDeviceID { deviceOverviewDidChange(deviceID: activeDeviceID, overview: payload, isFresh: isFresh) }
             resolveDeferredWorkspaceDeletions(against: payload)
             // A session the device no longer lists cannot be reopened, an ended one is never painted from
             // memory (its final transcript is what it shows, and it stays listed for days), and one that

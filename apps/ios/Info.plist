@@ -50,6 +50,10 @@
 	<string>Spaces uses the camera to scan the QR code from your Mac for pairing.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Spaces connects to your Mac's first-party terminal bridge.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
