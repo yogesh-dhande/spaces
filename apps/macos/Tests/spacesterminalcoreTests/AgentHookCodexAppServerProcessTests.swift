@@ -88,6 +88,38 @@
             }
         }
 
+        /// Hands the session's reads to the real transport with a deadline that has not passed until the
+        /// server has written `fence`, and has passed from then on. A wall-clock deadline can expire before
+        /// a loaded machine has started the stand-in at all, which leaves no child to check.
+        private final class DeadlineAfterFenceTransport: AgentHookCodexAppServerTransport {
+            private let inner: any AgentHookCodexAppServerTransport
+            private let fence: URL
+
+            init(_ inner: any AgentHookCodexAppServerTransport, fence: URL) {
+                self.inner = inner
+                self.fence = fence
+            }
+
+            func send(_ line: Data, deadline: UInt64) throws { try inner.send(line, deadline: deadline) }
+
+            /// The fence is the stand-in's own doing, so a stand-in that exits or fails before writing it would
+            /// otherwise strand this wait, and the session's cleanup behind it. This bounds a broken test; it
+            /// is not the timeout under test.
+            struct FenceNeverWritten: Error, CustomStringConvertible { let description = "The stand-in server never wrote its readiness fence" }
+            static let fenceWatchdogSeconds: TimeInterval = 60
+
+            func receiveLine(deadline: UInt64) throws -> Data {
+                let watchdog = AgentHookSubprocess.monotonicDeadline(after: Self.fenceWatchdogSeconds)
+                while !FileManager.default.fileExists(atPath: fence.path) || ((try? Data(contentsOf: fence)) ?? Data()).isEmpty {
+                    guard AgentHookSubprocess.monotonicNow() < watchdog else { throw FenceNeverWritten() }
+                    usleep(5_000)
+                }
+                return try inner.receiveLine(deadline: AgentHookSubprocess.monotonicNow())
+            }
+
+            func close() { inner.close() }
+        }
+
         /// A wedged server costs the caller the session's deadline and no more, and is stopped along with
         /// anything it started, so a status read never leaves a Codex behind.
         @Test func aServerThatNeverAnswersIsStoppedAtTheDeadline() throws {
@@ -95,13 +127,17 @@
             defer { try? FileManager.default.removeItem(at: directory) }
             let childPIDFile = directory.appendingPathComponent("child.pid")
             let server = try makeServer("#!/bin/sh\nsleep 30 &\nprintf '%s\\n' \"$!\" > \"$CODEX_HOME/child.pid\"\nwait\n", in: directory)
-            let startedAt = AgentHookSubprocess.monotonicNow()
 
             #expect(throws: AgentHookCodexAppServer.Failure.timedOut) {
-                try session(server, codexHome: directory, timeoutSeconds: 0.5) { try $0.listHooks() }
+                try AgentHookCodexAppServer.withSession(
+                    executablePath: server, codexHome: directory, timeoutSeconds: 5,
+                    launcher: { path, home in
+                        DeadlineAfterFenceTransport(
+                            try AgentHookCodexAppServer.launchProcess(executablePath: path, codexHome: home), fence: childPIDFile)
+                    }
+                ) { try $0.listHooks() }
             }
 
-            #expect(AgentHookSubprocess.monotonicNow() - startedAt < 5_000_000_000)
             let childPID = try #require(pid_t(try String(contentsOf: childPIDFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
             defer { _ = kill(childPID, SIGKILL) }
             let deadline = AgentHookSubprocess.monotonicDeadline(after: 3)

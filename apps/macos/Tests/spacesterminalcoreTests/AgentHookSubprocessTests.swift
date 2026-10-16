@@ -92,6 +92,9 @@
             #expect(blockedSignalResult.terminationStatus == 128 + SIGUSR2)
         }
 
+        /// The timeout's clock holds still until the wrapper has recorded its child's pid, so the timeout
+        /// can only fire once the child exists. A wall-clock timeout can expire before a loaded machine has
+        /// started the wrapper at all, which leaves no child to check.
         @Test func timeoutKillsAWrapperAndItsChild() throws {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "agent-hook-subprocess-\(UUID().uuidString)", isDirectory: true)
@@ -101,13 +104,25 @@
             var environment = ProcessInfo.processInfo.environment
             environment["CHILD_PID_FILE"] = childPIDFile.path
 
+            func recordedChildPID() -> pid_t? {
+                (try? String(contentsOf: childPIDFile, encoding: .utf8)).flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            }
+            let startedAt = AgentHookSubprocess.monotonicNow()
+            // The first reading is the one the deadline is computed from, so it must be the base even if the
+            // child has already written its pid by the time `run` asks.
+            var deadlineComputed = false
+            let clock: () -> UInt64 = {
+                defer { deadlineComputed = true }
+                return deadlineComputed && recordedChildPID() != nil ? startedAt + 10_000_000_000 : startedAt
+            }
+
             #expect(throws: AgentHookSubprocess.RunError.timedOut) {
                 try AgentHookSubprocess.run(
                     executablePath: "/bin/sh",
                     arguments: [
                         "-c",
                         #"sh -c 'trap "" TERM; exec >/dev/null 2>&1; sleep 30' & child=$!; printf '%s\n' "$child" > "$CHILD_PID_FILE"; wait "$child""#,
-                    ], environment: environment, timeoutSeconds: 2)
+                    ], environment: environment, timeoutSeconds: 2, now: clock)
             }
 
             let childPIDText = try String(contentsOf: childPIDFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
