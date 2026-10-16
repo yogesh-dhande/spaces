@@ -256,8 +256,7 @@
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             requestSurfaceRefreshAction _: (@TerminalEngineActor () -> Void)? = nil,
-            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil,
-            onProgramStatus: TerminalProgramStatusHandler? = nil
+            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil, onProgramStatus: TerminalProgramStatusHandler? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
@@ -271,22 +270,51 @@
 
         deinit { if let vtSession { spaces_ghostty_vt_session_free(vtSession) } }
 
-        public func startIfNeeded() throws {
+        public func startIfNeeded() throws { try start(seedGrid: nil) }
+
+        /// Starts a session whose `output.log` already holds a seed transcript (see `TerminalLostShellSeed`)
+        /// recorded at `columns` x `rows`; the vt session and the PTY take that grid before the replay so
+        /// wrapping matches. The seed is written into the vt session before events are enabled, so its bells
+        /// and clipboard writes never fire, and the file is kept as is so the transcript and the screen
+        /// agree. `async` only for API symmetry with the macOS core, whose replay waits on Ghostty's IO: this
+        /// body never suspends, so no teardown can interleave with it.
+        public func startReplayingSeedTranscript(columns: Int, rows: Int) async throws { try start(seedGrid: (columns, rows)) }
+
+        private func start(seedGrid: (columns: Int, rows: Int)?) throws {
             guard !started else { return }
+            let replayingSeedTranscript = seedGrid != nil
             try paths.ensureDirectories()
             enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: true)
             seedAttachmentSnapshot()
-            try ensureOutputHandle()
+            if replayingSeedTranscript { try openOutputHandlePreservingTranscript() } else { try ensureOutputHandle() }
+            if let seedGrid {
+                terminalSize = seedGrid
+                _ = ptyDriver.resizeCellGrid(columns: seedGrid.columns, rows: seedGrid.rows)
+            }
             guard let vtSession = makeVTSession(columns: terminalSize.columns, rows: terminalSize.rows) else {
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
             }
-            // A fresh session replays nothing, so every event it raises from here on belongs to live
-            // output the user is watching.
+            if replayingSeedTranscript {
+                do {
+                    try Self.replayOutputLog(at: paths.outputPath) { chunk in
+                        let written = chunk.withUnsafeBytes { rawBuffer in
+                            spaces_ghostty_vt_session_write(vtSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
+                        }
+                        guard written else { throw GhosttyLinuxHeadlessSessionError.vtReplayFailed }
+                    }
+                } catch {
+                    spaces_ghostty_vt_session_free(vtSession)
+                    throw error
+                }
+            }
+            // Events are enabled after any seed replay, so every event a fresh session raises from here on
+            // belongs to live output the user is watching.
             guard spaces_ghostty_vt_session_enable_events(vtSession) else {
                 spaces_ghostty_vt_session_free(vtSession)
                 throw GhosttyLinuxHeadlessSessionError.eventRegistrationFailed
             }
             self.vtSession = vtSession
+            if replayingSeedTranscript { seedMetadataFromVTSession() }
             terminalIncarnation = UInt64.random(in: .min ... .max)
             started = true
             terminating = false

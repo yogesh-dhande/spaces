@@ -243,9 +243,12 @@ extension TerminalSessionPaneViewController {
     /// retrying, or stage 2 unreachable), so the banner is the only thing telling the user why their
     /// keystrokes go nowhere.
     func updatePersistentBanner(runtimeState: TerminalSessionRuntimeState?) {
+        // A withheld failure reads as an unknown state, so only the connection stage can show a notice.
+        let reportedState = runtimeState?.state == .failed && holdsFailedStateForLostShellResume() ? nil : runtimeState?.state
         guard
             let notice = TerminalPaneBannerNotice.resolve(
-                runtimeState: runtimeState?.state, connectionStage: stateStreamConnectionStage, isBannerVisible: isStateStreamBannerVisible)
+                runtimeState: reportedState, connectionStage: stateStreamConnectionStage, isBannerVisible: isStateStreamBannerVisible,
+                lostShellFolderIsMissing: lostShellFolderIsMissing)
         else {
             banner.clearPersistent()
             return
@@ -257,6 +260,21 @@ extension TerminalSessionPaneViewController {
             ? TerminalPaneBannerAction(
                 title: TerminalConnectionNotice.retryActionTitle, handler: { [weak self] in self?.stateProvider.retryStateStreamConnection() }) : nil
         banner.showPersistent(notice, action: action)
+    }
+
+    /// Records that the device could not replace this lost shell because its folder is gone, and puts that
+    /// in the persistent notice.
+    public func showLostShellFolderMissing() {
+        lostShellFolderIsMissing = true
+        updatePersistentBanner(runtimeState: lastObservedRuntimeState)
+    }
+
+    /// Presents the failed state a refresh withheld, once nothing holds it any more (the device refused the
+    /// replacement, or the overview shows the session was never going to be asked about). A replacement
+    /// that succeeds retargets the pane instead, so this has nothing to present then.
+    public func lostShellResumeHoldDidChange() {
+        guard isHoldingFailedState, !holdsFailedStateForLostShellResume() else { return }
+        refreshNow()
     }
 
     func updateInputStatus(message: String, isError: Bool) {

@@ -44,6 +44,16 @@ public enum WorkspaceError: LocalizedError {
     /// binary. Thrown at the row-mutation boundary so the terminal-side effect (which no-ops during
     /// handoff) and the database mutation stay consistent: neither is applied when handoff intervenes.
     case daemonHandoffInProgress
+    /// `resumeLostShell` named a session that is not a shell lost without an exit: it is unknown, still
+    /// live, ended on its own, owned by a configured process or agent, or held by a pending restore offer.
+    case sessionNotResumable(message: String)
+    /// `resumeLostShell` named a shell that a pending restore offer holds. Kept apart from
+    /// `sessionNotResumable` because it is temporary: answering the offer frees the shell, so a client
+    /// asks again afterwards instead of treating the refusal as final.
+    case restorePending(message: String)
+    /// A lost shell's working directory is gone. Kept apart from `invalidArgument` so a client can say the
+    /// folder no longer exists instead of reporting a generic failure.
+    case workingDirectoryMissing(path: String)
 
     public var errorDescription: String? {
         switch self {
@@ -59,6 +69,9 @@ public enum WorkspaceError: LocalizedError {
         case .configError(let message): return "Configuration error: \(message)"
         case .databaseMigrationFailed(let message): return message
         case .daemonHandoffInProgress: return "spacesd is handing off to an updated daemon."
+        case .sessionNotResumable(let message): return message
+        case .restorePending(let message): return message
+        case .workingDirectoryMissing(let path): return "Working directory no longer exists: \(path)"
         case .missingTrackedWindow(let context):
             switch context.kind {
             case .browserSession: return "Window missing: Browser session '\(context.title)' is no longer available."

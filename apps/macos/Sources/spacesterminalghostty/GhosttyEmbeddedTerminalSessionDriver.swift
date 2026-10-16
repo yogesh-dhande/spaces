@@ -166,6 +166,59 @@
             finalizeSessionAdoption(createdSession, hostPTY: hostPTY, initialSize: lastKnownSurfaceSize ?? hostPTY.surfaceCellSize())
         }
 
+        /// Fresh start of a session whose `output.log` already holds a seed transcript (a lost shell's old
+        /// output; see `TerminalLostShellSeed`): the seed is replayed into the new surface BEFORE the child is
+        /// forked, so the shell's first bytes land below it. The grid converges to the seed's `columns` x
+        /// `rows` first, as in a handoff, so the replay wraps as the lost shell's screen did and the shell
+        /// starts at that size. `async` for the reason `adoptFromHandoff` is.
+        func startIfNeeded(replayingOutputLogAt outputLogPath: String, columns: Int, rows: Int) async throws {
+            guard session == nil, hostPTY == nil else { return }
+
+            let (createdSession, hostPTY) = try configureNewSession()
+
+            _ = resizeCellGrid(columns: columns, rows: rows)
+
+            try await replayOutputLogWithoutPersisting(createdSession, at: outputLogPath)
+
+            do { try hostPTY.startIfNeeded() } catch {
+                rollbackSessionConfiguration(createdSession)
+                throw error
+            }
+
+            finalizeSessionAdoption(createdSession, hostPTY: hostPTY, initialSize: lastKnownSurfaceSize ?? hostPTY.surfaceCellSize())
+        }
+
+        /// Streams `output.log` into the surface through the exact path a live PTY byte takes
+        /// (`outputPipe.process` → `ghostty_session_process_output`), leaving the file itself untouched.
+        ///
+        /// Suppress the surface data-callback sink for the duration of the replay: `process_output`
+        /// re-emits every processed byte to the data callback (that callback is the host's
+        /// persistence/broadcast tee, which is how output.log gets written in the first place), so leaving
+        /// it wired would append the entire transcript to output.log a second time. The screen is still
+        /// fully reconstructed — the callback only tees, it does not parse. The clipboard is suppressed for
+        /// the same window (see `GhosttyEmbeddedSurfaceUserData.isReplayingHistoricalOutput`): re-pushing
+        /// every OSC 52 the transcript ever carried would overwrite the owner's clipboard with stale text.
+        /// The suppression outlives the replay by one `tick`, which is what drains the surface messages
+        /// the replay queued and therefore fires their clipboard callbacks.
+        ///
+        /// The replay suspends this actor, so `terminate()` can run and free `createdSession` meanwhile
+        /// (shutdown, handoff). The resumed caller must not touch the freed session or start a PTY, so this
+        /// throws when the session it was given is no longer the driver's.
+        private func replayOutputLogWithoutPersisting(_ createdSession: ghostty_session_t, at outputLogPath: String) async throws {
+            let restoreOutputHandler = outputHandler
+            outputHandler = nil
+            surfaceUserData?.setReplayingHistoricalOutput(true)
+            await replayOutputLogOffMainActor(at: outputLogPath, startingAt: 0)
+            guard session == createdSession else {
+                throw GhosttyEmbeddedAppServiceError.configuration(
+                    "Terminal session \(launchConfiguration.sessionID) was terminated while it was starting.")
+            }
+            outputHandler = restoreOutputHandler
+            ghostty_session_refresh(createdSession)
+            GhosttyEmbeddedAppService.shared.tick()
+            surfaceUserData?.setReplayingHistoricalOutput(false)
+        }
+
         /// Resume side of the exec-in-place handoff: rebuild the headless GhosttyKit
         /// session for a PTY this process already owns (its master fd survived `execv`
         /// with `FD_CLOEXEC` cleared and the child stayed our child), replay the
@@ -196,28 +249,8 @@
             //    of the replayed scrollback matches what the pre-handoff daemon rendered.
             _ = resizeCellGrid(columns: columns, rows: rows)
 
-            // 2. Replay the durable output.log through the exact path a live PTY byte
-            //    takes (`outputPipe.process` → `ghostty_session_process_output`).
-            //
-            //    Suppress the surface data-callback sink for the duration of the replay:
-            //    `process_output` re-emits every processed byte to the data callback
-            //    (that callback is the host's persistence/broadcast tee, which is how
-            //    output.log gets written in the first place), so leaving it wired would
-            //    append the entire transcript to output.log a second time. The screen is
-            //    still fully reconstructed — the callback only tees, it does not parse.
-            //    The clipboard is suppressed for the same window (see
-            //    `GhosttyEmbeddedSurfaceUserData.isReplayingHistoricalOutput`): re-pushing every OSC 52
-            //    the transcript ever carried would overwrite the owner's clipboard with stale text. The
-            //    suppression outlives the replay by one `tick`, which is what drains the surface
-            //    messages the replay queued and therefore fires their clipboard callbacks.
-            let restoreOutputHandler = outputHandler
-            outputHandler = nil
-            surfaceUserData?.setReplayingHistoricalOutput(true)
-            await replayOutputLogOffMainActor(at: outputLogPath, startingAt: 0)
-            outputHandler = restoreOutputHandler
-            ghostty_session_refresh(createdSession)
-            GhosttyEmbeddedAppService.shared.tick()
-            surfaceUserData?.setReplayingHistoricalOutput(false)
+            // 2. Replay the durable output.log through the exact path a live PTY byte takes.
+            try await replayOutputLogWithoutPersisting(createdSession, at: outputLogPath)
 
             finalizeSessionAdoption(createdSession, hostPTY: hostPTY, initialSize: (columns: columns, rows: rows), startReadLoop: false)
 

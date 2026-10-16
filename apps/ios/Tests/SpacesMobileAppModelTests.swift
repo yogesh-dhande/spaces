@@ -565,8 +565,7 @@
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(
                     ok: true, message: "Launched workspace.",
-                    result: .mutation(
-                        SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature", notice: notice)))
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature", notice: notice)))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
 
@@ -1724,6 +1723,176 @@
             XCTAssertEqual(payload.processKey, "api")
             XCTAssertEqual(payload.processTemplateID, "template-api")
             XCTAssertFalse(model.isMutating)
+        }
+
+        // MARK: - Lost shell resume
+
+        private func lostShellOverview() -> SpacesDeviceOverviewPayload {
+            makeOverview(
+                sessions: [makeSession(id: "lost-shell", state: .failed)],
+                featureTerminalRows: [
+                    SpacesDeviceWorkspaceTerminalRow(
+                        id: "terminal-window:1", workspaceID: "workspace-feature", title: "shell-1", workingDirectory: "/repo/feature",
+                        sessionID: "lost-shell", runState: .exited, canOpenTerminal: true)
+                ])
+        }
+
+        private func lostShellModel(respond: @escaping @Sendable (SpacesDeviceAPIRequest) async -> SpacesDeviceAPIResponse) -> SpacesMobileAppModel {
+            let settings = SpacesMobileConnectionSettings()
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: SpacesDeviceAPIClient(settings: settings, requestHandler: respond))
+            model.activeDeviceID = "device-1"
+            model.setDeviceOverviewForTesting(lostShellOverview(), deviceID: "device-1")
+            return model
+        }
+
+        func testOpeningALostShellAsksTheDeviceOnceAndMovesToTheReplacement() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let replacementOverview = makeOverview(sessions: [makeSession(id: "fresh-shell")])
+            let model = lostShellModel { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Resumed lost shell.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(
+                            overview: replacementOverview, workspaceID: "workspace-feature", sessionID: "fresh-shell", replacedSessionID: "lost-shell"
+                        )))
+            }
+
+            let first = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+            let second = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+
+            guard case .replaced(let replacement) = first else { return XCTFail("Expected the replacement, got \(first).") }
+            XCTAssertEqual(replacement.id, "fresh-shell")
+            XCTAssertEqual(second, .unchanged, "opening the screen again never asks again")
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["resumeLostShell"])
+            guard case .resumeLostShell(let payload)? = requests.first?.command else { return XCTFail("Expected resumeLostShell.") }
+            XCTAssertEqual(payload.sessionID, "lost-shell")
+            XCTAssertFalse(model.isMutating)
+        }
+
+        /// The screen opened while reconnecting, on an overview that still called the shell running: nothing
+        /// is sent, and the session stays eligible for the fresh overview that reports it failed.
+        func testAStaleOverviewSendsNothingAndTheFreshOneAsksOnce() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let model = lostShellModel { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: false, message: "not lost", errorCode: .conflict)
+            }
+            model.setDeviceOverviewForTesting(
+                makeOverview(
+                    sessions: [makeSession(id: "lost-shell", state: .running)],
+                    featureTerminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-window:1", workspaceID: "workspace-feature", title: "shell-1", workingDirectory: "/repo/feature",
+                            sessionID: "lost-shell", runState: .running, canOpenTerminal: true)
+                    ]), deviceID: "device-1")
+
+            let beforeFreshOverview = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+            let sentBefore = await recorder.snapshot().count
+            model.setDeviceOverviewForTesting(lostShellOverview(), deviceID: "device-1")
+            _ = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+            _ = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+
+            XCTAssertEqual(beforeFreshOverview, .unchanged)
+            XCTAssertEqual(sentBefore, 0)
+            let sentAfter = await recorder.snapshot().count
+            XCTAssertEqual(sentAfter, 1)
+        }
+
+        /// A shell held by a pending restore offer is refused with `.restorePending`; once the offer is
+        /// answered the same screen asks again and the shell is replaced.
+        func testAShellHeldByARestoreOfferIsAskedAgainAfterTheOfferIsAnswered() async {
+            let attempts = SpacesMobileRequestRecorder()
+            let replacementOverview = makeOverview(sessions: [makeSession(id: "fresh-shell")])
+            let model = lostShellModel { request in
+                await attempts.append(request)
+                if await attempts.snapshot().count == 1 { return SpacesDeviceAPIResponse(ok: false, message: "held", errorCode: .restorePending) }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Resumed lost shell.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(
+                            overview: replacementOverview, workspaceID: "workspace-feature", sessionID: "fresh-shell", replacedSessionID: "lost-shell"
+                        )))
+            }
+
+            let held = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+            let afterSkip = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+
+            XCTAssertEqual(held, .unchanged)
+            guard case .replaced(let replacement) = afterSkip else { return XCTFail("Expected the replacement, got \(afterSkip).") }
+            XCTAssertEqual(replacement.id, "fresh-shell")
+        }
+
+        func testAMissingFolderIsReportedAndAConflictIsSilent() async {
+            let folderGone = lostShellModel { _ in
+                SpacesDeviceAPIResponse(ok: false, message: "Working directory no longer exists", errorCode: .workingDirectoryMissing)
+            }
+            let notLost = lostShellModel { _ in SpacesDeviceAPIResponse(ok: false, message: "not a lost shell", errorCode: .conflict) }
+
+            let folderResult = await folderGone.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+            let conflictResult = await notLost.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+
+            XCTAssertEqual(folderResult, .folderMissing)
+            XCTAssertEqual(conflictResult, .unchanged)
+            XCTAssertNil(notLost.errorMessage, "a refusal is not an error to show")
+        }
+
+        /// The screen of a failed shell keeps its loading text from the moment it would ask until the answer;
+        /// a refusal then shows the ended text, and a session that is not a lost-shell candidate shows it at
+        /// once.
+        func testAFailedShellScreenShowsNoEndedTextWhileTheReplacementIsPending() async {
+            let model = lostShellModel { _ in SpacesDeviceAPIResponse(ok: false, message: "not a lost shell", errorCode: .conflict) }
+            let settings = SpacesMobileConnectionSettings()
+            let bridge = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
+            func viewer(sessionID: String) -> TerminalViewerModel {
+                let viewer = TerminalViewerModel(
+                    session: makeSession(id: sessionID, state: .failed), settings: settings, onAuthenticationRequired: { _ in },
+                    onOpenTerminalDeepLink: { _ in }, bridgeClient: bridge)
+                viewer.holdsFailedStateForLostShellResume = { model.holdsFailedLostShellState(sessionID: sessionID, deviceID: "device-1") }
+                return viewer
+            }
+            let endedText = "This terminal session ended before a final render was available."
+            let lost = viewer(sessionID: "lost-shell")
+
+            XCTAssertEqual(lost.visibleText, "Preparing terminal…", "it would ask: nothing failed shows yet, even before the overview lists it")
+
+            _ = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+            XCTAssertEqual(lost.visibleText, endedText, "the device refused: the failed screen shows")
+
+            model.setDeviceOverviewForTesting(makeOverview(sessions: [makeSession(id: "session-api", state: .failed)]), deviceID: "device-1")
+            XCTAssertEqual(viewer(sessionID: "session-api").visibleText, endedText, "a process or agent is not a candidate")
+        }
+
+        func testAFailedShellHeldByARestoreOfferShowsTheFailedScreenInsteadOfWaiting() async {
+            let model = lostShellModel { _ in SpacesDeviceAPIResponse(ok: false, message: "held", errorCode: .restorePending) }
+            XCTAssertTrue(model.holdsFailedLostShellState(sessionID: "lost-shell", deviceID: "device-1"))
+
+            _ = await model.resumeLostShellIfNeeded(sessionID: "lost-shell", deviceID: "device-1")
+
+            XCTAssertFalse(model.holdsFailedLostShellState(sessionID: "lost-shell", deviceID: "device-1"))
+        }
+
+        func testASessionThatIsNotAFailedTerminalRowShellIsNeverAskedAbout() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+            model.setDeviceOverviewForTesting(
+                makeOverview(sessions: [makeSession(id: "session-api", state: .failed), makeSession(id: "done", state: .exited)]),
+                deviceID: "device-1")
+
+            let configuredProcess = await model.resumeLostShellIfNeeded(sessionID: "session-api", deviceID: "device-1")
+            let endedShell = await model.resumeLostShellIfNeeded(sessionID: "done", deviceID: "device-1")
+
+            XCTAssertEqual(configuredProcess, .unchanged)
+            XCTAssertEqual(endedShell, .unchanged)
+            let sent = await recorder.snapshot()
+            XCTAssertTrue(sent.isEmpty)
         }
 
         func testRunProcessTimeoutRequiresFreshSessionWhenRowRetainsExitedSession() async {

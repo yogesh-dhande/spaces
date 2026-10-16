@@ -162,6 +162,10 @@ final class DaemonLivenessState: @unchecked Sendable {
     }
 }
 
+/// Carries the result of `SpacesDaemonController.awaitOnEngine` from the engine task to the waiting thread.
+/// The semaphore's signal/wait pair orders the write before the read, so the box needs no lock.
+private final class EngineResultBox<T: Sendable>: @unchecked Sendable { var value: T? }
+
 /// Lock-guarded holder for the one live `AutomationService`, shared between the main actor (which creates
 /// and clears it across the service's lifecycle) and the off-main automation handlers — the profile-command
 /// `automationCommandOffMain` and the Device API `AutomationOperations` — that resolve it from the transport
@@ -1695,13 +1699,34 @@ enum SpacesDaemonErrorClassification {
         do {
             let sessionCore = try sessionCore(for: launchConfiguration)
             try sessionCore.startIfNeeded()
-            guard let summary = sessionCore.inMemorySessionSummary() else {
-                return TerminalServiceResponse(
-                    ok: false, message: "Terminal session \(launchConfiguration.sessionID) started but produced no summary.",
-                    errorCode: .internalError)
-            }
-            return TerminalServiceResponse(ok: true, message: "Started terminal session \(launchConfiguration.sessionID).", session: summary)
+            return startedSessionResponse(sessionCore, launchConfiguration: launchConfiguration)
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error), errorCode: Self.errorCode(error)) }
+    }
+
+    /// `startSessionCoreResponse` for a session whose `output.log` holds a seed transcript. The core
+    /// replays the seed before it forks the shell, and that replay suspends this actor so Ghostty can tick,
+    /// which is why this variant is async and `startSessionCoreResponse` is not. The same admission
+    /// re-check applies; the core is registered before the replay, so a shutdown or handoff that lands
+    /// during it terminates the core like any other.
+    @TerminalEngineActor private func startSeededSessionCoreResponse(
+        for launchConfiguration: TerminalSessionLaunchConfiguration, grid: (columns: Int, rows: Int)
+    ) async -> TerminalServiceResponse {
+        if let rejection = livenessState.teardownRejection() { return rejection }
+        do {
+            let sessionCore = try sessionCore(for: launchConfiguration)
+            try await sessionCore.startReplayingSeedTranscript(columns: grid.columns, rows: grid.rows)
+            return startedSessionResponse(sessionCore, launchConfiguration: launchConfiguration)
+        } catch { return TerminalServiceResponse(ok: false, message: String(describing: error), errorCode: Self.errorCode(error)) }
+    }
+
+    @TerminalEngineActor private func startedSessionResponse(
+        _ sessionCore: GhosttyEmbeddedSessionCore, launchConfiguration: TerminalSessionLaunchConfiguration
+    ) -> TerminalServiceResponse {
+        guard let summary = sessionCore.inMemorySessionSummary() else {
+            return TerminalServiceResponse(
+                ok: false, message: "Terminal session \(launchConfiguration.sessionID) started but produced no summary.", errorCode: .internalError)
+        }
+        return TerminalServiceResponse(ok: true, message: "Started terminal session \(launchConfiguration.sessionID).", session: summary)
     }
 
     /// RPC `.runWorkspaceCommand` handler. Runs an arbitrary `/bin/bash -lc` command to completion — an
@@ -2604,14 +2629,34 @@ enum SpacesDaemonErrorClassification {
     private nonisolated func launchBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
         -> TerminalServiceSessionSummary
     {
-        let response = TerminalEngineActor.runSynchronously {
-            self.createSession(TerminalServiceCreateRequest(launchConfiguration: launchConfiguration))
+        let response: TerminalServiceResponse
+        if let paths = try? TerminalSessionPaths.forSession(id: launchConfiguration.sessionID), let grid = paths.seedTranscriptGrid() {
+            response = Self.awaitOnEngine { await self.startSeededSessionCoreResponse(for: launchConfiguration, grid: grid) }
+        } else {
+            response = TerminalEngineActor.runSynchronously {
+                self.createSession(TerminalServiceCreateRequest(launchConfiguration: launchConfiguration))
+            }
         }
         guard response.ok else { throw Self.requestFailedError(response.message) }
         guard let summary = response.session else {
             throw Self.requestFailedError("Terminal session \(launchConfiguration.sessionID) started but produced no summary.")
         }
         return summary
+    }
+
+    /// Runs async engine work to completion from a thread that is neither the main thread nor the engine
+    /// queue. The engine actor stays free while `body` is suspended, which `runSynchronously` cannot offer:
+    /// it holds the engine queue for the whole call.
+    private nonisolated static func awaitOnEngine<T: Sendable>(_ body: @escaping @TerminalEngineActor @Sendable () async -> T) -> T {
+        precondition(!Thread.isMainThread && !TerminalEngineActor.isRunningOnEngineQueue, "awaitOnEngine must not block the main or engine thread")
+        let result = EngineResultBox<T>()
+        let finished = DispatchSemaphore(value: 0)
+        Task { @TerminalEngineActor in
+            result.value = await body()
+            finished.signal()
+        }
+        finished.wait()
+        return result.value!
     }
 
     private nonisolated static func requestFailedError(_ message: String) -> NSError {
@@ -2720,8 +2765,9 @@ enum SpacesDaemonErrorClassification {
         _ = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
         if let statusSignal = type.statusSignal {
             let outcome = try orchestrator.recordAgentStatusSignal(
-                statusSignal, origin: .hook, workspaceID: workspaceID, terminalSessionID: sessionID, sessionKey: payload.agentSessionKey.sessionKeyUpdate,
-                detectedAgentLabel: profileAgentRuntimeLabel(sessionID: sessionID), programStatusSessions: programStatusReportingSessions,
+                statusSignal, origin: .hook, workspaceID: workspaceID, terminalSessionID: sessionID,
+                sessionKey: payload.agentSessionKey.sessionKeyUpdate, detectedAgentLabel: profileAgentRuntimeLabel(sessionID: sessionID),
+                programStatusSessions: programStatusReportingSessions,
                 makeNotificationEngine: { makeAgentNotificationEngine(orchestrator: orchestrator) })
             return profileAgentStatusResponse(outcome, eventName: type.rawValue)
         }
@@ -2760,7 +2806,9 @@ enum SpacesDaemonErrorClassification {
             // (see `CodingAgent.countsExitOnlyForLearnedConversation`).
             if let signalingAgent = payload.agent,
                 !signalingAgent.exitSignalCounts(reportedKey: payload.agentSessionKey, rowSessionKey: existingAgent.sessionKey)
-            { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
+            {
+                return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.")
+            }
             // The exit routes through the orchestrator's finalization chokepoint, which renders/enqueues the
             // exited notice to subscribers before finalizing the row (delegating the delete-vs-`.exited`
             // decision to `handleAgentExit`), then tears down the signaling terminal's own subscriber state:
@@ -2780,7 +2828,9 @@ enum SpacesDaemonErrorClassification {
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }
 
-    private nonisolated func profileAgentStatusResponse(_ outcome: AgentStatusSignalOutcome, eventName: String) -> TerminalServiceProfileCommandResponse {
+    private nonisolated func profileAgentStatusResponse(_ outcome: AgentStatusSignalOutcome, eventName: String)
+        -> TerminalServiceProfileCommandResponse
+    {
         switch outcome {
         case .ignored: return TerminalServiceProfileCommandResponse(message: "Agent \(eventName) ignored.")
         case .unchanged: return TerminalServiceProfileCommandResponse(message: "Agent \(eventName) recorded.")
@@ -2821,8 +2871,7 @@ enum SpacesDaemonErrorClassification {
     /// override; the database write is deferred off the engine.
     private nonisolated func handleProgramStatusEvent(sessionID: String, event: TerminalProgramStatusEvent) {
         switch event {
-        case .agentEnded:
-            programStatusReportingSessions.remove(sessionID: sessionID)
+        case .agentEnded: programStatusReportingSessions.remove(sessionID: sessionID)
         case .transition(let transition, let agentLabel):
             programStatusReportingSessions.insert(sessionID: sessionID)
             agentNotificationDeliveryQueue.async { [weak self] in
@@ -3215,8 +3264,7 @@ enum SpacesDaemonErrorClassification {
                 // state write-behind, and a capture taken before it lands would offer the agent back.
                 self?.retainUntilPersistenceDrains(closedCore)
                 self?.clearWorkspaceRunningAfterSessionExit(closedCore)
-            },
-            onProgramStatus: { [weak self] sessionID, event in self?.handleProgramStatusEvent(sessionID: sessionID, event: event) })
+            }, onProgramStatus: { [weak self] sessionID, event in self?.handleProgramStatusEvent(sessionID: sessionID, event: event) })
         sessionCores[launchConfiguration.sessionID] = created
         return created
     }

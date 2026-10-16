@@ -62,6 +62,7 @@ import spacesterminalcore
         .updateWorkspaceMetadata(SpacesDeviceWorkspaceMetadataUpdateRequest(workspaceID: "workspace-1")),
         .openWorkspaceTerminal(SpacesDeviceWorkspaceReference(workspaceID: "workspace-1")),
         .startWorkspaceCommandSession(SpacesDeviceStartWorkspaceCommandSessionRequest(workspaceID: "workspace-1", command: "npm run dev")),
+        .resumeLostShell(SpacesDeviceResumeLostShellRequest(sessionID: "session-1")),
         .stopWorkspaceTerminal(SpacesDeviceWorkspaceTerminalRequest(workspaceID: "workspace-1", sessionID: "session-1")),
         .stopWorkspaceTerminalIfBareShell(SpacesDeviceWorkspaceTerminalRequest(workspaceID: "workspace-1", sessionID: "session-1")),
         .renameTerminalSession(SpacesDeviceTerminalSessionRenameRequest(workspaceID: "workspace-1", sessionID: "session-1", title: "New Title")),
@@ -157,7 +158,7 @@ import spacesterminalcore
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 86)
+        #expect(keys.count == 87)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -228,6 +229,7 @@ import spacesterminalcore
         case .updateWorkspaceMetadata: "updateWorkspaceMetadata"
         case .openWorkspaceTerminal: "openWorkspaceTerminal"
         case .startWorkspaceCommandSession: "startWorkspaceCommandSession"
+        case .resumeLostShell: "resumeLostShell"
         case .stopWorkspaceTerminal: "stopWorkspaceTerminal"
         case .stopWorkspaceTerminalIfBareShell: "stopWorkspaceTerminalIfBareShell"
         case .renameTerminalSession: "renameTerminalSession"

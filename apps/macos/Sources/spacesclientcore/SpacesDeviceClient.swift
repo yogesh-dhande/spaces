@@ -907,6 +907,14 @@ public enum SpacesDeviceClient {
         -> SpacesDeviceAPIResponse
     { try request(.init(command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title))), context: context) }
 
+    /// Asks the owning daemon to replace a shell it lost without an exit with a fresh shell in the same
+    /// terminal row. The mutation result's `sessionID` is the replacement and `replacedSessionID` the
+    /// session to retarget from. A session that is not a lost shell fails with `.conflict`, and one whose
+    /// working directory is gone fails with `.workingDirectoryMissing`.
+    public static func resumeLostShell(sessionID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .resumeLostShell(.init(sessionID: sessionID))), context: context)
+    }
+
     /// Dismisses alerts on the device, so the dismissal reaches every client through the overview.
     public static func dismissAlerts(keys: [String], context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
         try request(.init(command: .dismissAlerts(.init(keys: keys))), context: context)

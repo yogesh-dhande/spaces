@@ -2032,12 +2032,18 @@ public final class WorkspaceOrchestrator {
     /// `workingDirectory` is the workspace directory for everything a caller starts fresh, and the recorded
     /// directory for an agent a restore brings back.
     ///
-    /// Both callers hold the workspace's lifecycle gate and resolve `workspace` inside it — creating
+    /// `replacing` repoints that existing tracked terminal row at the new session instead of inserting a
+    /// row, so the row keeps its id, name and place; a failed launch then leaves the row untouched.
+    /// `transcriptSeed` is written to the new session's directory before it starts, and the core replays
+    /// it into the session at the seed's grid (see `TerminalLostShellSeed`). Only a lost-shell resume passes either.
+    ///
+    /// Callers hold the workspace's lifecycle gate and resolve `workspace` inside it — creating
     /// runtime is a lifecycle action, and a session started while a teardown was between its row snapshot
     /// and its record delete would survive as a live terminal in a directory that no longer exists.
-    @discardableResult private func launchWorkspaceCommandSession(
+    @discardableResult func launchWorkspaceCommandSession(
         project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String,
-        workingDirectory: String, automationRunID: String? = nil, launchCommand: String? = nil
+        workingDirectory: String, automationRunID: String? = nil, launchCommand: String? = nil, replacing replacedWindow: WindowRecord? = nil,
+        transcriptSeed: TerminalTranscriptSeed? = nil, userTitle: String? = nil
     ) throws -> TerminalServiceSessionSummary {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let sessionID = UUID().uuidString
@@ -2059,7 +2065,7 @@ public final class WorkspaceOrchestrator {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workingDirectory,
             shell: shellPath, command: environmentPrefixedCommand, createdAt: TerminalSessionTimestamp.fractionalString(from: Date()),
-            workspaceID: workspace.id, kind: kind, automationRunID: automationRunID, launchCommand: launchCommand)
+            workspaceID: workspace.id, kind: kind, userTitle: userTitle, automationRunID: automationRunID, launchCommand: launchCommand)
 
         // The same pre-spawn release a configured process gets, for the same reason: this environment
         // carries the workspace's `$SPACES_<NAME>_PORT` values, and the command behind it can bind one the
@@ -2084,19 +2090,32 @@ public final class WorkspaceOrchestrator {
                 }
             }
         }
-        let session = try builtInTerminalSessionLauncher(launchConfiguration)
-        let windowRecordID = UUID().uuidString
+        var seededSessionPaths: TerminalSessionPaths?
+        if let transcriptSeed {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.writeSeedTranscript(transcriptSeed)
+            seededSessionPaths = paths
+        }
+        let session: TerminalServiceSessionSummary
+        do { session = try builtInTerminalSessionLauncher(launchConfiguration) } catch {
+            // A seed no session started from would sit in a directory nothing references.
+            if let seededSessionPaths { try? FileManager.default.removeItem(atPath: seededSessionPaths.rootDirectory) }
+            throw error
+        }
+        let windowRecordID = replacedWindow?.id ?? UUID().uuidString
         do {
             let existing = try store.windows(workspaceID: workspace.id)
             try store.upsert(
                 window: WindowRecord(
-                    id: windowRecordID, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: sessionTitle, detail: nil, targetURL: nil,
-                    terminalTrackingID: session.id, role: "terminal",
-                    orderIndex: Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200), lastSeenAt: nowISO8601()))
+                    id: windowRecordID, workspaceID: workspace.id, app: replacedWindow?.app ?? TerminalHost.spaces.appName,
+                    name: replacedWindow?.name ?? sessionTitle, detail: replacedWindow?.detail, targetURL: nil, terminalTrackingID: session.id,
+                    role: "terminal",
+                    orderIndex: replacedWindow?.orderIndex ?? Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200),
+                    lastSeenAt: nowISO8601()))
             try markWorkspaceRunningIfNeeded(workspace)
         } catch {
             terminateBuiltInTerminalSession(session.id)
-            try? store.deleteWindow(id: windowRecordID)
+            if replacedWindow == nil { try? store.deleteWindow(id: windowRecordID) }
             throw error
         }
         launchSucceeded = true
