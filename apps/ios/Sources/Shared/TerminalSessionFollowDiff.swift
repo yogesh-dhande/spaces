@@ -34,8 +34,41 @@ enum TerminalSessionFollowDiff {
         for row: ProcessRowIdentity, displayedSessionID: String, displayedCreatedAt: String, overview: SpacesDeviceOverviewPayload
     ) -> SpacesDeviceTerminalSessionSummary? {
         guard let workspace = overview.workspaces.first(where: { $0.id == row.workspaceID }),
-            let processRow = workspace.processRows.first(where: { $0.id == row.rowID }),
-            let sessionID = processRow.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty, sessionID != displayedSessionID
+            let processRow = workspace.processRows.first(where: { $0.id == row.rowID })
+        else { return nil }
+        return newerSession(
+            named: processRow.sessionID, displayedSessionID: displayedSessionID, displayedCreatedAt: displayedCreatedAt, overview: overview)
+    }
+
+    /// The ad hoc terminal row a viewer opened on. A lost shell is replaced under the same row, so the row
+    /// keeps its id while the session it names changes, exactly like a process row.
+    struct TerminalRowIdentity: Equatable {
+        let workspaceID: String
+        let rowID: String
+    }
+
+    /// Nil for anything but a workspace terminal row.
+    static func terminalRowIdentity(for row: SpacesMobileWorkspaceRuntimeRow) -> TerminalRowIdentity? {
+        guard case .terminal(let terminalRow) = row.source else { return nil }
+        return TerminalRowIdentity(workspaceID: terminalRow.workspaceID, rowID: terminalRow.id)
+    }
+
+    /// `replacementSession(for:displayedSessionID:displayedCreatedAt:overview:)` for a terminal row, which
+    /// is how a viewer on a lost shell learns that another client, or this one, replaced it.
+    static func replacementSession(
+        forTerminal row: TerminalRowIdentity, displayedSessionID: String, displayedCreatedAt: String, overview: SpacesDeviceOverviewPayload
+    ) -> SpacesDeviceTerminalSessionSummary? {
+        guard let workspace = overview.workspaces.first(where: { $0.id == row.workspaceID }),
+            let terminalRow = workspace.terminalRows.first(where: { $0.id == row.rowID })
+        else { return nil }
+        return newerSession(
+            named: terminalRow.sessionID, displayedSessionID: displayedSessionID, displayedCreatedAt: displayedCreatedAt, overview: overview)
+    }
+
+    private static func newerSession(
+        named rowSessionID: String?, displayedSessionID: String, displayedCreatedAt: String, overview: SpacesDeviceOverviewPayload
+    ) -> SpacesDeviceTerminalSessionSummary? {
+        guard let sessionID = rowSessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty, sessionID != displayedSessionID
         else { return nil }
         guard let candidate = overview.sessions.first(where: { $0.id == sessionID }),
             let candidateCreatedAt = TerminalSessionTimestamp.date(from: candidate.createdAt)

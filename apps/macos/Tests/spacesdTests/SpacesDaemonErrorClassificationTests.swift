@@ -20,6 +20,14 @@ import workspacecore
             XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(AutomationCronScheduleError("bad cron")), .invalidArgument)
         }
 
+        /// A shell held by a pending restore offer is refused with its own code, not `.conflict`, so a client
+        /// keeps the session eligible and asks again once the offer is answered.
+        func testLostShellRefusalsKeepAFinalAndATemporaryCodeApart() {
+            XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.restorePending(message: "held")), .restorePending)
+            XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.sessionNotResumable(message: "not lost")), .conflict)
+            XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.workingDirectoryMissing(path: "/gone")), .workingDirectoryMissing)
+        }
+
         func testWorkspaceErrorAndFallbackClassificationsAreUnchanged() {
             XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.missingWorkspace(project: "p", workspace: "w")), .notFound)
             XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.invalidArgument(message: "x")), .invalidArgument)

@@ -359,6 +359,9 @@ import workspacecore
                         inputFailureHandler: { [weak stateModel] error in await stateModel?.reportFailedInputSend(error) ?? false },
                         linkFileLocation: clientKind == .local ? .thisDevice : .anotherDevice)
                 })
+            pane.holdsFailedStateForLostShellResume = { [weak host] in
+                host?.lostShellResume.holdsFailedState(deviceID: resolvedDeviceID, sessionID: sessionID) ?? false
+            }
             let linkOpenCoordinator = TerminalLinkOpenCoordinator(
                 sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: clientKind == .local,
                 workingDirectoryProvider: { [weak stateModel] in

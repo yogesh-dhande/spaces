@@ -100,6 +100,10 @@
 
         func startSessionIfNeeded() throws { try sessionDriver.startIfNeeded() }
 
+        func startSessionIfNeeded(replayingOutputLogAt outputLogPath: String, columns: Int, rows: Int) async throws {
+            try await sessionDriver.startIfNeeded(replayingOutputLogAt: outputLogPath, columns: columns, rows: rows)
+        }
+
         public func requestSurfaceRefresh() { sessionDriver.requestSurfaceRefresh() }
 
         public func prepareRenderStateExport() {
@@ -560,8 +564,7 @@
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             requestSurfaceRefreshAction: (@TerminalEngineActor () -> Void)? = nil,
-            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil,
-            onProgramStatus: TerminalProgramStatusHandler? = nil
+            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil, onProgramStatus: TerminalProgramStatusHandler? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
@@ -590,32 +593,58 @@
             guard !started else { return }
             let startedAt = Date()
             do {
-                try paths.ensureDirectories()
-                enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: true)
-                try ensureOutputHandle()
-                rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
-                rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
-                didTerminateCurrentRun = false
-                started = true
+                try prepareToStart(keepingExistingTranscript: false)
                 try rendererHostStorage.startSessionIfNeeded()
-                guard started, !didTerminateCurrentRun else { return }
-                try startControlServer()
-                try startStateStreamServer()
-                startRuntimeStateTimer()
-                refreshRuntimeState(force: true)
-                sessionStartedAt = startedAt
-                didLogFirstOutput = false
-                broadcastCurrentState(reason: .initial)
-                TerminalPerformance.logMetric(
-                    "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
-            } catch {
-                TerminalPerformance.logMetric(
-                    "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                started = false
-                throw error
-            }
+                try finishStart(startedAt: startedAt)
+            } catch { throw abandonStart(startedAt: startedAt, error: error) }
+        }
+
+        /// Starts a session whose `output.log` already holds a seed transcript (see `TerminalLostShellSeed`).
+        /// The seed is replayed into the surface silently and the file is kept as is, so the transcript and
+        /// the screen agree and the shell's first bytes append after the seed. Async because the replay waits
+        /// on Ghostty's IO, which only drains while the engine actor is free to tick.
+        public func startReplayingSeedTranscript(columns: Int, rows: Int) async throws {
+            guard !started else { return }
+            let startedAt = Date()
+            do {
+                try prepareToStart(keepingExistingTranscript: true)
+                // The seed's bells and program-status reports are history; the replay bracket in the driver
+                // keeps them from surfacing as alerts on a shell that just started.
+                try await rendererHostStorage.startSessionIfNeeded(replayingOutputLogAt: paths.outputPath, columns: columns, rows: rows)
+                try finishStart(startedAt: startedAt)
+            } catch { throw abandonStart(startedAt: startedAt, error: error) }
+        }
+
+        private func prepareToStart(keepingExistingTranscript: Bool) throws {
+            try paths.ensureDirectories()
+            enqueueLaunchConfigurationWrite(clearingPreviousRunRuntimeState: true)
+            if keepingExistingTranscript { try openOutputHandlePreservingTranscript() } else { try ensureOutputHandle() }
+            rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
+            rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
+            didTerminateCurrentRun = false
+            started = true
+        }
+
+        private func finishStart(startedAt: Date) throws {
+            guard started, !didTerminateCurrentRun else { return }
+            try startControlServer()
+            try startStateStreamServer()
+            startRuntimeStateTimer()
+            refreshRuntimeState(force: true)
+            sessionStartedAt = startedAt
+            didLogFirstOutput = false
+            broadcastCurrentState(reason: .initial)
+            TerminalPerformance.logMetric(
+                "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
+        }
+
+        private func abandonStart(startedAt: Date, error: Error) -> Error {
+            TerminalPerformance.logMetric(
+                "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+            started = false
+            return error
         }
 
         public func attachClient(_ client: TerminalClient, mode: TerminalAttachmentMode) throws {
@@ -1875,9 +1904,7 @@
             let afterScreenState = captureLiveSessionScreenState()
             guard let beforeOffset = beforeScreenState.snapshot?.scrollbarOffset, let afterOffset = afterScreenState.snapshot?.scrollbarOffset,
                 beforeOffset != afterOffset
-            else {
-                return TerminalControlResponse(ok: true, message: "Already at scroll boundary.")
-            }
+            else { return TerminalControlResponse(ok: true, message: "Already at scroll boundary.") }
             broadcastCurrentState(reason: .scroll, preCapturedScreenState: afterScreenState)
             return TerminalControlResponse(ok: true, message: "Scrolled terminal.")
         }
@@ -2461,11 +2488,9 @@
                 // announcement below and only forces the runtime-state write the clients read the
                 // timestamp from. `ring` returning nil is the coalescing window absorbing this bell.
                 //
-                // A daemon handoff replays the transcript through this same surface, so every bell the
-                // scrollback ever carried is re-emitted here and stamps a fresh timestamp. The window
-                // collapses that whole replay into a single alert, which is the bound accepted for it:
-                // GhosttyKit delivers surface actions asynchronously, so nothing at this layer can tell
-                // a replayed bell from a live one.
+                // Bells in a transcript replay (handoff, lost-shell seed) never reach here: the action
+                // callback drops them while the replay bracket is open, because delivery is a later engine
+                // turn that can no longer tell a replayed bell from a live one.
                 //
                 // One timestamp per session is the alert model: a later bell REPLACES the identity, so a
                 // bell a client suppresses as watched can supersede an earlier unwatched one that never
@@ -2727,8 +2752,7 @@
                 baseline.snapshot == snapshot, capturedScreenState.scrollRects.isEmpty,
                 // A subscriber owed a full frame holds no baseline at all, so a match against the stream's
                 // baseline says nothing about what it is showing: keep that promise instead of suppressing.
-                renderUpdateProducer.forcedFullReason(for: .stateChange, exportMode: .streamDeltaAllowed) == nil,
-                !didExportScreenOutsideTheStream
+                renderUpdateProducer.forcedFullReason(for: .stateChange, exportMode: .streamDeltaAllowed) == nil, !didExportScreenOutsideTheStream
             {
                 // The stream's baseline deliberately stays where it is, revision included. It names the
                 // frame every subscriber actually received, and the next delta is diffed against it; moving
@@ -3251,9 +3275,7 @@
                     readerHoldsCurrentFrame
                     ? nil
                     : frame.map {
-                        makeRenderUpdate(
-                            for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects,
-                            exportMode: exportMode)
+                        makeRenderUpdate(for: $0, reason: reason, nativeScrollRects: resolvedScreenState.scrollRects, exportMode: exportMode)
                     }
                 if renderUpdateValue != nil, markNextBroadcastFull { renderUpdateProducer.armSubscriberBaselineReset() }
                 // Deliberately not armed when the omission was the held-frame match above: that arm exists
@@ -3362,8 +3384,7 @@
             exportMode: RenderStateExportMode = .selfContained
         ) -> GhosttyRenderUpdate {
             renderUpdateProducer.makeUpdate(
-                for: frame, reason: TerminalRemoteSessionStateReason(rawValue: reason), nativeScrollRects: nativeScrollRects,
-                exportMode: exportMode)
+                for: frame, reason: TerminalRemoteSessionStateReason(rawValue: reason), nativeScrollRects: nativeScrollRects, exportMode: exportMode)
         }
 
         /// The session revision this export stamps on a frame carrying `snapshot`.
@@ -3410,16 +3431,16 @@
         /// had pending when it was taken. Passing one of these back into the export path is what lets a
         /// caller emit the exact frame it already inspected instead of racing a second capture against it.
         private typealias LiveSessionScreenState = (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation],
-            transcriptByteOffset: UInt64, transcriptFileIdentity: UInt64
+            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], transcriptByteOffset: UInt64,
+            transcriptFileIdentity: UInt64
         )
 
         private func resolveRemoteScreenState(
             runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?,
             preCapturedScreenState: LiveSessionScreenState? = nil
         ) -> (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation],
-            transcriptByteOffset: UInt64, transcriptFileIdentity: UInt64, source: String
+            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], transcriptByteOffset: UInt64,
+            transcriptFileIdentity: UInt64, source: String
         ) {
             let liveSessionScreenState = preCapturedScreenState ?? captureLiveSessionScreenState()
             let sessionSnapshot = liveSessionScreenState.snapshot
@@ -3461,8 +3482,7 @@
             let sessionSnapshotText = sessionSnapshot == nil ? rendererHostStorage.sessionSnapshotText() : nil
             return (
                 snapshot: sessionSnapshot, snapshotText: sessionSnapshotText, scrollRects: capturedRenderState?.scrollRects ?? [],
-                transcriptByteOffset: transcriptByteOffset ?? 0,
-                transcriptFileIdentity: transcriptFileIdentity
+                transcriptByteOffset: transcriptByteOffset ?? 0, transcriptFileIdentity: transcriptFileIdentity
             )
         }
 
