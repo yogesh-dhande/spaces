@@ -1185,7 +1185,7 @@ Each platform has its own type so neither range constrains the other: iOS `Termi
 - No offline unlock: unreachable StoreKit with no entitlement is `notEntitled`. An empty product list is a load failure (`productLoadOutcome`), so the paywall offers a retry.
 - Trial copy requires a configured offer and per-customer `isEligibleForIntroOffer` (default false), through `SubscriptionPricing.showsTrial`.
 - `SPACES_MOBILE_PAYWALL_BYPASS=1` skips the paywall for e2e and UI tests, honored only under `#if DEBUG`.
-- `SpacesMobile.storekit` mirrors the product for local runs; `PrivacyInfo.xcprivacy` declares no tracking or collection.
+- `SpacesMobile.storekit` mirrors the product for local runs; `PrivacyInfo.xcprivacy` declares no tracking and two collected types (device ID and other data) for push alert delivery, not linked to the user, matching the App Store privacy label.
 
 ### iOS Demo Mode
 
