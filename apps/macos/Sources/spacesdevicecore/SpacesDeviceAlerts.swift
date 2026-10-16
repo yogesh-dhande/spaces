@@ -113,6 +113,13 @@ extension SpacesDeviceOverviewPayload {
         }
     }
 
+    /// The counts the push relay needs, derived from the same visible candidates the phone's Alerts tab
+    /// lists, so the badge on the home screen always equals the badge inside the app.
+    public func visibleAlertCounts() -> SpacesDeviceAlertCounts {
+        let candidates = visibleAlertCandidates()
+        return SpacesDeviceAlertCounts(total: candidates.count, blockedAgents: candidates.filter { $0.kind == .agentWaiting }.count)
+    }
+
     /// The keys of the end-of-session alerts (a terminal or configured process that exited or failed) that
     /// belong to `sessionIDs`. Bells, agent alerts, automation runs, and flags are never included: a
     /// session ending does not answer them.

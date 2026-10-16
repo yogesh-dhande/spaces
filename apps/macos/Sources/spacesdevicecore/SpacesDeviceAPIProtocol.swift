@@ -2643,6 +2643,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case renameAgentSession(SpacesDeviceAgentSessionRenameRequest)
     /// Dismisses alerts on the device so the dismissal reaches every client; see `SpacesDeviceDismissAlertsRequest`.
     case dismissAlerts(SpacesDeviceDismissAlertsRequest)
+    /// Stores the calling phone's push registration on its pairing record; see `SpacesDeviceRegisterPushNotificationsRequest`.
+    case registerPushNotifications(SpacesDeviceRegisterPushNotificationsRequest)
+    /// Clears the calling phone's push registration and drops this device's counts from its badge.
+    case unregisterPushNotifications(SpacesDeviceUnregisterPushNotificationsRequest)
     /// Reports that the user stayed on a terminal; see `SpacesDeviceVisitTerminalSessionRequest`.
     case visitTerminalSession(SpacesDeviceVisitTerminalSessionRequest)
     case setComeBackLater(SpacesDeviceSetComeBackLaterRequest)
@@ -2795,6 +2799,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .stopCodingAgent: "stopCodingAgent"
         case .renameAgentSession: "renameAgentSession"
         case .dismissAlerts: "dismissAlerts"
+        case .registerPushNotifications: "registerPushNotifications"
+        case .unregisterPushNotifications: "unregisterPushNotifications"
         case .visitTerminalSession: "visitTerminalSession"
         case .setComeBackLater: "setComeBackLater"
         case .state: "state"
@@ -3001,6 +3007,8 @@ extension SpacesDeviceAPICommand: Codable {
         case stopCodingAgent
         case renameAgentSession
         case dismissAlerts
+        case registerPushNotifications
+        case unregisterPushNotifications
         case visitTerminalSession
         case setComeBackLater
         case state
@@ -3109,6 +3117,10 @@ extension SpacesDeviceAPICommand: Codable {
         case .stopCodingAgent: self = .stopCodingAgent(try container.decode(SpacesDeviceCodingAgentMutationRequest.self, forKey: key))
         case .renameAgentSession: self = .renameAgentSession(try container.decode(SpacesDeviceAgentSessionRenameRequest.self, forKey: key))
         case .dismissAlerts: self = .dismissAlerts(try container.decode(SpacesDeviceDismissAlertsRequest.self, forKey: key))
+        case .registerPushNotifications:
+            self = .registerPushNotifications(try container.decode(SpacesDeviceRegisterPushNotificationsRequest.self, forKey: key))
+        case .unregisterPushNotifications:
+            self = .unregisterPushNotifications(try container.decode(SpacesDeviceUnregisterPushNotificationsRequest.self, forKey: key))
         case .visitTerminalSession: self = .visitTerminalSession(try container.decode(SpacesDeviceVisitTerminalSessionRequest.self, forKey: key))
         case .setComeBackLater: self = .setComeBackLater(try container.decode(SpacesDeviceSetComeBackLaterRequest.self, forKey: key))
         case .state: self = .state(try container.decode(SpacesDeviceTerminalSessionRequest.self, forKey: key))
@@ -3222,6 +3234,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .stopCodingAgent(let payload): try container.encode(payload, forKey: .stopCodingAgent)
         case .renameAgentSession(let payload): try container.encode(payload, forKey: .renameAgentSession)
         case .dismissAlerts(let payload): try container.encode(payload, forKey: .dismissAlerts)
+        case .registerPushNotifications(let payload): try container.encode(payload, forKey: .registerPushNotifications)
+        case .unregisterPushNotifications(let payload): try container.encode(payload, forKey: .unregisterPushNotifications)
         case .visitTerminalSession(let payload): try container.encode(payload, forKey: .visitTerminalSession)
         case .setComeBackLater(let payload): try container.encode(payload, forKey: .setComeBackLater)
         case .state(let payload): try container.encode(payload, forKey: .state)
