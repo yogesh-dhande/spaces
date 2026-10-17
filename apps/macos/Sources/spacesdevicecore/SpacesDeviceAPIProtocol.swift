@@ -2663,6 +2663,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// remote daemon's database changes, so paired clients stay live without
     /// polling. No payload: one overview stream per connection.
     case subscribeDeviceOverview
+    /// Long-lived subscription that streams `SpacesDeviceResourcesFrame`s measuring the daemon's own
+    /// machine. The daemon samples only while a client holds this subscription. No payload: one
+    /// device-wide stream.
+    case subscribeDeviceResources
     /// Reports availability + Spaces hook-install status for supported coding agents on the daemon host.
     case agentHooksStatus
     /// Idempotently installs Spaces lifecycle hooks for the requested coding agents on the daemon host.
@@ -2807,6 +2811,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
         case .subscribeDeviceOverview: "subscribeDeviceOverview"
+        case .subscribeDeviceResources: "subscribeDeviceResources"
         case .agentHooksStatus: "agentHooksStatus"
         case .installAgentHooks: "installAgentHooks"
         case .trustAgentHooks: "trustAgentHooks"
@@ -2885,11 +2890,18 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
 
     public var isSubscriptionCommand: Bool {
         switch self {
-        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
-            .subscribeWorkspaceFileListSignature:
+        case .subscribe, .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature,
+            .subscribeWorkspaceFileSignature, .subscribeWorkspaceFileListSignature:
             true
         default: false
         }
+    }
+
+    /// True for the device-resources subscription, which streams machine measurements rather than
+    /// terminal state and is not tied to a terminal session.
+    public var isDeviceResourcesSubscription: Bool {
+        if case .subscribeDeviceResources = self { return true }
+        return false
     }
 
     /// True for the device-overview subscription, which streams overview payloads
@@ -3013,6 +3025,7 @@ extension SpacesDeviceAPICommand: Codable {
         case resolveTerminalLink
         case readTerminalLinkChunk
         case subscribeDeviceOverview
+        case subscribeDeviceResources
         case agentHooksStatus
         case installAgentHooks
         case trustAgentHooks
@@ -3123,6 +3136,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribeDeviceOverview:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .subscribeDeviceOverview
+        case .subscribeDeviceResources:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .subscribeDeviceResources
         case .agentHooksStatus:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .agentHooksStatus
@@ -3234,6 +3250,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
         case .subscribeDeviceOverview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceOverview)
+        case .subscribeDeviceResources: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceResources)
         case .agentHooksStatus: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .agentHooksStatus)
         case .installAgentHooks(let payload): try container.encode(payload, forKey: .installAgentHooks)
         case .trustAgentHooks(let payload): try container.encode(payload, forKey: .trustAgentHooks)
