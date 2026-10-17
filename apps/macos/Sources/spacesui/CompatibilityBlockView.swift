@@ -37,6 +37,10 @@ final class CompatibilityBlockView: NSView {
         /// The daemon is too old and nothing newer is staged; `daemonVersion` is `nil` only in the
         /// no-status conservative fallback.
         case installUpdateOnDevice(daemonVersion: String?)
+        /// The device updates itself: the block offers the update and then follows it through download,
+        /// install and restart. `isBlocked` is a wire-incompatible daemon, whose Available state keeps the
+        /// "can't connect" eyebrow because the update is also what makes the device usable again.
+        case selfUpdate(DaemonSelfUpdatePresentation, channel: DaemonUpdateChannel, isBlocked: Bool)
 
         /// The only case whose block carries a Try Again action, because it is the only one Spaces can
         /// resolve by asking the device to apply what is already installed on it.
@@ -86,13 +90,36 @@ final class CompatibilityBlockView: NSView {
         /// Whether a spinner accompanies the copy, for the one state that waits on work Spaces itself
         /// started: the Update-over-SSH installer run.
         let showsProgress: Bool
+        /// Orange states a problem; accent states an update that is on offer or under way.
+        var eyebrowTone: EyebrowTone = .warning
+        /// The bar a self-update shows while it downloads, installs or restarts.
+        var progressBar: ProgressBar?
+    }
+
+    enum EyebrowTone: Equatable {
+        case warning
+        case accent
+    }
+
+    enum ProgressBar: Equatable {
+        /// Fraction of the download received, 0 to 1.
+        case determinate(Double)
+        /// Work with no measurable extent: an unknown download size, installing, restarting.
+        case indeterminate
+    }
+
+    /// What the block needs of a device's self-update to pick its remedy: the resolved presentation and
+    /// the channel the device follows, which names the Available who-line.
+    struct SelfUpdateFacts: Equatable {
+        let presentation: DaemonSelfUpdatePresentation
+        let channel: DaemonUpdateChannel
     }
 
     private let onAction: (() -> Void)?
 
     init(
         remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, canUpdateOverSSH: Bool, isUpdatingOverSSH: Bool,
-        onRetryStagedApply: (() -> Void)?, onCheckForUpdates: (() -> Void)?, onUpdateOverSSH: (() -> Void)?
+        onRetryStagedApply: (() -> Void)?, onCheckForUpdates: (() -> Void)?, onUpdateOverSSH: (() -> Void)?, onSelfUpdateAction: (() -> Void)?
     ) {
         let content = Self.content(
             remedy: remedy, deviceName: deviceName, isLocalDevice: isLocalDevice, isLinuxDaemon: isLinuxDaemon, clientVersion: AppVersion.short,
@@ -106,6 +133,7 @@ final class CompatibilityBlockView: NSView {
         case .applyStagedUpdate: onAction = onRetryStagedApply
         case .installUpdateOnDevice: onAction = isLocalDevice ? onCheckForUpdates : onUpdateOverSSH
         case .updateClient: onAction = nil
+        case .selfUpdate: onAction = onSelfUpdateAction
         }
         super.init(frame: .zero)
 
@@ -118,49 +146,67 @@ final class CompatibilityBlockView: NSView {
         stack.spacing = 0  // every gap is set explicitly below, since the hero's rhythm is not uniform
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let eyebrow = NSTextField(labelWithAttributedString: Self.eyebrowText(content.eyebrow))
+        let eyebrow = NSTextField(labelWithAttributedString: Self.eyebrowText(content.eyebrow, tone: content.eyebrowTone))
+        // One line however long the device name is; the tooltip keeps the full text reachable.
+        eyebrow.maximumNumberOfLines = 1
+        eyebrow.lineBreakMode = .byTruncatingTail
+        eyebrow.toolTip = content.eyebrow.uppercased()
+        eyebrow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(eyebrow)
+        eyebrow.widthAnchor.constraint(lessThanOrEqualToConstant: Self.bodyMeasure).isActive = true
         stack.setCustomSpacing(14, after: eyebrow)
 
         let pair = Self.versionPairRow(content.versionPair)
         stack.addArrangedSubview(pair)
         stack.setCustomSpacing(8, after: pair)
 
-        let whoLine = NSTextField(labelWithString: content.whoLine)
+        let whoLine = NSTextField(wrappingLabelWithString: content.whoLine)
         whoLine.font = Typography.metadata
         whoLine.textColor = Theme.mutedSecondary
+        whoLine.alignment = .center
+        // Same measure as the body, so a long device name wraps inside the column instead of clipping.
+        whoLine.preferredMaxLayoutWidth = Self.bodyMeasure
         stack.addArrangedSubview(whoLine)
         stack.setCustomSpacing(18, after: whoLine)
 
-        let body = NSTextField(wrappingLabelWithString: content.body)
-        body.font = Typography.body
-        body.textColor = Theme.muted
-        body.alignment = .center
-        // A wrapping label's intrinsic width is its narrowest, so without a stated measure the whole
-        // hero collapses to a tall column of two-word lines. This is the sentence's line length, and
-        // it sets the block's width; the pane caps it well above this.
-        body.preferredMaxLayoutWidth = Self.bodyMeasure
-        // The spinner belongs to the sentence that says what is running, so it sits beside it rather
-        // than floating as its own row.
-        let bodyRow: NSView
-        if content.showsProgress {
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            let spinner = NSProgressIndicator()
-            spinner.style = .spinning
-            spinner.controlSize = .small
-            spinner.isDisplayedWhenStopped = false
-            spinner.startAnimation(nil)
-            row.addArrangedSubview(spinner)
-            row.addArrangedSubview(body)
-            bodyRow = row
-        } else {
-            bodyRow = body
+        // The Downloading state states its fact in the who-line and has no sentence to add.
+        if !content.body.isEmpty {
+            let body = NSTextField(wrappingLabelWithString: content.body)
+            body.font = Typography.body
+            body.textColor = Theme.muted
+            body.alignment = .center
+            // A wrapping label's intrinsic width is its narrowest, so without a stated measure the whole
+            // hero collapses to a tall column of two-word lines. This is the sentence's line length, and
+            // it sets the block's width; the pane caps it well above this.
+            body.preferredMaxLayoutWidth = Self.bodyMeasure
+            // The spinner belongs to the sentence that says what is running, so it sits beside it rather
+            // than floating as its own row.
+            let bodyRow: NSView
+            if content.showsProgress {
+                let row = NSStackView()
+                row.orientation = .horizontal
+                row.alignment = .centerY
+                row.spacing = 8
+                let spinner = NSProgressIndicator()
+                spinner.style = .spinning
+                spinner.controlSize = .small
+                spinner.isDisplayedWhenStopped = false
+                spinner.startAnimation(nil)
+                row.addArrangedSubview(spinner)
+                row.addArrangedSubview(body)
+                bodyRow = row
+            } else {
+                bodyRow = body
+            }
+            stack.addArrangedSubview(bodyRow)
+            stack.setCustomSpacing(content.progressBar != nil ? 12 : (content.footnote == nil ? 18 : 6), after: bodyRow)
         }
-        stack.addArrangedSubview(bodyRow)
-        stack.setCustomSpacing(content.footnote == nil ? 18 : 6, after: bodyRow)
+
+        if let progressBar = content.progressBar {
+            let bar = Self.progressBarView(progressBar)
+            stack.addArrangedSubview(bar)
+            stack.setCustomSpacing(content.footnote == nil ? 18 : 6, after: bar)
+        }
 
         if let footnote = content.footnote {
             let label = NSTextField(labelWithString: footnote)
@@ -205,9 +251,37 @@ final class CompatibilityBlockView: NSView {
     private static let bodyMeasure: CGFloat = 340
 
     /// Uppercase and letter-spaced so a 11 pt line reads as a label for what follows rather than as
-    /// another sentence. Orange is confined to this string.
-    private static func eyebrowText(_ text: String) -> NSAttributedString {
-        NSAttributedString(string: text, attributes: [.font: Typography.metadataTitle, .foregroundColor: Theme.orange, .kern: 1.2])
+    /// another sentence. Orange is confined to this string, and so is the accent that marks an update on
+    /// offer or under way. Uppercased here so the shared self-update copy stays in sentence case.
+    private static func eyebrowText(_ text: String, tone: EyebrowTone) -> NSAttributedString {
+        let color = tone == .accent ? Theme.accent : Theme.orange
+        // An attributed string's own paragraph style decides how it breaks, so the label's tail truncation
+        // only takes effect when the string asks for it too.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        paragraph.alignment = .center
+        return NSAttributedString(
+            string: text.uppercased(), attributes: [.font: Typography.metadataTitle, .foregroundColor: color, .kern: 1.2, .paragraphStyle: paragraph])
+    }
+
+    /// The self-update bar, as wide as the body sentence so the two read as one column.
+    private static func progressBarView(_ progress: ProgressBar) -> NSProgressIndicator {
+        let bar = NSProgressIndicator()
+        bar.style = .bar
+        bar.controlSize = .small
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.widthAnchor.constraint(equalToConstant: bodyMeasure).isActive = true
+        switch progress {
+        case .determinate(let fraction):
+            bar.isIndeterminate = false
+            bar.minValue = 0
+            bar.maxValue = 1
+            bar.doubleValue = min(max(fraction, 0), 1)
+        case .indeterminate:
+            bar.isIndeterminate = true
+            bar.startAnimation(nil)
+        }
+        return bar
     }
 
     /// `from → to`, at the largest role the chrome scale has. Digit-monospaced so the two versions
@@ -288,6 +362,69 @@ final class CompatibilityBlockView: NSView {
         }
     }
 
+    /// `blockRemedy(verdict:status:)` with a device's self-update folded in. A self-update in play takes
+    /// the block over from the install-it-yourself guidance (`.installUpdateOnDevice`) and from having no
+    /// block at all (a compatible device, or one that is away mid-restart, which has no verdict). It never
+    /// displaces the remedies that are not about updating that daemon: an app that must update, or a build
+    /// already staged on the device.
+    nonisolated static func blockRemedy(verdict: SpacesWireCompatibility?, status: TerminalServiceDaemonStatus?, selfUpdate: SelfUpdateFacts?)
+        -> BlockRemedy?
+    {
+        let base = verdict.flatMap { blockRemedy(verdict: $0, status: status) }
+        guard let selfUpdate, selfUpdate.presentation != .none else { return base }
+        switch base {
+        case .updateClient?, .applyStagedUpdate?: return base
+        default: return .selfUpdate(selfUpdate.presentation, channel: selfUpdate.channel, isBlocked: verdict?.isCompatible == false)
+        }
+    }
+
+    /// The self-update block's copy, from the shared `DaemonSelfUpdateCopy` strings.
+    private nonisolated static func selfUpdateContent(
+        _ presentation: DaemonSelfUpdatePresentation, channel: DaemonUpdateChannel, isBlocked: Bool, deviceName: String
+    ) -> Content {
+        let channelWhoLine = DaemonSelfUpdateCopy.macWhoLine(deviceName: deviceName, channel: channel)
+        func content(
+            eyebrow: String, from: String, to: String, whoLine: String? = nil, body: String = "", footnote: String? = nil, button: String? = nil,
+            tone: EyebrowTone = .accent, bar: ProgressBar? = nil
+        ) -> Content {
+            Content(
+                eyebrow: eyebrow, versionPair: VersionPair(from: from, to: to), whoLine: whoLine ?? channelWhoLine, body: body, footnote: footnote,
+                installerCommand: nil, actionButtonTitle: button, showsProgress: false, eyebrowTone: tone, progressBar: bar)
+        }
+        let updating = DaemonSelfUpdateCopy.downloadingTitle(deviceName: deviceName)
+        switch presentation {
+        case .none:
+            // Never rendered: no remedy is produced for it.
+            return content(eyebrow: "", from: VersionPair.unknown, to: VersionPair.unknown)
+        case .available(let from, let to):
+            return content(
+                eyebrow: isBlocked ? Self.cannotConnectEyebrow : DaemonSelfUpdateCopy.availableTitle, from: from, to: to,
+                body: DaemonSelfUpdateCopy.macBody(version: to), button: DaemonSelfUpdateCopy.updateButtonTitle,
+                tone: isBlocked ? .warning : .accent)
+        case .downloading(let from, let to, let received, let total):
+            var bar = ProgressBar.indeterminate
+            if let total, total > 0 { bar = .determinate(Double(received) / Double(total)) }
+            return content(
+                eyebrow: updating, from: from, to: to, whoLine: DaemonSelfUpdateCopy.downloadingDetail(received: received, total: total),
+                footnote: DaemonSelfUpdateCopy.downloadingFootnote, bar: bar)
+        case .installing(let from, let to):
+            return content(eyebrow: updating, from: from, to: to, body: DaemonSelfUpdateCopy.installingBody(version: to), bar: .indeterminate)
+        case .restarting(let from, let to):
+            return content(eyebrow: updating, from: from, to: to, body: DaemonSelfUpdateCopy.restartingBody(version: to), bar: .indeterminate)
+        case .stillRestarting(let from, let to):
+            return content(
+                eyebrow: DaemonSelfUpdateCopy.stillRestartingTitle, from: from, to: to,
+                body: DaemonSelfUpdateCopy.stillRestartingBody(version: to), button: DaemonSelfUpdateCopy.tryAgainTitle, tone: .warning)
+        case .updated(let from, let to):
+            return content(eyebrow: DaemonSelfUpdateCopy.updatedTitle, from: from, to: to, body: DaemonSelfUpdateCopy.updatedBody(version: to))
+        case .failed(let from, let to, let reason):
+            return content(
+                eyebrow: DaemonSelfUpdateCopy.failedTitle, from: from, to: to, body: reason, button: DaemonSelfUpdateCopy.tryAgainTitle, tone: .warning)
+        }
+    }
+
+    private static let cannotConnectEyebrow = "CAN'T CONNECT — DAEMON NEEDS AN UPDATE"
+
     /// Builds the block's copy and button choice for `remedy`. `clientVersion` plays no part in picking
     /// the eyebrow, body, or button below; `remedy` already encodes every decision, and a client must
     /// never re-derive one by comparing its own build against a daemon's (unrelated release trains — see
@@ -326,8 +463,11 @@ final class CompatibilityBlockView: NSView {
                 body: DaemonCompatibilityCopy.stagedUpdateNotLandedBody(deviceName: deviceName), footnote: nil,
                 installerCommand: isLinuxDaemon ? linuxApplyStagedUpdateCommand : nil, actionButtonTitle: "Try Again", showsProgress: false)
 
+        case .selfUpdate(let presentation, let channel, let isBlocked):
+            return selfUpdateContent(presentation, channel: channel, isBlocked: isBlocked, deviceName: deviceName)
+
         case .installUpdateOnDevice(let daemonVersion):
-            let eyebrow = "CAN'T CONNECT — DAEMON NEEDS AN UPDATE"
+            let eyebrow = Self.cannotConnectEyebrow
             let runningVersion = daemonVersion ?? VersionPair.unknown
             if isLinuxDaemon {
                 // The installer is pinned to this app's version, so that is exactly what the device ends

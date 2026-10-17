@@ -36,13 +36,14 @@ struct SidebarOutlineDiffTests {
             canStop: true, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil, browserTargetURL: nil)
     }
 
-    private func deviceRow(_ device: SidebarRowDeviceTreatment) -> SidebarOutlineRow {
+    private func deviceRow(_ device: SidebarRowDeviceTreatment, offersSelfUpdate: Bool = false) -> SidebarOutlineRow {
         SidebarOutlineRow(
             cacheKey: "d:\(Self.deviceID)",
             signature: .device(
                 SidebarDeviceRowSignature(
                     displayName: device.displayName ?? "", loadState: device.loadState ?? .loaded, compatibilityActionTitle: nil, isLocal: false,
-                    offersRetry: device.loadState?.isOffline == true, isUpdatePending: false)))
+                    offersRetry: device.loadState?.isOffline == true, isUpdatePending: false,
+                    offersSelfUpdate: offersSelfUpdate)))
     }
 
     private func projectRow(_ project: ProjectSummary, device: SidebarRowDeviceTreatment) -> SidebarOutlineRow {
@@ -88,6 +89,13 @@ struct SidebarOutlineDiffTests {
     @Test func firstApplyRebuildsTheOutline() {
         // Nothing is painted before the first apply, so there is no baseline to repaint against.
         #expect(SidebarOutlineDiff.compute(previous: nil, current: populatedSnapshot(device: loadedDevice())) == .structureChanged)
+    }
+
+    @Test func deviceThatStartsOfferingAnUpdateRepaintsItsHeader() {
+        let device = loadedDevice()
+        var current = populatedSnapshot(device: device)
+        current[0] = deviceRow(device, offersSelfUpdate: true)
+        #expect(SidebarOutlineDiff.compute(previous: populatedSnapshot(device: device), current: current) == .rowsChanged(["d:\(Self.deviceID)"]))
     }
 
     @Test func workspaceStoppingRepaintsOnlyThatWorkspaceRow() {

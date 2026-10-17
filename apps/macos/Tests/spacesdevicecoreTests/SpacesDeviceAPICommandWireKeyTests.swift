@@ -41,7 +41,8 @@ import spacesterminalcore
     /// hand-building a second payload table that could drift out of sync with this one.
     static let samples: [SpacesDeviceAPICommand] = [
         .pair(SpacesDevicePairRequest(pairingCode: "code", pairingNonce: "nonce", clientProtocolVersion: 1)), .ping, .daemonStatus,
-        .requestDaemonRestart, .overview, .createProject(SpacesDeviceProjectCreateRequest(projectDir: "/tmp/project", gitURL: nil)),
+        .requestDaemonRestart, .startDaemonSelfUpdate, .setDaemonUpdateChannel(SpacesDeviceDaemonUpdateChannelRequest(channel: .prerelease)),
+        .overview, .createProject(SpacesDeviceProjectCreateRequest(projectDir: "/tmp/project", gitURL: nil)),
         .previewGitProject(SpacesDeviceGitProjectPreviewRequest(gitURL: "https://example.com/repo.git")),
         .deleteProject(SpacesDeviceProjectReference(projectID: "project-1")),
         .importProject(SpacesDeviceProjectImportRequest(projectID: "project-1")),
@@ -138,7 +139,7 @@ import spacesterminalcore
     /// Wire keys with no associated value, which the encoder always writes as `{}` via
     /// `SpacesDeviceAPIEmptyPayload`. Checked for a fully literal, exact payload in addition to the key.
     private static let emptyPayloadKeys: Set<String> = [
-        "ping", "daemonStatus", "requestDaemonRestart", "overview", "subscribeDeviceOverview", "agentHooksStatus", "listAutomations",
+        "ping", "daemonStatus", "requestDaemonRestart", "startDaemonSelfUpdate", "overview", "subscribeDeviceOverview", "agentHooksStatus", "listAutomations",
     ]
 
     /// Completeness contract for `samples`, split across three layers because no single mechanism covers
@@ -157,7 +158,7 @@ import spacesterminalcore
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 86)
+        #expect(keys.count == 88)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -207,6 +208,8 @@ import spacesterminalcore
         case .ping: "ping"
         case .daemonStatus: "daemonStatus"
         case .requestDaemonRestart: "requestDaemonRestart"
+        case .startDaemonSelfUpdate: "startDaemonSelfUpdate"
+        case .setDaemonUpdateChannel: "setDaemonUpdateChannel"
         case .overview: "overview"
         case .createProject: "createProject"
         case .previewGitProject: "previewGitProject"

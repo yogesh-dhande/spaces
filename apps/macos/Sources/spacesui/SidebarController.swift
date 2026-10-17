@@ -1621,8 +1621,9 @@ private struct DeviceSyncState {
     /// so the outline is reloaded wholesale only when the rows themselves changed (added, removed, or
     /// reordered); otherwise each row whose rendered content changed is reloaded on its own.
     func applySidebarDataChange() {
-        // Device load-state transitions land here. The Devices settings pane paints a status dot per device,
-        // so it repaints from them when it is open and no-ops otherwise.
+        // Device load-state and update-channel changes land here. The Devices settings pane paints a status
+        // dot and a pre-release checkbox per device, so it repaints from them when it is open and no-ops
+        // otherwise.
         host.devicePairing.refreshDeviceSettingsForDeviceStatusChange()
         rebuildFlatSidebarData()
         // An agent changing state, an alert arriving or being dismissed, or a workspace appearing
@@ -1775,7 +1776,15 @@ private struct DeviceSyncState {
             SidebarDeviceRowSignature(
                 displayName: section.displayName, loadState: section.loadState, compatibilityActionTitle: compatibilityActionTitle,
                 isLocal: section.isLocal, offersRetry: deviceSectionOffersRetry(deviceID: section.deviceID),
-                isUpdatePending: section.daemonStatus?.isUpdatePending == true))
+                isUpdatePending: section.daemonStatus?.isUpdatePending == true,
+                offersSelfUpdate: deviceHeaderOffersSelfUpdate(deviceID: section.deviceID, section: section)))
+    }
+
+    /// Shared by the header cell and its row signature so the pill and the repaint trigger cannot disagree.
+    private func deviceHeaderOffersSelfUpdate(deviceID: String, section: DeviceSection?) -> Bool {
+        SidebarDeviceSectionStatus.offersSelfUpdate(
+            compatibility: section?.compatibility, isUpdateStaged: section?.daemonStatus?.isUpdatePending == true,
+            presentation: host.daemonUpdate.selfUpdatePresentation(deviceID: deviceID))
     }
 
     private func projectRowSignature(project: ProjectSummary, device: SidebarRowDeviceTreatment) -> SidebarRowSignature {
@@ -2068,6 +2077,12 @@ private struct DeviceSyncState {
         return outlineItemRef(for: .project(host.deviceModel.projects.first ?? Self.placeholderProject))
     }
 
+    /// Rebuilds one device's header row alone, for a change the header shows that no section data moved
+    /// with (an update attempt starting, or the wait for a restarting device running long).
+    func reloadDeviceHeader(deviceID: String) {
+        host.outlineView.reloadItem(outlineItemRef(for: .device(deviceID)))
+    }
+
     private func outlineItemRef(for item: OutlineItem) -> OutlineItemRef {
         let key = item.cacheKey
         if let existing = outlineItemRefCache[key] {
@@ -2152,15 +2167,9 @@ private struct DeviceSyncState {
         if let compatibility = section?.compatibility, !compatibility.isCompatible {
             // Device headers are non-selectable, so an incompatible device's only affordance is this
             // caption button, which opens the compatibility block (restart/update) in the detail pane.
-            let button = NSButton(
-                title: compatibility == .clientTooOld ? "Update app" : "Resolve", target: self, action: #selector(compatibilityActionClicked(_:)))
-            button.bezelStyle = .inline
-            button.controlSize = .small
-            button.font = Typography.metadataTitle
-            button.contentTintColor = .systemOrange
-            button.identifier = NSUserInterfaceItemIdentifier("compat:\(deviceID)")
-            button.setContentHuggingPriority(.required, for: .horizontal)
-            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+            let button = deviceHeaderCaptionButton(
+                title: compatibility == .clientTooOld ? "Update app" : "Resolve", color: .systemOrange,
+                action: #selector(compatibilityActionClicked(_:)), identifier: "compat:\(deviceID)")
             contentRow.addArrangedSubview(button)
         } else {
             // The offline reason (e.g. the daemon startup error) is surfaced on hover wherever the state
@@ -2183,17 +2192,19 @@ private struct DeviceSyncState {
                 // Device headers are non-selectable, so this caption button is an offline device's only
                 // per-device recovery; without it the user's only option is reloading the whole sidebar. It
                 // also stands in for the offline caption, so it keeps the failed tint and the reason tooltip.
-                let button = NSButton(title: title, target: self, action: #selector(deviceRetryClicked(_:)))
-                button.bezelStyle = .inline
-                button.controlSize = .small
-                button.font = Typography.metadataTitle
-                button.contentTintColor = sidebarFailedIndicatorColor()
-                button.identifier = NSUserInterfaceItemIdentifier("retry:\(deviceID)")
+                let button = deviceHeaderCaptionButton(
+                    title: title, color: sidebarFailedIndicatorColor(), action: #selector(deviceRetryClicked(_:)), identifier: "retry:\(deviceID)")
                 button.toolTip = offlineReason
-                button.setContentHuggingPriority(.required, for: .horizontal)
-                button.setContentCompressionResistancePriority(.required, for: .horizontal)
                 contentRow.addArrangedSubview(button)
             case .none: break
+            }
+            if deviceHeaderOffersSelfUpdate(deviceID: deviceID, section: section) {
+                // Accent, not orange: the device works, and an update is on offer or under way. It opens
+                // the same block the incompatible device's button does.
+                let button = deviceHeaderCaptionButton(
+                    title: DaemonSelfUpdateCopy.updateButtonTitle, color: Theme.accent, action: #selector(selfUpdateActionClicked(_:)),
+                    identifier: "selfupdate:\(deviceID)")
+                contentRow.addArrangedSubview(button)
             }
         }
 
@@ -2950,6 +2961,19 @@ private struct DeviceSyncState {
 
     func sidebarFailedIndicatorColor() -> NSColor { Theme.statusFailed }
 
+    /// A device header's tinted caption button. The color is carried by an attributed title because an
+    /// `.inline` bezel ignores `contentTintColor` for its title and would draw it gray.
+    private func deviceHeaderCaptionButton(title: String, color: NSColor, action: Selector, identifier: String) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .inline
+        button.controlSize = .small
+        button.attributedTitle = NSAttributedString(string: title, attributes: [.font: Typography.metadataTitle, .foregroundColor: color])
+        button.identifier = NSUserInterfaceItemIdentifier(identifier)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return button
+    }
+
     func sidebarIdleIndicatorColor() -> NSColor { SidebarAttentionStatus.inactive.indicatorColor }
 
     func sidebarAttentionColor(_ status: SidebarAttentionStatus) -> NSColor { status.indicatorColor }
@@ -3014,7 +3038,7 @@ private struct DeviceSyncState {
     /// own cadence, run immediately for this device alone and without waiting out its backoff. The
     /// section returns to `.loading` so the click has visible feedback, and the attempt moves it on to
     /// loaded, or back to offline carrying the reason it failed with this time.
-    private func retryDeviceConnection(deviceID: String) {
+    func retryDeviceConnection(deviceID: String) {
         guard deviceSectionOffersRetry(deviceID: deviceID), let index = host.deviceModel.deviceSections.firstIndex(where: { $0.deviceID == deviceID })
         else { return }
         if host.deviceModel.deviceSections[index].isLocal {
@@ -3037,6 +3061,14 @@ private struct DeviceSyncState {
         refreshRemoteOverviewSubscriptions()
     }
 
+    /// One overview pull for a single remote device, for a poll that needs that device's live status (a
+    /// self-update in flight). It clears only this device's backoff, since the poll is asking for this
+    /// device specifically, and leaves the section's load state alone, unlike the user's Retry.
+    func pullRemoteDeviceOverview(deviceID: String) {
+        guard let record = host.macPairedDevices().first(where: { $0.id == deviceID }) else { return }
+        startRemoteOverviewPull(record: record, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short), bypassesBackoff: true)
+    }
+
     private func markDeviceSectionRetrying(deviceID: String, index: Int) {
         DeviceLinkTrace.log(deviceID: deviceID, event: "retry_requested")
         // Reuses the load state a device starts in rather than adding a retrying-specific one: the
@@ -3051,6 +3083,11 @@ private struct DeviceSyncState {
         let deviceID = String(raw.dropFirst("compat:".count))
         guard let verdict = host.deviceCompatibility(forDeviceID: deviceID), !verdict.isCompatible else { return }
         host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict, presentation: .userNavigation)
+    }
+
+    @objc private func selfUpdateActionClicked(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, raw.hasPrefix("selfupdate:") else { return }
+        host.showSelfUpdateBlock(deviceID: String(raw.dropFirst("selfupdate:".count)), presentation: .userNavigation)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {

@@ -51,14 +51,18 @@ import spacesterminalcore
     // MARK: - Update-over-SSH eligibility
 
     @Test func updateOverSSHIsOfferedOnlyForARemoteLinuxDeviceWhosePairingStoredSSHDetails() {
-        #expect(AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: false, isLinuxDaemon: true, hasSSHDetails: true))
+        #expect(AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: false, isLinuxDaemon: true, hasSSHDetails: true, hasSelfUpdate: false))
         // A link-paired Linux device stores no SSH host, so there is nothing to run the installer against.
-        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: false, isLinuxDaemon: true, hasSSHDetails: false))
+        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: false, isLinuxDaemon: true, hasSSHDetails: false, hasSelfUpdate: false))
         // Macs are out regardless: this Mac updates through Sparkle, and a remote Mac's staged update
         // applies over the Device API — neither has a headless installer artifact to run over SSH.
-        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: false, isLinuxDaemon: false, hasSSHDetails: true))
-        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: true, isLinuxDaemon: false, hasSSHDetails: true))
-        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: true, isLinuxDaemon: true, hasSSHDetails: true))
+        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: false, isLinuxDaemon: false, hasSSHDetails: true, hasSelfUpdate: false))
+        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: true, isLinuxDaemon: false, hasSSHDetails: true, hasSelfUpdate: false))
+        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: true, isLinuxDaemon: true, hasSSHDetails: true, hasSelfUpdate: false))
+    }
+
+    @Test func updateOverSSHIsNeverOfferedToADaemonThatUpdatesItself() {
+        #expect(!AppKitController.shouldOfferUpdateOverSSH(isLocalDevice: false, isLinuxDaemon: true, hasSSHDetails: true, hasSelfUpdate: true))
     }
 
     // MARK: - reconcileCompatibilityBlockAction

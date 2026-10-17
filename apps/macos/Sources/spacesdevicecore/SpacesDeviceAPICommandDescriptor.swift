@@ -110,6 +110,10 @@ extension SpacesDeviceAPICommand {
         case .daemonStatus: return Self.descriptor(wireKey: "daemonStatus", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .requestDaemonRestart:
             return Self.descriptor(wireKey: "requestDaemonRestart", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .startDaemonSelfUpdate:
+            return Self.descriptor(wireKey: "startDaemonSelfUpdate", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .setDaemonUpdateChannel:
+            return Self.descriptor(wireKey: "setDaemonUpdateChannel", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .overview: return Self.descriptor(wireKey: "overview", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .createProject: return Self.descriptor(wireKey: "createProject", lane: .projectClone, timeoutSeconds: Self.projectCreateTimeoutSeconds)
         case .previewProject: return Self.descriptor(wireKey: "previewProject", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
