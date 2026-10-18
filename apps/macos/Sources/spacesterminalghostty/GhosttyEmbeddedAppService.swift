@@ -87,9 +87,8 @@ import Foundation
             // never touched again by this thread while it runs (the thread call blocks until the
             // closure returns), so the concurrent access the compiler cannot verify never happens.
             //
-            // ghostty_app_new also opens Ghostty's app-scoped Metal device and fails without one,
-            // even though this app only hosts renderer-free headless sessions. Accepted: every Mac
-            // that runs macOS 14 has a Metal GPU, and Apple Silicon VMs get a paravirtualized one.
+            // Ghostty opens its app-scoped Metal device lazily with the first rendered surface, and
+            // headless sessions never create one, so this renderer-free app needs no GPU.
             nonisolated(unsafe) let runtimeConfigForCall = runtimeConfig
             nonisolated(unsafe) let configForCall = config
             guard
