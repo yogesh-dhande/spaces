@@ -55,6 +55,8 @@ for artifact_id, platform, architecture, archive_name in specs:
         "archive_name": archive_name,
         "url": f"{base_url}/{archive_name}",
         "sha256": digest,
+        # Lets the installer report download progress against a known total.
+        "size": archive_path.stat().st_size,
     })
 
 manifest = {

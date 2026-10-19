@@ -746,6 +746,10 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     /// Skip. Every client reads the offer from here, so a device's own Mac app and a paired phone see the
     /// same list.
     public let restorableSessions: [RestorableSessionSummary]
+    /// The daemon's report of its own update ability, present only on a daemon that can update itself.
+    /// Decoded with `try?` so a shape this build cannot read degrades to nil (no self-update offered)
+    /// instead of failing the status handshake.
+    public let selfUpdate: DaemonSelfUpdateStatus?
 
     /// Protocol version reported when a peer's status omits the field entirely — i.e. a daemon old
     /// enough to predate wire-version negotiation. It must compare as incompatible against any real
@@ -757,7 +761,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         version: String, installedVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
         protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
         operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem, timeZoneIdentifier: String? = nil,
-        deviceAPIAddresses: [String] = [], restorableSessions: [RestorableSessionSummary] = []
+        deviceAPIAddresses: [String] = [], restorableSessions: [RestorableSessionSummary] = [], selfUpdate: DaemonSelfUpdateStatus? = nil
     ) {
         self.version = version
         self.installedVersion = installedVersion
@@ -771,6 +775,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         self.timeZoneIdentifier = timeZoneIdentifier
         self.deviceAPIAddresses = deviceAPIAddresses
         self.restorableSessions = restorableSessions
+        self.selfUpdate = selfUpdate
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -786,6 +791,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         case timeZoneIdentifier
         case deviceAPIAddresses
         case restorableSessions
+        case selfUpdate
     }
 
     /// This is the frozen core's contract: its decode must tolerate version skew so an incompatible
@@ -808,6 +814,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
         deviceAPIAddresses = try container.decodeIfPresent([String].self, forKey: .deviceAPIAddresses) ?? []
         restorableSessions = try Self.decodeRestorableSessions(from: container)
+        selfUpdate = (try? container.decodeIfPresent(DaemonSelfUpdateStatus.self, forKey: .selfUpdate)) ?? nil
     }
 
     /// Decodes the restore offer row by row, keeping the rows this build understands and stepping over the
@@ -852,7 +859,14 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     ///
     /// Returning the version rather than just a flag lets `DaemonUpdateRemedy` carry it, so a client
     /// that has decided an update is staged never has to re-derive which one it is.
+    ///
+    /// A self-update run that is still moving installs its build before it hands off to it, so for that
+    /// window the device reports a newer installed build it is about to apply by itself. That is not a
+    /// staged update: a client that treated it as one would fire its own handoff to race the run's and
+    /// take the self-update block down in favor of a staged-apply surface. A failed run is different: the
+    /// build it left installed is genuinely waiting for a restart.
     public var stagedVersion: String? {
+        if let step = selfUpdate?.progress?.step, step != .failed { return nil }
         guard let installedVersion, SpacesWireProtocol.isVersion(version, olderThan: installedVersion) else { return nil }
         return installedVersion
     }

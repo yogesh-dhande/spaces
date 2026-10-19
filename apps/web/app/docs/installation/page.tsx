@@ -109,6 +109,13 @@ export default function InstallationDocsPage() {
           ). A Linux device paired over SSH also offers an &ldquo;Update over SSH&rdquo; action that runs
           the same command for you.
         </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          A Linux machine installed from a release that includes self-update updates itself instead: the Mac app and the
+          iPhone app show &ldquo;Update available&rdquo; when it has a newer release, and pressing Update
+          has the machine install it (see{" "}
+          <DocLink href="/docs/remote-access#update-and-uninstall-on-linux">updating Linux</DocLink>
+          ).
+        </p>
       </Section>
 
       <Section id="uninstall" title="Uninstall">

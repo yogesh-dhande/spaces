@@ -35,6 +35,7 @@ smoke_artifact() {
         test -x bin/spacesd-bin
         test -x bin/spaces-bin
         test -x install.sh
+        test -x spaces-install-linux.sh
         # The generated shell startup files source these for OSC 133 prompt marks.
         test -f bin/ghostty/shell-integration/zsh/ghostty-integration
         test -f bin/ghostty/shell-integration/bash/ghostty.bash
@@ -472,6 +473,11 @@ SHIM
         fi
         env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
             bin/spaces terminal list | grep -q '^linux-artifact-smoke\b'
+        # A self-updating daemon runs this copy from its installed release directory.
+        if [ ! -x "$releases_dir/smoke-b/spaces-install-linux.sh" ]; then
+            echo "installed release is missing an executable spaces-install-linux.sh" >&2
+            exit 1
+        fi
         echo "==> smoke: release pruning OK (only smoke-b remains, daemon pid $daemon_pid unchanged)"
     )
     rm -rf "$smoke_root"

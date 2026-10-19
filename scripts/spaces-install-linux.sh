@@ -13,6 +13,18 @@
 # architecture, and glibc plus the bundled libraries loading) instead of
 # naming distributions.
 #
+# A running daemon updates itself by running its own release's bundled copy of
+# this script (the archive carries it as spaces-install-linux.sh) with the
+# target version, so one path serves the one-liner and the in-app Update
+# button. The daemon reads stdout step lines to report progress:
+#   spaces-install-linux: step downloading <total-bytes-or-"-"> <archive-path>
+#   spaces-install-linux: step installing
+# (the archive's install.sh adds "step restarting"). Failures print
+# "spaces-install-linux: <sentence>" on stderr, which the daemon shows as the
+# failure reason, so every die message must read as a user-facing sentence.
+# Every curl abandons a connection or transfer that receives no data for 60 seconds
+# (--speed-time does not cover connecting, so --connect-timeout bounds DNS, TCP and TLS).
+#
 # Served at https://usespaces.dev/install.sh via the web app's prebuild copy
 # (apps/web/package.json). Two invocations:
 #   curl -fsSL https://usespaces.dev/install.sh | bash
@@ -70,9 +82,9 @@ trap 'rm -rf "$workdir"' EXIT
 
 manifest_path="$workdir/spaces-remote-artifacts.json"
 signature_path="$workdir/spaces-remote-artifacts.json.sig"
-curl -fsSL "$base_url/spaces-remote-artifacts.json" -o "$manifest_path" \
+curl -fsSL --connect-timeout 60 --speed-limit 1 --speed-time 60 "$base_url/spaces-remote-artifacts.json" -o "$manifest_path" \
     || die "could not download the installer manifest from $base_url. Confirm that the requested Spaces release is published."
-curl -fsSL "$base_url/spaces-remote-artifacts.json.sig" -o "$signature_path" \
+curl -fsSL --connect-timeout 60 --speed-limit 1 --speed-time 60 "$base_url/spaces-remote-artifacts.json.sig" -o "$signature_path" \
     || die "could not download the installer signature from $base_url."
 
 # Verify the manifest signature. The 44-byte Ed25519 SubjectPublicKeyInfo is the
@@ -114,8 +126,11 @@ for artifact in manifest.get("artifacts", []):
             sys.exit("artifact download URL must be https.")
         if not sha256:
             sys.exit("artifact is missing its sha256 checksum.")
+        size = artifact.get("size")
         print(url)
         print(sha256)
+        # Releases published before the manifest carried sizes have none; "-" tells the daemon so.
+        print(size if isinstance(size, int) and size > 0 else "-")
         break
 else:
     sys.exit(f"no {platform} {arch} artifact for version {version} in the manifest.")
@@ -123,9 +138,18 @@ PY
 )" || die "could not select a Linux daemon artifact from the manifest."
 artifact_url="$(printf '%s\n' "$selection" | sed -n '1p')"
 artifact_sha256="$(printf '%s\n' "$selection" | sed -n '2p')"
+artifact_size="$(printf '%s\n' "$selection" | sed -n '3p')"
 
 archive_path="$workdir/spacesd-${platform}-${arch}.tar.gz"
-curl -fsSL "$artifact_url" -o "$archive_path" || die "could not download the Linux daemon artifact from $artifact_url."
+echo "spaces-install-linux: step downloading ${artifact_size:--} $archive_path"
+download_status=0
+curl -fsSL --connect-timeout 60 --speed-limit 1 --speed-time 60 "$artifact_url" -o "$archive_path" || download_status=$?
+# 28 is curl's timeout exit code, shared by --connect-timeout and --speed-time.
+if [[ "$download_status" -eq 28 ]]; then
+    die "no data arrived for 60 seconds. Check this device's network connection."
+elif [[ "$download_status" -ne 0 ]]; then
+    die "could not download the Linux daemon artifact from $artifact_url."
+fi
 echo "${artifact_sha256}  ${archive_path}" | sha256sum -c - >/dev/null 2>&1 \
     || die "the Linux daemon artifact failed its checksum. Do not proceed; the download may be corrupt or tampered with."
 
@@ -145,6 +169,7 @@ if ! "$(dirname "$install_script")/bin/spaces" --version >/dev/null 2>"$load_che
     die "this machine cannot run the Spaces daemon. It needs glibc 2.38 or newer and the system libraries the daemon links against. The loader reported: $(head -n 1 "$load_check_log")"
 fi
 
+echo "spaces-install-linux: step installing"
 echo "spaces-install-linux: installing Spaces daemon $version ($platform $arch)..."
 SPACESD_VERSION="$version" bash "$install_script"
 echo "spaces-install-linux: Spaces daemon $version installed."

@@ -3142,6 +3142,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? { sidebar.findWorkspace(id: id) }
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? { sidebar.deviceRecord(forDeviceID: deviceID) }
     func deviceSection(id deviceID: String) -> DeviceSection? { sidebar.deviceSection(id: deviceID) }
+    func reloadDeviceHeader(deviceID: String) { sidebar.reloadDeviceHeader(deviceID: deviceID) }
+    func reconnectDevice(deviceID: String) { sidebar.retryDeviceConnection(deviceID: deviceID) }
+    func pullDeviceOverview(deviceID: String) { sidebar.pullRemoteDeviceOverview(deviceID: deviceID) }
     /// The device label to render for `deviceID` wherever the New Project flow names a target device.
     /// Prefers the loaded section's `displayName` (so the local device reads "Local"); the fallback
     /// mirrors the old `?? localDeviceName` sites it replaces, which only ever missed a section for the
@@ -3857,6 +3860,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if Self.detailPanePresentationDismissesFormWindows(current: detailPane, presented: pane, presentation: presentation) {
             projectForms.clearActiveAddFormStateAndCloseWindows()
         }
+        // Every way off a device's block passes through here, so this is where its Updated confirmation ends.
+        if let blockDeviceID = detailPane.compatibilityBlockDeviceID, blockDeviceID != pane.compatibilityBlockDeviceID {
+            daemonUpdate.dismissCompletedSelfUpdate(deviceID: blockDeviceID)
+        }
         detailPane = pane
         if pane.workspaceID == nil { hideWorkspacePanelTabStrip() }
         if pane.compatibilityBlockDeviceID == nil { visibleCompatibilityBlockRemedy = nil }
@@ -3969,7 +3976,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// action its remedy calls for. Switching to a compatible device in the sidebar leaves it.
     func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility, presentation: DetailPanePresentation = .backgroundRefresh) {
         let status = deviceDaemonStatus(forDeviceID: deviceID)
-        guard let remedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status),
+        guard let remedy = daemonUpdate.blockRemedy(deviceID: deviceID, verdict: verdict),
             Self.shouldRenderCompatibilityBlock(
                 remedy: remedy, verdictIsCompatible: verdict.isCompatible,
                 stagedApplyDidNotLand: daemonUpdate.stagedApplyDidNotLand(deviceID: deviceID, status: status))
@@ -3979,6 +3986,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // surface that would have nothing to say.
             return
         }
+        renderCompatibilityBlock(deviceID: deviceID, remedy: remedy, presentation: presentation)
+    }
+
+    /// Renders the self-update block for a device that is not wire-incompatible: opened from the sidebar
+    /// header's Update button, and re-rendered as the update advances, including while the device is away
+    /// mid-restart and has no verdict at all.
+    func showSelfUpdateBlock(deviceID: String, presentation: DetailPanePresentation = .backgroundRefresh) {
+        guard let remedy = daemonUpdate.blockRemedy(deviceID: deviceID, verdict: deviceCompatibility(forDeviceID: deviceID)),
+            case .selfUpdate = remedy
+        else { return }
+        renderCompatibilityBlock(deviceID: deviceID, remedy: remedy, presentation: presentation)
+    }
+
+    private func renderCompatibilityBlock(deviceID: String, remedy: CompatibilityBlockView.BlockRemedy, presentation: DetailPanePresentation) {
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
         visibleCompatibilityBlockRemedy = remedy
 
         stopWorkspaceSetupDetailRefreshTimer()
@@ -4005,14 +4027,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let offersCheckForUpdates = Self.shouldOfferCheckForUpdatesAction(isLocalDevice: isLocalDevice, updaterAvailable: updaterController != nil)
         let canUpdateOverSSH = Self.shouldOfferUpdateOverSSH(
             isLocalDevice: isLocalDevice, isLinuxDaemon: status?.isLinuxDaemon == true,
-            hasSSHDetails: Self.hasSSHDetails(deviceRecord(forDeviceID: deviceID)))
+            hasSSHDetails: Self.hasSSHDetails(deviceRecord(forDeviceID: deviceID)), hasSelfUpdate: status?.selfUpdate != nil)
         let block = CompatibilityBlockView(
             remedy: remedy, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, isLocalDevice: isLocalDevice,
             isLinuxDaemon: status?.isLinuxDaemon == true, canUpdateOverSSH: canUpdateOverSSH,
             isUpdatingOverSSH: daemonUpdate.daemonSSHUpdateInProgressDeviceIDs.contains(deviceID),
             onRetryStagedApply: remedy.offersStagedApplyRetry ? { [weak self] in self?.daemonUpdate.retryStagedApply(deviceID: deviceID) } : nil,
             onCheckForUpdates: offersCheckForUpdates ? { [weak self] in self?.updaterController?.checkForUpdates(nil) } : nil,
-            onUpdateOverSSH: canUpdateOverSSH ? { [weak self] in self?.daemonUpdate.updateRemoteDaemonOverSSH(deviceID: deviceID) } : nil)
+            onUpdateOverSSH: canUpdateOverSSH ? { [weak self] in self?.daemonUpdate.updateRemoteDaemonOverSSH(deviceID: deviceID) } : nil,
+            onSelfUpdateAction: { [weak self] in self?.daemonUpdate.startOrRetrySelfUpdate(deviceID: deviceID) })
         block.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(block)
         NSLayoutConstraint.activate([
@@ -4035,9 +4058,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Pure eligibility for the compatibility block's "Update over SSH" action. Linux only: a Mac has no
     /// headless installer artifact to run, and a remote Mac's staged update already applies over the
     /// Device API. It needs a device the client can actually reach over SSH, which a link-paired record
-    /// (no stored `sshHost`) cannot promise, and it is never offered for this Mac's own daemon.
-    nonisolated static func shouldOfferUpdateOverSSH(isLocalDevice: Bool, isLinuxDaemon: Bool, hasSSHDetails: Bool) -> Bool {
-        !isLocalDevice && isLinuxDaemon && hasSSHDetails
+    /// (no stored `sshHost`) cannot promise, and it is never offered for this Mac's own daemon. A daemon
+    /// that reports it can update itself does that instead, so the installer is never run over it.
+    nonisolated static func shouldOfferUpdateOverSSH(isLocalDevice: Bool, isLinuxDaemon: Bool, hasSSHDetails: Bool, hasSelfUpdate: Bool) -> Bool {
+        !isLocalDevice && isLinuxDaemon && hasSSHDetails && !hasSelfUpdate
     }
 
     /// Whether a paired-device record carries an SSH host to run the installer against.

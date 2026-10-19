@@ -51,6 +51,7 @@ Builds the Linux spacesd device artifact for the current host architecture. The 
   spacesd-linux-<arch>/bin/ghostty/shell-integration/
   spacesd-linux-<arch>/lib/libswift*.so and related Swift runtime libraries
   spacesd-linux-<arch>/install.sh
+  spacesd-linux-<arch>/spaces-install-linux.sh
   spacesd-linux-<arch>/manifest.json
   spacesd-linux-<arch>/SHA256SUMS
 EOF
@@ -693,6 +694,8 @@ wait_for_staged_daemon() {
 # driven through the target profile's own `spaces` binary, which resolves that profile from its own
 # path and so reaches that profile's daemon and no other.
 handoff_pid="$(systemd_daemon_pid)"
+# Progress line the public installer's caller (a self-updating daemon) reads from stdout.
+echo "spaces-install-linux: step restarting"
 if [ -n "$handoff_pid" ] && [ "$handoff_pid" -gt 0 ] 2>/dev/null; then
     if ! "$cli_path" daemon apply-update 9>&- >/dev/null 2>&1; then
         echo "spacesd did not accept the staged handoff; leaving the running daemon and its sessions untouched" >&2
@@ -842,6 +845,9 @@ package_artifact() {
     write_binary_wrapper "$staging_root/bin/spacesd" "spacesd-bin"
     write_binary_wrapper "$staging_root/bin/spaces" "spaces-bin"
     write_linux_install_script "$staging_root/install.sh"
+    # The daemon updates itself by running its own release's copy of the public installer.
+    cp "$REPO_ROOT/scripts/spaces-install-linux.sh" "$staging_root/spaces-install-linux.sh"
+    chmod +x "$staging_root/spaces-install-linux.sh"
     copy_swift_runtime_libraries "$spacesd_bin" "$staging_root/lib"
     copy_swift_runtime_libraries "$spaces_bin" "$staging_root/lib"
     copy_ghostty_vt_libraries "$staging_root/bin"
