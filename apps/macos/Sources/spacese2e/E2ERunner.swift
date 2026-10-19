@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import workspacecore
 
 struct E2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "e2e", abstract: "Run manual real-system E2E and profiling lanes.")
@@ -498,6 +499,15 @@ private struct E2ERunner {
         return environment
     }
 
+    /// Identity variables a Spaces terminal sets (see `WorkspaceOrchestrator.buildWorkspaceEnv` and `SpacesDevicePlanner.runtimeManifest`). A lane
+    /// launched from inside a Spaces terminal would otherwise make its CLI calls on behalf of that terminal and workspace, which the
+    /// caller-terminal check refuses (#933). Per-service `SPACES_<SVC>_PORT/_HOST/_URL` are not stripped: they carry no identity and the
+    /// suffix pattern collides with real knobs like `SPACES_MOBILE_DEMO_PORT`.
+    private static let inheritedIdentityVariables: [String] = [
+        WorkspaceOrchestrator.terminalTrackingIDEnvVar, WorkspaceOrchestrator.automationRunIDEnvVar, "SPACES_WORKSPACE_ID", "SPACES_PROJECT_ID",
+        "SPACES_WORKSPACE_SLUG", "SPACES_WORKSPACE_DIR", "SPACES_PROJECT_DIR",
+    ]
+
     private var sharedEnvironment: [String: String] {
         [
             "SPACES_E2E_CLI": spacese2ePath, "SPACES_E2E": spacese2ePath, "SPACES_E2E_SKIP_MACOS_BUILD": "1",
@@ -543,7 +553,9 @@ private struct E2ERunner {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = rootDirectory
-        process.environment = ProcessInfo.processInfo.environment.merging(environment, uniquingKeysWith: { _, new in new })
+        var baseEnvironment = ProcessInfo.processInfo.environment
+        for key in Self.inheritedIdentityVariables { baseEnvironment.removeValue(forKey: key) }
+        process.environment = baseEnvironment.merging(environment, uniquingKeysWith: { _, new in new })
 
         let pipe = Pipe()
         process.standardOutput = pipe

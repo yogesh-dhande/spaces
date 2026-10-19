@@ -410,9 +410,16 @@ main() {
 
   # The exec-in-place update: the daemon replaces its own image at the same pid and keeps running its
   # sessions, so it has nothing to offer back and records nothing.
+  # The old image still owns the socket during the handoff quiesce, and a SIGTERM in that window is
+  # dropped by design, so the wait is on handoff_resume (logged by the successor) rather than the socket.
   wait_for_identified_agent "$second_restored_session_id" "$ORIGINAL_CONVERSATION"
   "${PROFILE_ENV[@]}" "$SPACES_CLI" daemon apply-update >/dev/null
   local deadline=$((SECONDS + 30))
+  while ! grep -Fq "handoff_resume generation=1" "$TMP_ROOT/spacesd.log"; do
+    [[ $SECONDS -lt $deadline ]] || fail "the exec handoff never resumed"
+    sleep 0.2
+  done
+  deadline=$((SECONDS + 30))
   while ! daemon_owns_socket; do
     [[ $SECONDS -lt $deadline ]] || fail "the daemon never rebound its socket after the exec handoff"
     sleep 0.2
