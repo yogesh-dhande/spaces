@@ -241,6 +241,10 @@ private struct DeviceSyncState {
     private var automationsHeaderStack: NSStackView?
     private var automationsRowRail: NSView?
     private var automationsRowBadge: NSTextField?
+
+    // Resources sidebar row
+    private var resourcesHeaderStack: NSStackView?
+    private var resourcesRowRail: NSView?
     /// Top-bar warning icon shown while another Spaces instance owns desktop control.
     private(set) weak var desktopControlStatusIcon: NSImageView?
 
@@ -1559,6 +1563,8 @@ private struct DeviceSyncState {
             host.alerts.showAlertsDetail()
         } else if host.showingAutomations {
             host.showAutomationsDetail()
+        } else if host.showingResources {
+            host.showResourcesDetail()
         } else if AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
             visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
             newLoadState: host.deviceModel.deviceSections[index].loadState)
@@ -1885,11 +1891,12 @@ private struct DeviceSyncState {
             let target = AppKitController.sidebarArrowSelectionTarget(
                 visibleWorkspaceIDsByProject: visibleWorkspaceIDsByProject, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID,
                 selectedWorkspaceID: host.selectedWorkspaceID, showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations,
-                direction: direction)
+                showingResources: host.showingResources, direction: direction)
         else { return false }
         switch target {
         case .alerts: host.alerts.showAlertsDetail(presentation: .userNavigation)
         case .automations: host.showAutomationsDetail()
+        case .resources: host.showResourcesDetail()
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
@@ -3063,7 +3070,7 @@ private struct DeviceSyncState {
             host.selectedWorkspaceID = nil
             host.showingSettings = false
             if AppKitController.sidebarClearedSelectionPresentsPlaceholder(
-                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations)
+                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, showingResources: host.showingResources)
             {
                 host.showPlaceholder(presentation: .userNavigation)
             }
@@ -3449,6 +3456,59 @@ private struct DeviceSyncState {
         header.layer?.backgroundColor = NSColor.clear.cgColor
         automationsRowRail?.isHidden = !host.showingAutomations
         if let rail = automationsRowRail {
+            bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
+        }
+    }
+
+    func makeResourcesSidebarRow() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.setAccessibilityIdentifier("sidebar-resources")
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "gauge.with.dots.needle.50percent", accessibilityDescription: "Resources")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
+        icon.contentTintColor = .secondaryLabelColor
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let titleLabel = NSTextField(labelWithString: "Resources")
+        titleLabel.font = Typography.controlLabel
+        titleLabel.textColor = .labelColor
+
+        let header = NSStackView(views: [icon, titleLabel, NSView(), makeSidebarBadgeTrailingSlot()])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+        header.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        header.wantsLayer = true
+        header.layer?.cornerRadius = UIRadius.regular
+        header.translatesAutoresizingMaskIntoConstraints = false
+        resourcesHeaderStack = header
+        header.addGestureRecognizer(NSClickGestureRecognizer(target: host, action: #selector(AppKitController.resourcesRowClicked)))
+
+        container.addSubview(header)
+        let rail = NSView()
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        rail.wantsLayer = true
+        rail.isHidden = true
+        container.addSubview(rail)
+        resourcesRowRail = rail
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: container.topAnchor), header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor), header.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            rail.leadingAnchor.constraint(equalTo: container.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
+            rail.topAnchor.constraint(equalTo: header.topAnchor), rail.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        ])
+        updateResourcesRowAppearance()
+        return container
+    }
+
+    func updateResourcesRowAppearance() {
+        guard let header = resourcesHeaderStack else { return }
+        header.layer?.borderWidth = 0
+        header.layer?.backgroundColor = NSColor.clear.cgColor
+        resourcesRowRail?.isHidden = !host.showingResources
+        if let rail = resourcesRowRail {
             bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
         }
     }
