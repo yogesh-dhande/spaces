@@ -534,6 +534,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// of the *same* workspace while the first is unresolved — is `isWorkspacePendingDeletion` instead, so
     /// one workspace's delete never blocks a mutation, including another delete, on a different one (#450).
     var isMutating = false
+    /// Observed, unlike most model state: a screen holding a failed shell's presentation (see
+    /// `holdsFailedLostShellState`) re-renders when the request is claimed, answered or released.
+    private var lostShellResumeRequests = LostShellResumeRequests()
+    /// Counts restore answers the device accepted. Observed by terminal screens, which re-check whether
+    /// their lost shell was only waiting for the offer to be answered.
+    private(set) var sessionRestoreAnswerCount = 0
     /// True while a requested daemon update has been sent and this app is polling the device for the
     /// update to land (see `requestDaemonUpdate()`). Kept separate from `isMutating`: that flag gates
     /// one-shot mutations and is released as soon as their single RPC returns, but the update poll runs
@@ -3138,6 +3144,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         // The other two outcomes have returned by here, so this is the device accepting the answer.
         guard case .answered(let restored) = outcome else { return nil }
+        // Either answer frees the shells the offer held. A Skip changes nothing the overview carries, so no
+        // overview update would otherwise tell an open lost-shell screen to ask again.
+        sessionRestoreAnswerCount &+= 1
         let failureReport = SessionRestoreAnswering.failureReport(restored.failures, offer: offer)
         // Only a Restore changes what this app shows: the relaunched agents are sessions the overview does
         // not carry yet, and the restore response answers with their ids alone. A Skip leaves every list
@@ -3948,6 +3957,48 @@ private enum SpacesMobileMutationTimeoutRecovery {
             }
         case .codingAgent, .terminal, .browserSession: return nil
         }
+    }
+
+    /// Asks `deviceID` to replace a shell it lost without an exit, when `sessionID` is one the screen being
+    /// opened shows. Sends at most once per session per launch, and never in Demo Mode.
+    ///
+    /// Deliberately outside `performMutationReturningSession` and `isMutating`, like
+    /// `performAlertMutation`: it runs unprompted when a screen opens, so it must not grey out the row
+    /// actions the user is working with, and the command channel serializes whole round trips itself. A
+    /// refusal is the daemon saying there is nothing to resume rather than an error to show
+    /// (`handleBridgeError`). The session is claimed only once a connection exists, so a send that is
+    /// skipped leaves it eligible for the next open.
+    func resumeLostShellIfNeeded(sessionID: String, deviceID: String) async -> LostShellResumeResult {
+        guard !isDemoModeEnabled, let connection = mutationConnection(forDeviceID: deviceID),
+            lostShellResumeRequests.claim(sessionID: sessionID, overview: overview(forDeviceID: deviceID))
+        else { return .unchanged }
+        do {
+            let response = try await connection.client.resumeLostShell(sessionID: sessionID, commandChannel: connection.channel)
+            await applyMutationResponse(response, token: connection.token)
+            // The route moves to the replacement in the caller, and the held screen is left with it.
+            lostShellResumeRequests.finish(sessionID: sessionID)
+            guard isCurrent(connection.token), let replacementID = response.sessionID,
+                let replacement = response.overview?.sessions.first(where: { $0.id == replacementID })
+            else { return .unchanged }
+            return .replaced(replacement)
+        } catch {
+            // A restore offer holds the shell for as long as it is open, so the screen shows its failed
+            // state meanwhile instead of waiting out the offer.
+            if LostShellResumeRequests.isRestorePending(error) {
+                lostShellResumeRequests.release(sessionID: sessionID)
+            } else {
+                lostShellResumeRequests.finish(sessionID: sessionID)
+            }
+            return LostShellResumeRequests.isFolderMissing(error) ? .folderMissing : .unchanged
+        }
+    }
+
+    /// Whether a screen for a failed `sessionID` keeps its previous presentation: its lost-shell request is
+    /// in flight or would be sent once the overview says so (`LostShellResumeRequests.holdsFailedState`).
+    /// Nothing is held in Demo Mode, which never asks.
+    func holdsFailedLostShellState(sessionID: String, deviceID: String) -> Bool {
+        guard !isDemoModeEnabled else { return false }
+        return lostShellResumeRequests.holdsFailedState(sessionID: sessionID, overview: overview(forDeviceID: deviceID))
     }
 
     // MARK: - Workspace-level actions

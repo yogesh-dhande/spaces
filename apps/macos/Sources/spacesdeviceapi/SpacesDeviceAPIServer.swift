@@ -3436,6 +3436,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .workspaceReviewCommentList(let payload): return try handleWorkspaceReviewCommentListRequest(payload, context: context)
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
         case .startWorkspaceCommandSession(let payload): return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
+        case .resumeLostShell(let payload): return try handleResumeLostShellRequest(payload, context: context)
         case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload, context: context)
         case .stopWorkspaceTerminalIfBareShell(let payload): return try handleStopWorkspaceTerminalIfBareShellRequest(payload, context: context)
         case .renameTerminalSession(let payload): return try handleRenameTerminalSessionRequest(payload, context: context)
@@ -3581,14 +3582,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    /// Runs `.startWorkspaceCommandSession` (descriptor lane `.workspaceTerminalLaunch`; see
-    /// `SpacesDeviceAPICommandDescriptor`) on its own serial
+    /// Runs `.startWorkspaceCommandSession` and `.resumeLostShell` (descriptor lane `.workspaceTerminalLaunch`;
+    /// see `SpacesDeviceAPICommandDescriptor`) on their own serial
     /// queue, confined the same way `handleWorkspaceSetupRequest` confines its store and orchestrator.
     private func handleWorkspaceTerminalLaunchRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
         let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
         switch request.command {
         case .startWorkspaceCommandSession(let payload): return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
-        default: preconditionFailure("Only `.startWorkspaceCommandSession` runs on the workspace-terminal-launch queue.")
+        case .resumeLostShell(let payload): return try handleResumeLostShellRequest(payload, context: context)
+        default: preconditionFailure("Only `.startWorkspaceCommandSession` and `.resumeLostShell` run on the workspace-terminal-launch queue.")
         }
     }
 
@@ -6513,6 +6515,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             launchedTerminalSession: try launchedTerminalSessionSummary(session, workspaceID: request.workspaceID))
     }
 
+    /// Replaces a shell lost without an exit; the orchestrator decides whether the session qualifies and
+    /// makes a repeat request answer with the replacement the first one launched.
+    private func handleResumeLostShellRequest(_ request: SpacesDeviceResumeLostShellRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let resumption = try context.orchestrator().resumeLostShell(sessionID: request.sessionID)
+        return try refreshedMutationResponse(
+            context: context, message: "Resumed lost shell.", workspaceID: resumption.workspaceID, sessionID: resumption.sessionID,
+            replacedSessionID: resumption.replacedSessionID)
+    }
+
     /// The sidebar's explicit Stop on a runtime target. The decision itself (automation run, coding agent,
     /// ad hoc terminal) belongs to `WorkspaceOrchestrator.stopWorkspaceTerminalSession`, which the profile
     /// socket's `spaces terminal stop` drives too; this handler only supplies the daemon's dependencies and
@@ -7020,7 +7033,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func refreshedMutationResponse(
         context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
         launchedTerminalSession: SpacesDeviceTerminalSessionSummary? = nil, notice: String? = nil, terminatedTerminalSession: Bool? = nil,
-        spacesYAMLImported: Bool? = nil
+        spacesYAMLImported: Bool? = nil, replacedSessionID: String? = nil
     ) throws -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(
             ok: true, message: message,
@@ -7028,7 +7041,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 SpacesDeviceMutationResult(
                     overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID,
                     launchedTerminalSession: launchedTerminalSession, notice: notice, terminatedTerminalSession: terminatedTerminalSession,
-                    spacesYAMLImported: spacesYAMLImported)))
+                    spacesYAMLImported: spacesYAMLImported, replacedSessionID: replacedSessionID)))
     }
 
     /// Carries the launched terminal's own metadata in the start-command mutation response so the

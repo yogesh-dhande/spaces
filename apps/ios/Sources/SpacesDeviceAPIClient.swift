@@ -369,6 +369,16 @@ struct SpacesDeviceAPIClient: Sendable {
                 clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
+    /// Asks the device to replace a shell it lost without an exit with a fresh shell in the same terminal
+    /// row. The mutation result's `sessionID` is the replacement and `replacedSessionID` the session being
+    /// replaced. A session that is not a lost shell fails with `.conflict`, and one whose working directory
+    /// is gone fails with `.workingDirectoryMissing`.
+    func resumeLostShell(sessionID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .resumeLostShell(.init(sessionID: sessionID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
     /// Dismisses alerts on the device by key; a `comebacklater:` key clears that row's flag.
     func dismissAlerts(keys: [String], commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
         try await mutation(

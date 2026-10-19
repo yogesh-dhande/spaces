@@ -211,6 +211,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     lazy var daemonUpdate = DaemonUpdateController(
         host: self, requestSidebarReload: { [unowned self] in self.requestSidebarReload(forceRemoteRefresh: true) })
     lazy var sessionRestore = SessionRestoreController(host: self)
+    lazy var lostShellResume = LostShellResumeController(host: self)
     lazy var workspaceDeletion = WorkspaceDeletionCoordinator(host: self)
     lazy var browserSessions = BrowserSessionCoordinator(host: self)
     lazy var terminalPanes = TerminalPaneService(host: self)
@@ -3546,6 +3547,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             else { continue }
             panelCoordinator.retargetPaneForReplacement(replacedSessionID: replacement.replacedSessionID, request: request)
         }
+        lostShellResume.overviewInstalled(deviceID: deviceID)
     }
 
     /// Every overview-install path calls this before it discards the prior workspace catalog. The

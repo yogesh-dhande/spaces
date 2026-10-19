@@ -1005,7 +1005,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     var visibleText: String {
         if shouldRenderEndedTerminalSurface, let snapshotText = latestState?.renderText { return snapshotText }
         if isSessionUnavailable { return "This terminal session is no longer available.\nReturn to Terminals to open the current live session." }
-        if renderModeValue == .ended { return "This terminal session ended before a final render was available." }
+        if renderModeValue == .ended {
+            // A failed shell awaiting its replacement is not an ended session yet, so it keeps the
+            // screen's neutral loading text rather than reporting an end that is about to be undone.
+            return isHoldingFailedState ? "Preparing terminal…" : "This terminal session ended before a final render was available."
+        }
         if renderModeValue == .ownerBootstrapping { return "Preparing terminal…" }
         if isStartingState { return "Preparing terminal…" }
         if isTakingOver { return "Attempting takeover…" }
@@ -4882,6 +4886,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let state = latestState?.runtimeState?.state ?? session.state
         return Self.isEndedRuntimeState(state)
     }
+
+    /// Whether a lost-shell replacement for this failed session is pending or about to be asked for, set by
+    /// the screen that owns the answer (`SpacesMobileAppModel.holdsFailedLostShellState`). Read inside
+    /// `visibleText`, so a change to what it reads re-renders the screen.
+    var holdsFailedStateForLostShellResume: () -> Bool = { false }
+
+    private var isHoldingFailedState: Bool { (latestState?.runtimeState?.state ?? session.state) == .failed && holdsFailedStateForLostShellResume() }
 
     private var isStartingState: Bool { (latestState?.runtimeState?.state ?? session.state) == .starting }
 

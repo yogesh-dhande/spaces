@@ -51,6 +51,15 @@ struct TerminalDetailView: View {
     /// to a process row. It has to be latched early: once a restart replaces the session, `session.id`
     /// no longer resolves to any row.
     @State private var followedProcessRow: TerminalSessionFollowDiff.ProcessRowIdentity?
+    /// The terminal row this viewer opened on, latched like `followedProcessRow` so a lost shell's
+    /// replacement, made from any client, is followed after the row stops naming `session.id`.
+    @State private var followedTerminalRow: TerminalSessionFollowDiff.TerminalRowIdentity?
+    /// Set when the device refused to replace this lost shell because its working directory is gone. The
+    /// screen stays a dead screen and says why nothing came back.
+    @State private var lostShellFolderIsMissing = false
+    /// True from this screen's appearance until it disappears; a lost-shell resume that finishes outside
+    /// that span is ignored.
+    @State private var isOnScreen = false
     /// The app's effective light/dark scheme. `preferredColorScheme` at the app scene stamps the forced
     /// mode here, and a `.system` mode lets it track the OS trait, so observing it covers both an appearance
     /// setting flip and an OS switch — either way the live session is re-themed to match the app.
@@ -82,23 +91,31 @@ struct TerminalDetailView: View {
         self.onBack = onBack
         let appModel = appModel
         let deviceContext = deviceContext
-        _model = State(
-            initialValue: TerminalViewerModel(
-                session: session, settings: deviceContext.settings, onAuthenticationRequired: onAuthenticationRequired,
-                onOpenTerminalDeepLink: { link in
-                    Task { await appModel.openTerminalDeepLink(SpacesMobileAppModel.deepLink(link, printedOnDeviceID: deviceContext.deviceID)) }
-                },
-                awaitForegroundEndpointRefresh: {
-                    await appModel.waitForForegroundEndpointRefresh(client: deviceContext.client, deviceID: deviceContext.deviceID)
-                }, bridgeClient: deviceContext.client, isDemoMode: appModel.isDemoModeEnabled, openSource: openSource,
-                retainedScreens: appModel.retainedTerminalScreens))
+        let viewerModel = TerminalViewerModel(
+            session: session, settings: deviceContext.settings, onAuthenticationRequired: onAuthenticationRequired,
+            onOpenTerminalDeepLink: { link in
+                Task { await appModel.openTerminalDeepLink(SpacesMobileAppModel.deepLink(link, printedOnDeviceID: deviceContext.deviceID)) }
+            },
+            awaitForegroundEndpointRefresh: {
+                await appModel.waitForForegroundEndpointRefresh(client: deviceContext.client, deviceID: deviceContext.deviceID)
+            }, bridgeClient: deviceContext.client, isDemoMode: appModel.isDemoModeEnabled, openSource: openSource,
+            retainedScreens: appModel.retainedTerminalScreens)
+        viewerModel.holdsFailedStateForLostShellResume = {
+            appModel.holdsFailedLostShellState(sessionID: session.id, deviceID: deviceContext.deviceID)
+        }
+        _model = State(initialValue: viewerModel)
     }
 
     /// The overview observer sits outside `detailContent` because that modifier chain is at the type
     /// checker's limit: one more `.onChange` inside it fails with "unable to type-check this expression in
     /// reasonable time".
     var body: some View {
-        detailContent.onChange(of: appModel.overview(forDeviceID: deviceContext.deviceID)) { _, _ in followReplacementSessionIfNeeded() }.onChange(
+        detailContent.onChange(of: appModel.overview(forDeviceID: deviceContext.deviceID)) { _, _ in
+            followReplacementSessionIfNeeded()
+            // A screen opened while reconnecting can hold an overview that predates the failure; the fresh
+            // one is when the lost shell becomes visible. The model sends at most once per session.
+            Task { await resumeLostShellIfNeeded() }
+        }.onChange(of: appModel.sessionRestoreAnswerCount) { _, _ in Task { await resumeLostShellIfNeeded() } }.onChange(
             of: model.showsRenderedContent, initial: true
         ) { _, shows in if shows { appModel.noteTerminalContentShown(sessionID: session.id) } }.overlay(alignment: .bottom) { comeBackLaterToast }
             .task(id: comeBackLaterToastID) {
@@ -183,6 +200,7 @@ struct TerminalDetailView: View {
 
             if model.isDemoMode { demoNoticeBanner }
             if let errorMessage = model.errorMessage { errorBanner(errorMessage) }
+            if lostShellFolderIsMissing { errorBanner("Folder no longer exists") }
             // The pane is an accessibility container (`.accessibilityElement(children: .contain)`) rather
             // than a plain identified view: an identifier on a SwiftUI container otherwise replaces the
             // identifier of every element beneath it, which would leave this whole screen -- back button,
@@ -197,6 +215,7 @@ struct TerminalDetailView: View {
             model.start()
             if scenePhase == .active { model.resumeAfterBackgrounding() }
             followReplacementSessionIfNeeded()
+            await resumeLostShellIfNeeded()
         }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(id: e2eCommandRequestPath) { await consumeE2ECommandRequestsIfNeeded() }.onChange(
             of: model.showsTerminalSurface
         ) { showsTerminalSurface in
@@ -237,7 +256,12 @@ struct TerminalDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text(StopConfirmationCopy.rowMessage)
-        }.modifier(TerminalLinkDialogs(model: model)).onDisappear { model.stop() }
+        }.modifier(TerminalLinkDialogs(model: model)).onAppear { isOnScreen = true }.onChange(of: isOnScreen) { _, isShown in
+            if isShown { Task { await resumeLostShellIfNeeded() } }
+        }.onDisappear {
+            isOnScreen = false
+            model.stop()
+        }
     }
 
     /// Every sheet and full-screen cover this view presents over the terminal routes its dismissal
@@ -522,14 +546,42 @@ struct TerminalDetailView: View {
     /// `onSessionChanged` replaces the route in place (no push or pop), and the detail rebuilds on the
     /// replacement session, which dismisses the keyboard just as the phone's own Restart does.
     private func followReplacementSessionIfNeeded() {
-        if followedProcessRow == nil, let runtimeRow = appModel.runtimeRow(forSessionID: session.id, deviceID: deviceContext.deviceID) {
+        if followedProcessRow == nil, followedTerminalRow == nil,
+            let runtimeRow = appModel.runtimeRow(forSessionID: session.id, deviceID: deviceContext.deviceID)
+        {
             followedProcessRow = TerminalSessionFollowDiff.processRowIdentity(for: runtimeRow)
+            followedTerminalRow = TerminalSessionFollowDiff.terminalRowIdentity(for: runtimeRow)
         }
-        guard let followedProcessRow, let overview = appModel.overview(forDeviceID: deviceContext.deviceID),
+        guard let overview = appModel.overview(forDeviceID: deviceContext.deviceID) else { return }
+        if let followedProcessRow,
             let replacement = TerminalSessionFollowDiff.replacementSession(
                 for: followedProcessRow, displayedSessionID: session.id, displayedCreatedAt: session.createdAt, overview: overview)
-        else { return }
-        onSessionChanged(replacement)
+        {
+            onSessionChanged(replacement)
+        } else if let followedTerminalRow,
+            let replacement = TerminalSessionFollowDiff.replacementSession(
+                forTerminal: followedTerminalRow, displayedSessionID: session.id, displayedCreatedAt: session.createdAt, overview: overview)
+        {
+            onSessionChanged(replacement)
+        }
+    }
+
+    /// Asks the device to replace this screen's session when it is a shell lost without an exit. On success
+    /// the route moves to the replacement in place, which keeps the pushed screen; every other outcome
+    /// leaves the screen as it is, with a notice only for a missing folder.
+    private func resumeLostShellIfNeeded() async {
+        // Checked before the request is claimed: a route kept on an inactive tab (a pairing link switched
+        // to Settings) still receives overview updates but is not the screen the user is looking at. The
+        // session stays eligible, and `isOnScreen` turning true asks again.
+        guard isOnScreen, !isBackNavigationInProgress else { return }
+        let result = await appModel.resumeLostShellIfNeeded(sessionID: session.id, deviceID: deviceContext.deviceID)
+        // The request can outlive this screen: a result that lands after the user pressed Back must not
+        // reopen the terminal they left, or replace one they opened since.
+        switch result.ifStillShown(isOnScreen && !isBackNavigationInProgress) {
+        case .replaced(let replacement): onSessionChanged(replacement)
+        case .folderMissing: lostShellFolderIsMissing = true
+        case .unchanged: break
+        }
     }
 
     private func beginBackNavigation() {

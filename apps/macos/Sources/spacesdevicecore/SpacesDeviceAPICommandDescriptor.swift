@@ -149,6 +149,8 @@ extension SpacesDeviceAPICommand {
         case .startWorkspaceCommandSession:
             return Self.descriptor(
                 wireKey: "startWorkspaceCommandSession", lane: .workspaceTerminalLaunch, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+        case .resumeLostShell:
+            return Self.descriptor(wireKey: "resumeLostShell", lane: .workspaceTerminalLaunch, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .renameTerminalSession:
             return Self.descriptor(wireKey: "renameTerminalSession", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .stopWorkspaceTerminal:
