@@ -5267,6 +5267,9 @@
         func listDevices() throws -> [SpacesDevicePairedClient] { [] }
         func revoke(installationID _: String) throws {}
         func removeAll() throws {}
+        func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+        func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+        func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
         func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
             guard clientApp != nil, authToken == self.authToken else {
                 throw NSError(domain: "SpacesDeviceAPIServer", code: 401, userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."])

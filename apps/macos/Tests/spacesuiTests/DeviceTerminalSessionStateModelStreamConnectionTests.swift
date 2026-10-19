@@ -451,9 +451,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         let subscriptionServer = try startLiveSession(sessionID: sessionID)
         defer { subscriptionServer.stop() }
         let device = SpacesPairedDeviceRecord(
-            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1", "127.0.0.2"],
-            port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z",
-            updatedAt: "2026-07-24T00:00:00Z", lastSelectedAt: "2026-07-24T00:00:00Z")
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1", "127.0.0.2"], port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
         let model = try DeviceTerminalSessionStateModel(
             device: device, sessionID: sessionID,
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -1614,11 +1614,9 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
         await staleAttempt?.value
 
         XCTAssertEqual(
-            model.connectionStageTracker.stage, .connected,
-            "the stale attempt's belated failure must not clobber the replacement's recovered stage")
+            model.connectionStageTracker.stage, .connected, "the stale attempt's belated failure must not clobber the replacement's recovered stage")
         XCTAssertFalse(
-            model.connectionStageTracker.isBannerVisible,
-            "the stale attempt's belated failure must not bring the banner back over a healthy stream")
+            model.connectionStageTracker.isBannerVisible, "the stale attempt's belated failure must not bring the banner back over a healthy stream")
         XCTAssertTrue(model.hasActiveStreamClientForTesting, "the replacement's stream client must still be installed")
 
         // The reconnect machinery `subscriptionConnectTask` feeds into must still work afterward: a real
@@ -2755,8 +2753,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 /// `@MainActor` (not a Swift actor) because the grace timer's task and every test driving it are already
 /// on the main actor: a plain checked continuation is enough, with no cross-actor hop needed to call or
 /// resume it, matching how `stateStreamConnectOverrideForTesting` is threaded through `openStateStream`.
-@MainActor
-private final class GraceGate {
+@MainActor private final class GraceGate {
     private var isReleased = false
     private var continuation: CheckedContinuation<Void, Never>?
 
@@ -2783,8 +2780,7 @@ private final class GraceGate {
 /// what lets a test hold a stage 2 dial on a dead address exactly as the real one would be held, and then
 /// watch the ladder's next rung dial alongside it. `@MainActor` for the same reason `GraceGate` is: every
 /// caller and every test driving it is already on the main actor.
-@MainActor
-private final class DialGate {
+@MainActor private final class DialGate {
     private var parked: [CheckedContinuation<Bool, Never>] = []
 
     var parkedDialCount: Int { parked.count }
@@ -2803,8 +2799,7 @@ private final class DialGate {
 /// and the liveness recheck's cadence (`livenessRecheckWaitForTesting`) — so a test drives each one
 /// delay by delay instead of waiting out real seconds, and can read back the delays actually spent.
 /// Releasing before the timer reaches its wait is credited, mirroring `GraceGate`'s already-released case.
-@MainActor
-private final class DelayGate {
+@MainActor private final class DelayGate {
     /// The delays waited on, in order. For the stage 2 cadence these are the ladder's rungs.
     private(set) var waitedDelays: [Duration] = []
     private var creditedReleases = 0
@@ -3077,6 +3072,9 @@ private final class AlwaysAuthorizedStreamConnectionPairingStore: SpacesDevicePa
     func listDevices() throws -> [SpacesDevicePairedClient] { [] }
     func revoke(installationID _: String) throws {}
     func removeAll() throws {}
+    func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+    func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+    func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
     func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
         guard clientApp != nil, authToken == self.authToken else {
             throw NSError(

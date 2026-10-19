@@ -369,6 +369,9 @@ private final class AlwaysAuthorizedRecoveryPairingStore: SpacesDevicePairingSto
     func listDevices() throws -> [SpacesDevicePairedClient] { [] }
     func revoke(installationID _: String) throws {}
     func removeAll() throws {}
+    func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+    func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+    func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
     func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
         guard clientApp != nil, authToken == self.authToken else {
             throw NSError(
@@ -392,6 +395,9 @@ private final class RecordingRecoveryPairingStore: SpacesDevicePairingStoreProto
     func listDevices() throws -> [SpacesDevicePairedClient] { [] }
     func revoke(installationID _: String) throws {}
     func removeAll() throws {}
+    func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+    func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+    func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
     func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
         lock.withLock { tokens.append(authToken) }
         guard clientApp != nil else {

@@ -376,6 +376,24 @@ struct SpacesDeviceAPIClient: Sendable {
             commandChannel: commandChannel)
     }
 
+    /// Hands the device the push relay capability for this phone and its two buzz toggles. Sent again whenever
+    /// a toggle changes or the capability rotates; the device keeps only the latest.
+    func registerPushNotifications(
+        capability: String, notifyBlocked: Bool, notifyFinished: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(
+                command: .registerPushNotifications(.init(capability: capability, notifyBlocked: notifyBlocked, notifyFinished: notifyFinished)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
+    /// Clears this phone's push registration on the device, which also drops the device's counts from the badge.
+    func unregisterPushNotifications(commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .unregisterPushNotifications(.init()), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
     /// Reports that the user stayed on `sessionID` for `focusedForSeconds`, so the device clears what a
     /// visit clears, among the named `keys` whose dwell completed.
     func visitTerminalSession(sessionID: String, focusedForSeconds: Double, keys: [String], commandChannel: SpacesDeviceAPICommandChannel? = nil)

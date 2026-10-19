@@ -407,6 +407,17 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - The Alerts pane opens only when the user asks for it, and at launch when nothing is selected. A refresh or an arriving alert never navigates to Alerts or replaces what is on screen.
 - A failed or timed-out automation run's alert names the automation and the failure (with exit code when known). On the Mac, clicking it or its shortcut opens the Automations Runs view filtered to its device rather than focusing a workspace target; on iOS it has no terminal to open.
 
+### Push notifications
+- A paired iPhone can get a push notification and an app icon badge for alerts while the app is closed. Each paired device reports its own alert counts to the push relay, and the relay combines them across the phone's devices, so a phone paired to a Mac and a Linux box shows one badge and one notification.
+- The phone shows one collapsed notification that each later push replaces, never a stack. Its text is the number of alerts, plus the number of agents that need input when there are any ("4 alerts, 1 agent needs input"). It carries counts only, no project, workspace, or agent names.
+- The badge counts every visible alert, of every kind, the same set the Alerts tab lists and badges: dismissed alerts and hidden workspaces are excluded. When nothing is left to show, the badge clears and the delivered notification is withdrawn.
+- Only two kinds can buzz, each behind its own per-phone toggle: Blocked, for an agent that needs input (on by default), and Finished, for an agent that finished (off by default). Every other kind moves the badge and never buzzes.
+- A buzz waits about 10 seconds. An agent that is still blocked or finished and not dismissed after the wait buzzes; one that moved on or was dismissed within the wait never buzzes, and the badge simply follows. Several agents that turn up together share one buzz.
+- Only a new alert can buzz. A daemon restart, a phone registering, a toggle change, and a hidden workspace being shown again never buzz for alerts that already exist.
+- A badge change reaches the phone within a few seconds without buzzing. A burst of changes is sent as one update carrying the latest counts.
+- A phone that unregisters, or is unpaired from a device, stops receiving that device's counts at once and they leave its badge. A device that is unreachable keeps its last reported counts in the phone's badge until it reports again or the phone unregisters.
+- Only the iPhone app registers. A Mac pairing never receives pushes.
+
 ## Automations
 - An automation is a named task that lives on one device, targets one workspace there, and runs on demand or on a cron schedule. An agent automation spawns a coding agent (its command must launch claude, codex, opencode, copilot, pi, or amp and may carry flags) and seeds it with a prompt; a script automation runs its script at the workspace root in the device's login shell. The device is chosen only at creation.
 - An agent automation's prompt is sent only once the agent is identified, reading input (bracketed paste on), and has stopped painting its startup. It counts as delivered only when the agent visibly starts working: an unconsumed prompt is sent again, and one left sitting in the composer is submitted. An agent that never becomes ready, or a prompt that cannot be delivered, fails the run within 90 seconds and leaves the session running for inspection.

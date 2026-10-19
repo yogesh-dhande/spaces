@@ -20,7 +20,9 @@ import workspacecore
     @preconcurrency import Security
 #endif
 
-protocol SpacesDevicePairingStoreProtocol: Sendable {
+/// A pairing store also holds each phone's push registration, so a server cannot be built without push
+/// support: the registration lives and dies with the pairing record.
+protocol SpacesDevicePairingStoreProtocol: SpacesDevicePushRegistrationStore {
     func issueToken(for clientApp: SpacesDeviceClientApp, presentedToken: String?) throws -> String
     func listDevices() throws -> [SpacesDevicePairedClient]
     func revoke(installationID: String) throws
@@ -1115,6 +1117,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let identity: TerminalServiceTLSIdentity
     private let pairingCoordinator: SpacesDevicePairingCoordinator
     private let pairingStore: any SpacesDevicePairingStoreProtocol
+    private let pushNotifier: SpacesDevicePushNotifier
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
@@ -1475,7 +1478,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         agentHookInstallHandler = { try AgentHookInstaller.install($0) }
         agentHookTrustHandler = { try AgentHookInstaller.trust($0) }
         codexSharedServerStopHandler = { AgentHookInstaller.stopCodexSharedServer() }
-        if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
+        let resolvedPairingStore = try pairingStore ?? SpacesDevicePairingStore()
+        self.pairingStore = resolvedPairingStore
+        pushNotifier = Self.makePushNotifier(
+            store: resolvedPairingStore, relay: SpacesDevicePushRelayCurlClient(), scheduler: SpacesDevicePushDispatchScheduler(), identity: identity,
+            port: port)
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper()
         #endif
@@ -1502,13 +1509,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         agentHookInstallHandler: @escaping AgentHookInstallHandler = { try AgentHookInstaller.install($0) },
         agentHookTrustHandler: @escaping AgentHookTrustHandler = { try AgentHookInstaller.trust($0) },
         codexSharedServerStopHandler: @escaping CodexSharedServerStopHandler = { AgentHookInstaller.stopCodexSharedServer() },
-        workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient()
+        workspaceGitClient: RemoteWorkspaceGitClient = RemoteWorkspaceGitClient(),
+        pushRelayClient: any SpacesDevicePushRelayClient = SpacesDevicePushRelayCurlClient(),
+        pushScheduler: any SpacesDevicePushScheduler = SpacesDevicePushDispatchScheduler()
     ) {
         self.host = host
         self.port = port
         self.identity = identity
         self.pairingCoordinator = pairingCoordinator
         self.pairingStore = pairingStoreProtocol
+        pushNotifier = Self.makePushNotifier(
+            store: pairingStoreProtocol, relay: pushRelayClient, scheduler: pushScheduler, identity: identity, port: port)
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
@@ -1748,6 +1759,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         startOverviewStreamServer()
     }
 
+    /// The relay `deviceID` is the id the phone files this daemon under (see `SpacesDevicePushRelayDeviceID`).
+    private static func makePushNotifier(
+        store: any SpacesDevicePushRegistrationStore, relay: any SpacesDevicePushRelayClient, scheduler: any SpacesDevicePushScheduler,
+        identity: TerminalServiceTLSIdentity, port: Int
+    ) -> SpacesDevicePushNotifier {
+        SpacesDevicePushNotifier(
+            relay: relay, scheduler: scheduler,
+            relayDeviceID: SpacesDevicePushRelayDeviceID.make(certificateFingerprint: identity.certificateFingerprint, port: port),
+            loadRegistrations: { try store.pushRegistrations() },
+            // A relay verdict about a capability the phone has since replaced must not erase the new one.
+            clearRegistration: { installationID, capability in
+                _ = try? store.clearPushRegistration(forInstallationID: installationID, matchingCapability: capability)
+            })
+    }
+
     /// Starts the device-overview producer and observes database changes so each
     /// committed write pushes a fresh overview to subscribed clients. Cross-platform
     /// (POSIX socket + NotificationCenter), with the macOS distributed observer
@@ -1767,6 +1793,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return
         }
         overviewStreamServer = server
+        pushNotifier.start()
         startAddressWatch()
         overviewDatabaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
             [weak self] _ in self?.scheduleOverviewBroadcast()
@@ -1787,6 +1814,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 forName: TerminalOverviewSignal.name, object: try? IPCNotification.currentObject(), queue: nil
             ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
         #endif
+        // A quiet daemon raises no change, so nothing else would commit an overview: the push notifier would take
+        // the first newly blocked agent as its seed (and never buzz for it) and a registered phone's startup
+        // resync would wait indefinitely. The first rebuild always commits, since no broadcast precedes it.
+        scheduleOverviewBroadcast()
     }
 
     private func stopOverviewStreamServer() {
@@ -1812,6 +1843,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         overviewStreamServer?.stop()
         overviewStreamServer = nil
+        pushNotifier.stop()
         stopAddressWatch()
         // Confined to `overviewStreamQueue`, same as every other overview-broadcast field: a restart must
         // not compare its first rebuild against state a torn-down server broadcast, which could wrongly
@@ -1881,7 +1913,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .sendNow:
             pendingOverviewMetadataBroadcast?.cancel()
             pendingOverviewMetadataBroadcast = nil
-            commitOverviewBroadcast(bytes: bytes, projection: projection, at: now)
+            commitOverviewBroadcast(payload: payload, bytes: bytes, projection: projection, at: now)
         case .deferUntil(let deadline):
             // Already scheduled: a second metadata-only change arriving before the pending trailing push
             // fires does not push the deadline out further, it just gets picked up when the pending
@@ -1896,11 +1928,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func commitOverviewBroadcast(bytes: Data, projection: SpacesDeviceOverviewPayload, at now: Date) {
+    /// Every committed overview also reaches the push notifier, whether or not any client is subscribed:
+    /// notifications exist for the phone that is not connected. The notifier reads the full `payload`, not
+    /// the projection, because the projection blanks session timestamps that alert keys carry.
+    private func commitOverviewBroadcast(payload: SpacesDeviceOverviewPayload, bytes: Data, projection: SpacesDeviceOverviewPayload, at now: Date) {
         lastOverviewBroadcastBytes = bytes
         lastOverviewBroadcastProjection = projection
         lastOverviewBroadcastAt = now
         overviewStreamServer?.broadcast(data: bytes)
+        pushNotifier.overviewCommitted(payload)
     }
 
     /// Identifies one (workspace, ref, lastCommit) diff-signature subscription scope. `refName == nil,
@@ -3278,7 +3314,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     func revokePairing(installationID: String) throws -> [SpacesDevicePairedClient] {
         try syncOnQueue {
+            let registrations = self.pushRegistrationsToUnregister(installationID: installationID)
             try self.pairingStore.revoke(installationID: installationID)
+            self.unregisterPushNotifications(for: registrations)
             self.closeStreamRelaysOnQueue(forInstallationID: installationID)
             return try self.pairingStore.listDevices()
         }
@@ -3286,8 +3324,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     func resetPairingsAndStop() throws {
         try syncOnQueue {
+            let registrations = self.pushRegistrationsToUnregister(installationID: nil)
             self.stopOnQueue()
             try self.pairingStore.removeAll()
+            self.unregisterPushNotifications(for: registrations)
         }
     }
 
@@ -3445,6 +3485,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
         case .dismissAlerts(let payload): return try handleDismissAlertsRequest(payload, context: context)
+        case .registerPushNotifications(let payload): return try handleRegisterPushNotificationsRequest(payload, clientApp: request.clientApp)
+        case .unregisterPushNotifications: return try handleUnregisterPushNotificationsRequest(clientApp: request.clientApp)
         case .visitTerminalSession(let payload): return try handleVisitTerminalSessionRequest(payload, context: context)
         case .setComeBackLater(let payload): return try handleSetComeBackLaterRequest(payload, context: context)
         // Both transports divert engine-blocking terminal commands and review-comment mutations to a
@@ -6640,6 +6682,50 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleDismissAlertsRequest(_ request: SpacesDeviceDismissAlertsRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
         try context.orchestrator().dismissAlerts(keys: request.keys, in: try loadOverview(store: context.store()))
         return try refreshedMutationResponse(context: context, message: "Dismissed alerts.")
+    }
+
+    /// The caller is the phone whose pairing record authorization just matched, so the registration lands on
+    /// that record and on no other. Only the iOS app registers: a Mac pairing has no APNs token to push to.
+    private func handleRegisterPushNotificationsRequest(_ request: SpacesDeviceRegisterPushNotificationsRequest, clientApp: SpacesDeviceClientApp?)
+        throws -> SpacesDeviceAPIResponse
+    {
+        guard let clientApp, clientApp.bundleID == SpacesDeviceFirstPartyPolicy.iosBundleID else {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Only a paired phone can register for push notifications.", errorCode: .invalidArgument)
+        }
+        let capability = request.capability.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !capability.isEmpty else { return SpacesDeviceAPIResponse(ok: false, message: "Missing push capability.", errorCode: .invalidArgument) }
+        try pairingStore.setPushRegistration(
+            SpacesDevicePushRegistration(capability: capability, notifyBlocked: request.notifyBlocked, notifyFinished: request.notifyFinished),
+            forInstallationID: clientApp.installationID)
+        pushNotifier.registrationsChanged()
+        return SpacesDeviceAPIResponse(ok: true, message: "Registered push notifications.")
+    }
+
+    private func handleUnregisterPushNotificationsRequest(clientApp: SpacesDeviceClientApp?) throws -> SpacesDeviceAPIResponse {
+        guard let clientApp, clientApp.bundleID == SpacesDeviceFirstPartyPolicy.iosBundleID else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Only a paired phone has push notifications.", errorCode: .invalidArgument)
+        }
+        if let cleared = try pairingStore.clearPushRegistration(forInstallationID: clientApp.installationID, matchingCapability: nil) {
+            pushNotifier.unregister(installationID: clientApp.installationID, capability: cleared.capability)
+        }
+        return SpacesDeviceAPIResponse(ok: true, message: "Unregistered push notifications.")
+    }
+
+    /// Tells the relay to drop this daemon's counts for each phone in `registrations`, which a revoke or reset
+    /// has just removed from the pairing store.
+    func unregisterPushNotifications(for registrations: [String: SpacesDevicePushRegistration]) {
+        for (installationID, registration) in registrations {
+            pushNotifier.unregister(installationID: installationID, capability: registration.capability)
+        }
+    }
+
+    /// The registrations to unregister once `installationID` (or, with nil, every pairing) is removed. Read before
+    /// the removal because the record that holds the capability goes with it.
+    func pushRegistrationsToUnregister(installationID: String?) -> [String: SpacesDevicePushRegistration] {
+        guard let all = try? pairingStore.pushRegistrations() else { return [:] }
+        guard let installationID else { return all }
+        return all.filter { $0.key == installationID }
     }
 
     private func handleVisitTerminalSessionRequest(_ request: SpacesDeviceVisitTerminalSessionRequest, context: RequestContext) throws
