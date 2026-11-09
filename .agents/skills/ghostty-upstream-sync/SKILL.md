@@ -48,4 +48,6 @@ Then push: `git push origin spaces`.
 ## Known constraints
 
 - Ghostty's vendored `translate_c` runs a bare `zig env` at configure time; both build scripts prepend the pinned toolchain to `PATH` for this. Do not remove those exports.
+- `setup_ghostty.sh` patches the Zig it installs with `nix/patches/zig-0.17-ios-process-replace.patch` from the Ghostty source. On each sync, check whether upstream still ships that patch and still patches Zig in `flake.nix`; when upstream moves to a Zig release that carries the fix, bump `ZIG_VERSION` and drop the patch step in `ensure_zig`.
+- `ghosttyvtshim.c` takes its binding and callback types from the libghostty-vt headers, so prototype changes fail the build, but the typed `*_get`/`*_set` calls pass `void*` keyed by a data or option enum. On each sync, diff the doc comment of every kind the shim passes (`git diff <old-pin> <new-pin> -- include/ghostty/vt`) and match the shim's variable to the documented value type; a mismatch compiles and corrupts memory at run time.
 - The submodule gitlink is the single source of truth for the Ghostty commit; CI builds from it, never from local uncommitted state.

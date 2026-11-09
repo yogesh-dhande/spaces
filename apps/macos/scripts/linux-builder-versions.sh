@@ -14,4 +14,4 @@ SPACES_LINUX_BUILDER_APT_PACKAGES="curl git xz-utils python3 pkg-config libsqlit
 
 # Zig builds libghostty-vt. It is baked into the image rather than downloaded per build, so a
 # fresh worktree does not re-fetch the toolchain and no build writes it to the bind mount.
-SPACES_LINUX_ZIG_VERSION="0.16.0"
+SPACES_LINUX_ZIG_VERSION="0.17.0"

@@ -36,6 +36,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
 
     private let launchConfiguration: TerminalSessionLaunchConfiguration
     private let terminationEscalationIntervals: TerminationEscalationIntervals
+    private let testChildEnvironment: [(key: String, value: String)]
     private let readQueue: DispatchQueue
     private let writeQueue: DispatchQueue
     // Non-nil only while `collectingWrites` is running: the acknowledgements of the writes enqueued
@@ -102,10 +103,15 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         "WATCHDOG_PID", "WATCHDOG_USEC",
     ]
 
+    /// `testChildEnvironment` exists only so tests can give the login shell a profile that is not the
+    /// developer's (issue #935: a `~/.zprofile` with Homebrew's `brew shellenv` keeps the PTY master from
+    /// seeing EOF when a leader closes its stdio and stays alive). Product code leaves it empty.
     init(
+        testChildEnvironment: [(key: String, value: String)] = [],
         launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default,
         handoffWriteAction: (@Sendable (Int32, Data) -> HandoffWriteResult)? = nil, signalAction: (@Sendable (Int32, Int32) -> Void)? = nil
     ) {
+        self.testChildEnvironment = testChildEnvironment
         self.launchConfiguration = launchConfiguration
         self.terminationEscalationIntervals = terminationEscalationIntervals
         self.handoffWriteAction = handoffWriteAction ?? Self.writeAll
@@ -181,7 +187,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         // fd-close bound. See the child block below for why none of it may be built after the fork.
         guard let executable = strdup(command.executable) else { throw POSIXError(.ENOMEM) }
         let arguments = command.arguments.map { strdup($0) } + [nil]
-        let childEnvironment = Self.childEnvironmentForExec(overrides: environmentOverrides).map { strdup($0) } + [nil]
+        let childEnvironment = Self.childEnvironmentForExec(overrides: environmentOverrides + testChildEnvironment).map { strdup($0) } + [nil]
         let workingDirectory = launchConfiguration.workingDirectory.isEmpty ? nil : strdup(launchConfiguration.workingDirectory)
         let fileDescriptorUpperBound = Self.inheritedFileDescriptorUpperBoundForExec()
         // Even the argv/envp array-to-pointer bridging is compiled Swift, so it happens

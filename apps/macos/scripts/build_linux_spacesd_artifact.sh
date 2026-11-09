@@ -293,11 +293,11 @@ copy_ghostty_vt_libraries() {
     shopt -u nullglob
     [[ "${#libraries[@]}" -gt 0 ]] || die "libghostty-vt.so output missing under $source_lib_dir"
     cp -P "${libraries[@]}" "$destination_bin/"
-    if [[ -f "$destination_bin/libghostty-vt.so.0.1.0" && ! -e "$destination_bin/libghostty-vt.so.0" ]]; then
-        (cd "$destination_bin" && ln -s libghostty-vt.so.0.1.0 libghostty-vt.so.0)
+    if [[ -f "$destination_bin/libghostty-vt.so.1.1.0" && ! -e "$destination_bin/libghostty-vt.so.1" ]]; then
+        (cd "$destination_bin" && ln -s libghostty-vt.so.1.1.0 libghostty-vt.so.1)
     fi
-    if [[ -e "$destination_bin/libghostty-vt.so.0" && ! -e "$destination_bin/libghostty-vt.so" ]]; then
-        (cd "$destination_bin" && ln -s libghostty-vt.so.0 libghostty-vt.so)
+    if [[ -e "$destination_bin/libghostty-vt.so.1" && ! -e "$destination_bin/libghostty-vt.so" ]]; then
+        (cd "$destination_bin" && ln -s libghostty-vt.so.1 libghostty-vt.so)
     fi
 }
 

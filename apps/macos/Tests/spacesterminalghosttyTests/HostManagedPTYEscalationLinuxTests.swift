@@ -67,7 +67,7 @@
                 workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "trap '' HUP; (exec sleep 30) & exit 0",
                 createdAt: "2026-10-10T00:00:00Z", workspaceID: "workspace-escalation", kind: .shell)
             let driver = HostManagedPTYTerminalSessionDriver(
-                launchConfiguration: configuration, terminationEscalationIntervals: intervals,
+                testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: intervals,
                 signalAction: { target, signal in
                     recorder.record(target: target, signal: signal)
                     _ = kill(target, signal)

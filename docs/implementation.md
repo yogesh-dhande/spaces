@@ -493,6 +493,7 @@ A selection that belongs to one client. The daemon holds none: the control proto
 **Linking and launch.**
 
 - **iOS links `libghostty-vt` statically**, because it cannot `dlopen` outside the bundle and a stripped Release binary exports nothing to `dlsym`: `ghosttyvtshim` names functions directly (`SPACES_GHOSTTY_VT_STATIC_LINK`) from one X-macro table, and requests the slice with `#pragma comment(lib, ...)` chosen by `TARGET_OS_SIMULATOR`, since Xcode's per-product package framework links see no app link settings. `Package.swift` points `-L` at `.local/ghosttyvt/ios-link/`, filled by `setup_ghostty.sh`.
+- **The X-macro table takes each binding's type from the header** (`__typeof__(&symbol)`), as does the callback registration table, so a prototype or callback signature that changes upstream is a compile error in both the `dlsym` and the static-link build. The typed `*_get`/`*_set` calls are the exception: they pass `void*` keyed by a data or option enum, so a value type that changes for one kind compiles cleanly and corrupts memory at run time. Each Ghostty sync diffs the doc comment of every kind the shim passes.
 - `simctl launch` hands the app an immediate EOF on stdin, so `GhosttyMobileAppService` repairs stdout and stderr and rebinds stdin to a kept-open pipe before booting Ghostty, or the runtime shuts down at launch.
 
 ### Sidebar model and repaints

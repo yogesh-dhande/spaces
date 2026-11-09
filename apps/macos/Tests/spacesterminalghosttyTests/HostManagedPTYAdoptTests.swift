@@ -78,7 +78,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
     /// and the read loop's deferred close.
     func testTerminateReturnsPromptlyAndReapsChildHoldingPTYSlaveOpen() throws {
         let driver = HostManagedPTYTerminalSessionDriver(
-            launchConfiguration: makeConfiguration(sessionID: "terminate-live-child", command: "cat"), terminationEscalationIntervals: fastEscalation)
+            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: makeConfiguration(sessionID: "terminate-live-child", command: "cat"), terminationEscalationIntervals: fastEscalation)
         try driver.startIfNeeded()
         XCTAssertTrue(waitUntil { driver.childPID() != nil }, "child never came up")
         let childPID = try XCTUnwrap(driver.childPID())
@@ -110,7 +110,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         // after the leader exits.
         let command = "(trap '' HUP; exec sleep 30) & exit 0"
         let driver = HostManagedPTYTerminalSessionDriver(
-            launchConfiguration: makeConfiguration(sessionID: "terminate-survivor", command: command), terminationEscalationIntervals: fastEscalation)
+            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: makeConfiguration(sessionID: "terminate-survivor", command: command), terminationEscalationIntervals: fastEscalation)
         let closedExpectation = expectation(description: "reader reaches EOF and the closed handler fires")
         driver.setSessionClosedHandler { closedExpectation.fulfill() }
         try driver.startIfNeeded()
@@ -137,7 +137,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
     func testAdoptRoundTripHandsOffLiveChild() throws {
         let configuration = makeConfiguration(sessionID: "roundtrip", command: "cat")
         var driverA: HostManagedPTYTerminalSessionDriver? = HostManagedPTYTerminalSessionDriver(
-            launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         let collectorA = OutputCollector()
         driverA?.setOutputHandler { collectorA.append($0) }
         try driverA?.startIfNeeded()
@@ -171,7 +171,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         // The child must still be alive for driver B to adopt it.
         XCTAssertEqual(kill(snapshot.childPID, 0), 0, "dropping driver A killed the child before adoption")
 
-        let driverB = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let driverB = HostManagedPTYTerminalSessionDriver(testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         let collectorB = OutputCollector()
         driverB.setOutputHandler { collectorB.append($0) }
         driverB.adopt(masterFD: adoptedFD, childPID: snapshot.childPID)
@@ -193,7 +193,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
     func testOutputOrderingAcrossHandoffSwap() throws {
         let command = "for i in $(seq 1 200); do printf 'L%04d\\n' \"$i\"; if [ $((i % 20)) -eq 0 ]; then sleep 0.02; fi; done"
         let configuration = makeConfiguration(sessionID: "ordering", command: command)
-        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let driver = HostManagedPTYTerminalSessionDriver(testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         let handlerCollector = OutputCollector()
         driver.setOutputHandler { handlerCollector.append($0) }
 
@@ -225,7 +225,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
 
     func testHandoffBufferingWaitsForInFlightHandlerDelivery() throws {
         let configuration = makeConfiguration(sessionID: "handler-barrier", command: "printf barrier-ready")
-        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let driver = HostManagedPTYTerminalSessionDriver(testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         let handlerEntered = expectation(description: "output handler entered")
         let sessionClosed = expectation(description: "short-lived child exited")
         let releaseHandler = DispatchSemaphore(value: 0)
@@ -287,7 +287,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         close(slave)
 
         let driver = HostManagedPTYTerminalSessionDriver(
-            launchConfiguration: makeConfiguration(sessionID: "dead-child", command: "cat"), terminationEscalationIntervals: fastEscalation)
+            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: makeConfiguration(sessionID: "dead-child", command: "cat"), terminationEscalationIntervals: fastEscalation)
         let closedExpectation = expectation(description: "adopting a dead-child session fires the closed handler")
         driver.setSessionClosedHandler { closedExpectation.fulfill() }
         driver.adopt(masterFD: master, childPID: deadPID)
@@ -300,7 +300,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
 
     func testEndHandoffOutputBufferingRestoresHandlerDelivery() throws {
         let configuration = makeConfiguration(sessionID: "restore", command: "cat")
-        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let driver = HostManagedPTYTerminalSessionDriver(testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         let collector = OutputCollector()
         driver.setOutputHandler { collector.append($0) }
         try driver.startIfNeeded()
@@ -323,7 +323,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
 
     func testPauseHandoffOutputStopsFileAppendsUntilFallbackDelivery() throws {
         let configuration = makeConfiguration(sessionID: "pause-fallback", command: "cat")
-        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let driver = HostManagedPTYTerminalSessionDriver(testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         let collector = OutputCollector()
         driver.setOutputHandler { collector.append($0) }
         try driver.startIfNeeded()
@@ -349,7 +349,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
 
     func testFailedHandoffFileOpenRestoresBufferedOutputToHandler() throws {
         let configuration = makeConfiguration(sessionID: "restore-buffer", command: "cat")
-        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let driver = HostManagedPTYTerminalSessionDriver(testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         let collector = OutputCollector()
         driver.setOutputHandler { collector.append($0) }
         try driver.startIfNeeded()
@@ -380,7 +380,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
     /// prompt no agent ever received.
     func testWriteTornDownBeforeItRunsReportsFailure() async throws {
         let configuration = makeConfiguration(sessionID: "write-ack-teardown", command: "sleep 30")
-        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let driver = HostManagedPTYTerminalSessionDriver(testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         try driver.startIfNeeded()
 
         driver.sendRawBytes(Data(repeating: 0x41, count: 64 << 20))
@@ -400,7 +400,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
     /// are really there (the child echoes them back).
     func testWriteToALiveSessionReportsDelivery() async throws {
         let configuration = makeConfiguration(sessionID: "write-ack-delivered", command: "cat")
-        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let driver = HostManagedPTYTerminalSessionDriver(testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
         let collector = OutputCollector()
         driver.setOutputHandler { collector.append($0) }
         try driver.startIfNeeded()
@@ -415,7 +415,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
     func testDirectHandoffWriteFailureAbortsExecAndRestoresOutputToHandler() throws {
         let configuration = makeConfiguration(sessionID: "direct-write-failure", command: "cat")
         let driver = HostManagedPTYTerminalSessionDriver(
-            launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation,
+            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation,
             handoffWriteAction: { _, data in data.isEmpty ? .success(byteCount: 0) : .failure(bytesWritten: 0, errorCode: ENOSPC) })
         let collector = OutputCollector()
         driver.setOutputHandler { collector.append($0) }

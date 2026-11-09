@@ -14,7 +14,7 @@ ARTIFACT_RELEASE_PREFIX="ghostty-artifacts-"
 # Bump whenever the Ghostty build flags below change. The manifest records no
 # build flags and the artifact release is keyed on the Ghostty SHA alone, so
 # this is the only thing that invalidates artifacts built with older flags.
-BUILD_SCRIPT_VERSION="3"
+BUILD_SCRIPT_VERSION="4"
 MANIFEST_SCHEMA_VERSION="2"
 VALIDATION_XCODE_BUILD_MISMATCH=42
 VALIDATION_OPTIMIZE_MISMATCH=43
@@ -35,7 +35,7 @@ GHOSTTYVT_LIB_ROOT="$GHOSTTYVT_ROOT/lib"
 GHOSTTYVT_IOS_LINK_ROOT="$GHOSTTYVT_ROOT/ios-link"
 TOOLCHAIN_ROOT="$GHOSTTYVT_ROOT/toolchain"
 
-ZIG_VERSION="0.16.0"
+ZIG_VERSION="0.17.0"
 GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
 
 MODE="default"
@@ -749,8 +749,25 @@ ensure_zig() {
         tmp_dir="$(mktemp -d)"
         local archive="$archive_name.tar.xz"
         curl -fL "https://ziglang.org/download/$ZIG_VERSION/$archive" -o "$tmp_dir/$archive"
+        tar -xJf "$tmp_dir/$archive" -C "$tmp_dir"
+
+        # Stock Zig 0.17.x cannot compile std.Io.Threaded.processReplace when
+        # cross-compiling C/C++ for iOS, which fails the fork-only iOS and
+        # iOS-simulator GhosttyKit slices. Upstream Ghostty backports the fix
+        # (Zig 0bfd34342b) by patching its toolchain the same way. This step goes
+        # away when ZIG_VERSION moves to a Zig release that carries the fix.
+        # Patching happens in the temp dir and the tree is moved into place only
+        # afterwards, so a failed patch never leaves an unpatched toolchain that
+        # the `-x "$zig_bin"` check above would reuse.
+        local zig_patch="$GHOSTTY_SOURCE_ROOT/nix/patches/zig-0.17-ios-process-replace.patch"
+        [[ -f "$zig_patch" ]] \
+            || die "the Ghostty source no longer ships $zig_patch; revisit the ZIG_VERSION pin and the Zig patch step in ensure_zig"
+        (cd "$tmp_dir/$archive_name" && patch -p1 <"$zig_patch" >&2) \
+            || die "failed to apply $zig_patch to Zig $ZIG_VERSION"
+
         mkdir -p "$TOOLCHAIN_ROOT"
-        tar -xJf "$tmp_dir/$archive" -C "$TOOLCHAIN_ROOT"
+        rm -rf "$zig_install_root"
+        mv "$tmp_dir/$archive_name" "$zig_install_root"
         rm -rf "$tmp_dir"
     else
         echo "==> Zig $ZIG_VERSION already present at $zig_bin" >&2
@@ -914,7 +931,8 @@ build_from_source() {
         # below never reaches Ghostty's SharedDeps sentry block, so libghostty-vt has no
         # sentry symbols regardless and needs no flag.
         "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dsentry=false -Dversion-string="$app_version"
-        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Dversion-string="$app_version"
+        # Lib-vt mode builds the libghostty-vt xcframework (the iOS slices) only on request.
+        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Demit-xcframework=true -Dversion-string="$app_version"
     )
 
     install_source_build_outputs

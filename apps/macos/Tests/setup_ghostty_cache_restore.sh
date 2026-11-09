@@ -166,10 +166,10 @@ chmod +x "$STUB_BIN/gh" "$STUB_BIN/xcodebuild" "$STUB_BIN/xcrun" "$STUB_BIN/zig"
 ARCH="$(uname -m)"
 case "$ARCH" in
     arm64)
-        ZIG_ARCHIVE_NAME="zig-aarch64-macos-0.16.0"
+        ZIG_ARCHIVE_NAME="zig-aarch64-macos-0.17.0"
         ;;
     x86_64)
-        ZIG_ARCHIVE_NAME="zig-x86_64-macos-0.16.0"
+        ZIG_ARCHIVE_NAME="zig-x86_64-macos-0.17.0"
         ;;
     *)
         fail "unsupported test architecture: $ARCH"

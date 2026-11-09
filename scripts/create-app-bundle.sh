@@ -94,14 +94,14 @@ copy_or_build_universal_ghostty_vt_dylibs() {
     -arch x86_64 \
     -mmacosx-version-min=14.0 \
     -install_name @rpath/libghostty-vt.dylib \
-    -compatibility_version 0.1.0 \
-    -current_version 0.1.0 \
-    -o "$destination_dir/libghostty-vt.0.1.0.dylib" \
+    -compatibility_version 1.0.0 \
+    -current_version 1.1.0 \
+    -o "$destination_dir/libghostty-vt.1.1.0.dylib" \
     -Wl,-all_load \
     "$universal_static"
-  ln -s libghostty-vt.0.1.0.dylib "$destination_dir/libghostty-vt.0.dylib"
-  ln -s libghostty-vt.0.dylib "$destination_dir/libghostty-vt.dylib"
-  spaces_release_require_universal_binary "$destination_dir/libghostty-vt.0.1.0.dylib" "bundled libghostty-vt dylib"
+  ln -s libghostty-vt.1.1.0.dylib "$destination_dir/libghostty-vt.1.dylib"
+  ln -s libghostty-vt.1.dylib "$destination_dir/libghostty-vt.dylib"
+  spaces_release_require_universal_binary "$destination_dir/libghostty-vt.1.1.0.dylib" "bundled libghostty-vt dylib"
 }
 
 rm -rf "$BUNDLE_OUTPUT"

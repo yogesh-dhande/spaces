@@ -1110,8 +1110,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             XCTAssertEqual(GhosttyActionEventParser.parse(hover), .mouseOverLink("/tmp/screenshot.png"))
         }
 
-        hover.action.mouse_over_link = ghostty_action_mouse_over_link_s(url: nil, len: 0)
-        XCTAssertEqual(GhosttyActionEventParser.parse(hover), .mouseOverLink(nil))
+        "".withCString { pointer in
+            hover.action.mouse_over_link = ghostty_action_mouse_over_link_s(url: pointer, len: 0)
+            XCTAssertEqual(GhosttyActionEventParser.parse(hover), .mouseOverLink(nil))
+        }
     }
 
     @MainActor func testMirrorTerminalViewOpensSupportedLinksAndTracksHover() {

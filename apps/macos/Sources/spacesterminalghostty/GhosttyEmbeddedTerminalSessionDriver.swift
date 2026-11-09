@@ -804,7 +804,7 @@
         }
 
         private nonisolated static let surfaceDataCallback: ghostty_surface_data_cb = { userdata, bytes, len in
-            guard let userdata, let bytes, len > 0 else { return }
+            guard let userdata, len > 0 else { return }
             let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
             runtime.handoffOutputDeliveryFence.beginDelivery()
             defer { runtime.handoffOutputDeliveryFence.finishDelivery() }
@@ -820,7 +820,7 @@
         }
 
         private nonisolated static let hostManagedReceiveBufferCallback: ghostty_surface_receive_buffer_cb = { userdata, bytes, len in
-            guard let userdata, let bytes, len > 0 else { return }
+            guard let userdata, len > 0 else { return }
             let hostPTY = Unmanaged<HostManagedPTYTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
             hostPTY.sendRawBytes(Data(bytes: bytes, count: len))
         }
