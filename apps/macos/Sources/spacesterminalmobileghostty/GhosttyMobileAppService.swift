@@ -45,8 +45,8 @@ import Foundation
             }
         }
 
-        private static func string(pointer: UnsafePointer<CChar>?, count: Int) -> String? {
-            guard let pointer, count > 0 else { return nil }
+        private static func string(pointer: UnsafePointer<CChar>, count: Int) -> String? {
+            guard count > 0 else { return nil }
             let data = Data(bytes: pointer, count: count)
             return String(data: data, encoding: .utf8)
         }
@@ -125,31 +125,30 @@ import Foundation
             self.app = app
         }
 
-        static func makeRuntimeConfig() -> ghostty_runtime_config_s {
-            var runtimeConfig = ghostty_runtime_config_s()
-            runtimeConfig.userdata = nil
-            runtimeConfig.supports_selection_clipboard = false
-            runtimeConfig.wakeup_cb = { _ in Task { @MainActor in GhosttyMobileAppService.shared.tick() } }
-            runtimeConfig.action_cb = { _, target, action in
-                guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
-                guard let event = GhosttyMobileActionEventParser.parse(action) else { return true }
-                let surfaceKey = UInt(bitPattern: target.target.surface)
-                if Thread.isMainThread {
-                    MainActor.assumeIsolated { GhosttyMobileAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
-                } else {
-                    Task { @MainActor in GhosttyMobileAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
-                }
-                return true
-            }
-            // Mobile surfaces are display-only mirrors that parse no VT stream, so no clipboard request
-            // ever originates there: reads are reported unsupported, the confirm callback never fires,
-            // and a program's clipboard write reaches the phone through the session stream (forwarded
-            // by the owning daemon), never through this runtime callback.
-            runtimeConfig.read_clipboard_cb = { _, _, _, _, _, _ in GHOSTTY_CLIPBOARD_READ_UNSUPPORTED }
-            runtimeConfig.confirm_read_clipboard_cb = { _, _, _, _ in }
-            runtimeConfig.write_clipboard_cb = { _, _, _, _, _ in }
-            runtimeConfig.close_surface_cb = { _, _ in }
-            return runtimeConfig
+        nonisolated static func makeRuntimeConfig() -> ghostty_runtime_config_s {
+            ghostty_runtime_config_s(
+                userdata: nil,
+                supports_selection_clipboard: false,
+                wakeup_cb: { _ in Task { @MainActor in GhosttyMobileAppService.shared.tick() } },
+                action_cb: { _, target, action in
+                    guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
+                    guard let event = GhosttyMobileActionEventParser.parse(action) else { return true }
+                    let surfaceKey = UInt(bitPattern: target.target.surface)
+                    if Thread.isMainThread {
+                        MainActor.assumeIsolated { GhosttyMobileAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
+                    } else {
+                        Task { @MainActor in GhosttyMobileAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
+                    }
+                    return true
+                },
+                // Mobile surfaces are display-only mirrors that parse no VT stream, so no clipboard request
+                // ever originates there: reads are reported unsupported, the confirm callback never fires,
+                // and a program's clipboard write reaches the phone through the session stream (forwarded
+                // by the owning daemon), never through this runtime callback.
+                read_clipboard_cb: { _, _, _, _, _, _ in GHOSTTY_CLIPBOARD_READ_UNSUPPORTED },
+                confirm_read_clipboard_cb: { _, _, _, _ in },
+                write_clipboard_cb: { _, _, _, _, _ in },
+                close_surface_cb: { _, _ in })
         }
 
         private func surfaceKey(_ surface: ghostty_surface_t) -> UInt { UInt(bitPattern: surface) }

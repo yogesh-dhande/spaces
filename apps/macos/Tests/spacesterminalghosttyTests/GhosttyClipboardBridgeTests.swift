@@ -29,15 +29,20 @@
             return (userData, Unmanaged.passUnretained(userData).toOpaque())
         }
 
+        /// Ghostty's read callback never passes null `state` or `mimes`; the bridge only echoes `state` back
+        /// to the surface (absent here) and reads `mimes` up to `mimesCount`.
+        private let stubState = UnsafeMutableRawPointer(bitPattern: 0x1)!
+        private let emptyMimes = UnsafePointer<UnsafePointer<CChar>>(bitPattern: 0x1)!
+
         private func makePrivatePasteboard() -> NSPasteboard {
             NSPasteboard(name: NSPasteboard.Name("spaces-test-\(UUID().uuidString)"))
         }
 
         func testPreferredPlainTextSelectsTextPlainPayload() {
-            let plainMime = strdup("text/plain;charset=utf-8")
-            let plainData = strdup("hello from clipboard")
-            let imageMime = strdup("image/png")
-            let imageData = strdup("binary")
+            let plainMime = strdup("text/plain;charset=utf-8")!
+            let plainData = strdup("hello from clipboard")!
+            let imageMime = strdup("image/png")!
+            let imageData = strdup("binary")!
             defer {
                 free(plainMime)
                 free(plainData)
@@ -55,8 +60,8 @@
         }
 
         func testPreferredPlainTextReturnsNilWithoutPlainTextEntry() {
-            let imageMime = strdup("image/png")
-            let imageData = strdup("binary")
+            let imageMime = strdup("image/png")!
+            let imageData = strdup("binary")!
             defer {
                 free(imageMime)
                 free(imageData)
@@ -72,8 +77,8 @@
         /// `len` is shorter than its underlying NUL-terminated string must yield only the first `len`
         /// bytes, not the full string.
         func testPreferredPlainTextHonorsExplicitLength() {
-            let plainMime = strdup("text/plain")
-            let plainData = strdup("hello from clipboard")
+            let plainMime = strdup("text/plain")!
+            let plainData = strdup("hello from clipboard")!
             defer {
                 free(plainMime)
                 free(plainData)
@@ -100,7 +105,7 @@
 
             for location in [GHOSTTY_CLIPBOARD_PRIMARY, GHOSTTY_CLIPBOARD_SELECTION] {
                 let result = GhosttyClipboardBridge.readClipboard(
-                    userdata: pointer, location: location, state: nil, mimes: nil, mimesCount: 0, list: true)
+                    userdata: pointer, location: location, state: stubState, mimes: emptyMimes, mimesCount: 0, list: true)
                 XCTAssertEqual(result, GHOSTTY_CLIPBOARD_READ_UNSUPPORTED)
             }
 
@@ -125,7 +130,7 @@
             let (userData, pointer) = await makeUserDataPointer()
 
             let result = GhosttyClipboardBridge.readClipboard(
-                userdata: pointer, location: GHOSTTY_CLIPBOARD_STANDARD, state: nil, mimes: nil, mimesCount: 0,
+                userdata: pointer, location: GHOSTTY_CLIPBOARD_STANDARD, state: stubState, mimes: emptyMimes, mimesCount: 0,
                 list: true, pasteboard: pasteboard)
 
             XCTAssertEqual(result, GHOSTTY_CLIPBOARD_READ_STARTED)
@@ -144,13 +149,13 @@
 
             let (userData, pointer) = await makeUserDataPointer()
 
-            let mime = strdup("text/plain")
+            let mime = strdup("text/plain")!
             defer { free(mime) }
-            let mimes: [UnsafePointer<CChar>?] = [UnsafePointer(mime)]
+            let mimes: [UnsafePointer<CChar>] = [UnsafePointer(mime)]
 
             let result = mimes.withUnsafeBufferPointer { buffer in
                 GhosttyClipboardBridge.readClipboard(
-                    userdata: pointer, location: GHOSTTY_CLIPBOARD_STANDARD, state: nil, mimes: buffer.baseAddress,
+                    userdata: pointer, location: GHOSTTY_CLIPBOARD_STANDARD, state: stubState, mimes: buffer.baseAddress!,
                     mimesCount: 1, list: false, pasteboard: pasteboard)
             }
 
@@ -168,13 +173,13 @@
 
             let (userData, pointer) = await makeUserDataPointer()
 
-            let mime = strdup("text/plain")
+            let mime = strdup("text/plain")!
             defer { free(mime) }
-            let mimes: [UnsafePointer<CChar>?] = [UnsafePointer(mime)]
+            let mimes: [UnsafePointer<CChar>] = [UnsafePointer(mime)]
 
             let result = mimes.withUnsafeBufferPointer { buffer in
                 GhosttyClipboardBridge.readClipboard(
-                    userdata: pointer, location: GHOSTTY_CLIPBOARD_STANDARD, state: nil, mimes: buffer.baseAddress,
+                    userdata: pointer, location: GHOSTTY_CLIPBOARD_STANDARD, state: stubState, mimes: buffer.baseAddress!,
                     mimesCount: 1, list: false, pasteboard: pasteboard)
             }
 
@@ -193,7 +198,7 @@
             let (userData, pointer) = await makeUserDataPointer()
 
             let result = GhosttyClipboardBridge.readClipboard(
-                userdata: pointer, location: GHOSTTY_CLIPBOARD_STANDARD, state: nil, mimes: nil, mimesCount: 0,
+                userdata: pointer, location: GHOSTTY_CLIPBOARD_STANDARD, state: stubState, mimes: emptyMimes, mimesCount: 0,
                 list: true, pasteboard: pasteboard)
 
             XCTAssertEqual(result, GHOSTTY_CLIPBOARD_READ_STARTED)

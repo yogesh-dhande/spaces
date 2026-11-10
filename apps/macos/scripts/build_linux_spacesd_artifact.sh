@@ -18,12 +18,10 @@ GHOSTTYVT_ROOT="$APP_ROOT/.local/ghosttyvt"
 GHOSTTYVT_INCLUDE_ROOT="$GHOSTTYVT_ROOT/include"
 GHOSTTYVT_LINUX_LIB_ROOT="$GHOSTTYVT_ROOT/lib-linux"
 
-# The pinned Zig version, and the packages this build needs, are baked into the builder image
-# this script runs inside (see ensure_linux_builder_image.sh). Sourcing the same file both
-# provisions the image and checks it here, so the two cannot drift.
+# The optimize mode libghostty-vt was built with (recorded in the manifest) comes from the same
+# file the library build reads (build_linux_ghostty_vt.sh), so the two cannot drift.
 source "$SCRIPT_DIR/linux-builder-versions.sh"
-ZIG_VERSION="$SPACES_LINUX_ZIG_VERSION"
-GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
+GHOSTTY_BUILD_OPTIMIZE="$SPACES_LINUX_GHOSTTY_VT_OPTIMIZE"
 host_arch="$(uname -m)"
 case "$host_arch" in
     x86_64|amd64) DEFAULT_ARTIFACT_ARCH="x86_64" ;;
@@ -36,14 +34,15 @@ DEFAULT_ARTIFACT_VERSION="$(sed -nE 's/.*public static let short = "([^"]+)".*/\
 ARTIFACT_VERSION="${SPACES_ARTIFACT_VERSION:-${DEFAULT_ARTIFACT_VERSION:-dev}}"
 OUTPUT_DIR="$REPO_ROOT/dist/linux"
 BUILD_CONFIGURATION="release"
-BUILD_GHOSTTY_VT=1
 SMOKE=1
 
 usage() {
     cat <<'EOF'
-Usage: apps/macos/scripts/build_linux_spacesd_artifact.sh [--output-dir DIR] [--debug] [--arch x86_64|arm64] [--skip-ghostty-vt-build] [--skip-smoke]
+Usage: apps/macos/scripts/build_linux_spacesd_artifact.sh [--output-dir DIR] [--debug] [--arch x86_64|arm64] [--skip-smoke]
 
-Builds the Linux spacesd device artifact for the current host architecture. The archive contains:
+Builds the Linux spacesd device artifact for the current host architecture from the libghostty-vt
+that apps/macos/scripts/build_linux_ghostty_vt.sh staged into apps/macos/.local/ghosttyvt (run it
+first, via build_linux_ghostty_vt_in_docker.sh). The archive contains:
   spacesd-linux-<arch>/bin/spaces
   spacesd-linux-<arch>/bin/spacesd
   spacesd-linux-<arch>/bin/spacesd-bin
@@ -77,10 +76,6 @@ while [[ "$#" -gt 0 ]]; do
             ARTIFACT_ARCH="$2"
             ARTIFACT_ID="spacesd-linux-$ARTIFACT_ARCH"
             shift 2
-            ;;
-        --skip-ghostty-vt-build)
-            BUILD_GHOSTTY_VT=0
-            shift
             ;;
         --skip-smoke)
             SMOKE=0
@@ -144,98 +139,11 @@ resolve_ghostty_sha() {
     echo "unknown"
 }
 
-ensure_ghostty_submodule() {
-    if [[ -f "$GHOSTTY_SOURCE_ROOT/build.zig.zon" ]]; then
-        return
-    fi
-    if ghostty_submodule_is_initialized; then
-        return
-    fi
-    echo "==> Initializing Ghostty submodule"
-    git -C "$REPO_ROOT" submodule update --init --recursive -- "$SUBMODULE_PATH"
-}
-
-ghostty_dirty_state() {
-    if ! ghostty_submodule_is_initialized; then
-        echo "false"
-        return
-    fi
-    if [[ -n "$(git -C "$GHOSTTY_SOURCE_ROOT" status --porcelain)" ]]; then
-        echo "true"
-    else
-        echo "false"
-    fi
-}
-
-ghostty_app_version() {
-    local version_line
-    version_line="$(grep -m1 '\.version = ' "$GHOSTTY_SOURCE_ROOT/build.zig.zon" || true)"
-    local app_version
-    app_version="$(sed -E 's/.*"([^"]+)".*/\1/' <<<"$version_line")"
-    if [[ -z "$app_version" || "$app_version" == "$version_line" ]]; then
-        die "failed to determine Ghostty version string from $GHOSTTY_SOURCE_ROOT/build.zig.zon"
-    fi
-    echo "$app_version"
-}
-
-# Zig comes from the builder image this script runs inside, never from a download into the
-# workspace. Asserting the pinned version here is what makes running in the wrong image a loud
-# failure rather than a libghostty-vt built by an unpinned compiler.
-resolve_zig() {
-    local zig_bin installed_version
-    zig_bin="$(command -v zig || true)"
-    [[ -n "$zig_bin" ]] || die "zig is not on PATH; run this build inside the image apps/macos/scripts/ensure_linux_builder_image.sh provisions"
-    installed_version="$("$zig_bin" version)"
-    [[ "$installed_version" == "$ZIG_VERSION" ]] || die "zig $installed_version is on PATH but Linux spacesd artifacts pin zig $ZIG_VERSION; rebuild the builder image with apps/macos/scripts/ensure_linux_builder_image.sh"
-    echo "$zig_bin"
-}
-
-build_ghostty_vt() {
-    ensure_ghostty_submodule
-    local dirty
-    dirty="$(ghostty_dirty_state)"
-    if [[ "$dirty" == "true" && "${SPACES_LINUX_ALLOW_DIRTY_GHOSTTY:-0}" != "1" ]]; then
-        die "Ghostty submodule has local modifications; commit them before building Linux spacesd artifacts"
-    fi
-
-    local zig_bin
-    zig_bin="$(resolve_zig)"
-    local app_version
-    app_version="$(ghostty_app_version)"
-
-    echo "==> Building Linux libghostty-vt from $GHOSTTY_SOURCE_ROOT"
-    (
-        cd "$GHOSTTY_SOURCE_ROOT"
-        # Ghostty's vendored translate_c build helper shells out to a bare
-        # `zig env`, so the pinned toolchain must be first on PATH.
-        export PATH="$(dirname "$zig_bin"):$PATH"
-        # -Dcpu=baseline: this is a native (non-cross) build, and a Zig target query that
-        # names neither an architecture nor a CPU resolves the *build host's* CPU and
-        # compiles for it. The artifact then only runs on CPUs at least as capable as
-        # whatever machine happened to build it -- on an AVX-512 runner, libghostty-vt gets
-        # EVEX-encoded instructions and spacesd dies with SIGILL on the first terminal page
-        # allocation on every device without AVX-512. Ghostty's Apple targets already pin a
-        # generic CPU (Config.genericMacOSTarget), so only this Linux build needs the flag.
-        # `verify_artifact_cpu_baseline` asserts the pin held in the packaged binaries.
-        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Dcpu=baseline -Demit-lib-vt=true -Dversion-string="$app_version"
-    )
-}
-
-stage_ghostty_vt_development_artifacts() {
-    ensure_ghostty_submodule
-    local source_include="$GHOSTTY_SOURCE_ROOT/zig-out/include"
-    local source_lib="$GHOSTTY_SOURCE_ROOT/zig-out/lib"
-    [[ -f "$source_include/ghostty/vt.h" ]] || die "libghostty-vt headers missing at $source_include"
-    [[ -d "$source_lib" ]] || die "libghostty-vt library directory missing at $source_lib"
-    shopt -s nullglob
-    local libraries=("$source_lib"/libghostty-vt.so*)
-    shopt -u nullglob
-    [[ "${#libraries[@]}" -gt 0 ]] || die "libghostty-vt.so output missing under $source_lib"
-
-    rm -rf "$GHOSTTYVT_INCLUDE_ROOT" "$GHOSTTYVT_LINUX_LIB_ROOT"
-    mkdir -p "$GHOSTTYVT_ROOT"
-    cp -a "$source_include" "$GHOSTTYVT_INCLUDE_ROOT"
-    cp -a "$source_lib" "$GHOSTTYVT_LINUX_LIB_ROOT"
+# libghostty-vt is built by a separate Zig step that runs in the host-native container and
+# stages its output here (build_linux_ghostty_vt.sh); this build only consumes it.
+require_staged_ghostty_vt() {
+    [[ -f "$GHOSTTYVT_INCLUDE_ROOT/ghostty/vt.h" ]] || die "libghostty-vt headers missing at $GHOSTTYVT_INCLUDE_ROOT; run apps/macos/scripts/build_linux_ghostty_vt_in_docker.sh --arch $ARTIFACT_ARCH first"
+    compgen -G "$GHOSTTYVT_LINUX_LIB_ROOT/libghostty-vt.so*" >/dev/null || die "libghostty-vt.so missing under $GHOSTTYVT_LINUX_LIB_ROOT; run apps/macos/scripts/build_linux_ghostty_vt_in_docker.sh --arch $ARTIFACT_ARCH first"
 }
 
 swift_build_flags() {
@@ -293,11 +201,11 @@ copy_ghostty_vt_libraries() {
     shopt -u nullglob
     [[ "${#libraries[@]}" -gt 0 ]] || die "libghostty-vt.so output missing under $source_lib_dir"
     cp -P "${libraries[@]}" "$destination_bin/"
-    if [[ -f "$destination_bin/libghostty-vt.so.0.1.0" && ! -e "$destination_bin/libghostty-vt.so.0" ]]; then
-        (cd "$destination_bin" && ln -s libghostty-vt.so.0.1.0 libghostty-vt.so.0)
+    if [[ -f "$destination_bin/libghostty-vt.so.1.1.0" && ! -e "$destination_bin/libghostty-vt.so.1" ]]; then
+        (cd "$destination_bin" && ln -s libghostty-vt.so.1.1.0 libghostty-vt.so.1)
     fi
-    if [[ -e "$destination_bin/libghostty-vt.so.0" && ! -e "$destination_bin/libghostty-vt.so" ]]; then
-        (cd "$destination_bin" && ln -s libghostty-vt.so.0 libghostty-vt.so)
+    if [[ -e "$destination_bin/libghostty-vt.so.1" && ! -e "$destination_bin/libghostty-vt.so" ]]; then
+        (cd "$destination_bin" && ln -s libghostty-vt.so.1 libghostty-vt.so)
     fi
 }
 
@@ -317,7 +225,15 @@ copy_ghostty_shell_integration() {
 # cannot execute, so a build host's CPU can never decide which devices a release runs on.
 #
 # EVEX (AVX-512 and its successors) is the class this checks, and the encoding alone is
-# proof: 0x62 leads no other instruction in 64-bit mode, and nothing we ship may use it.
+# proof: 0x62 leads no other instruction in 64-bit mode. Code that runs unconditionally with
+# EVEX in it SIGILLs on every x86-64 device without AVX-512, so none may appear outside the one
+# exemption: functions under `simdutf::icelake::`, matched on the mangled name
+# (`_ZN7simdutf7icelake...`) because the demangled name of a template function leads with its
+# return type, which makes a prefix match on `simdutf::icelake::` miss it. simdutf dispatches
+# those at runtime and only on CPUs that report AVX-512, and upstream Ghostty builds them since
+# 354d59dcd. The rule is by
+# enclosing function, so an EVEX instruction whose function cannot be named (a stripped binary)
+# counts as an offender rather than slipping through.
 # Lower extensions cannot be judged the same way -- Highway compiles AVX2 and SSE4 kernels
 # on purpose and picks between them with a runtime CPUID check, so their presence is
 # expected and safe. The Swift runtime libraries under lib/ come prebuilt from the Swift
@@ -330,24 +246,39 @@ verify_artifact_cpu_baseline() {
     local binary
     for binary in "$bin_dir/spacesd-bin" "$bin_dir/spaces-bin" "$bin_dir"/libghostty-vt.so.*; do
         [[ -f "$binary" && ! -L "$binary" ]] || continue
-        local disassembly decoded offenders
+        local disassembly decoded offenders offender_count offender_names
         disassembly="$(objdump -d "$binary")"
         # GNU objdump prints "<address>:\t<raw bytes>\t<mnemonic>". Requiring the mnemonic
         # field skips the continuation lines that wrap a long instruction's remaining bytes,
         # whose bytes could otherwise start with 62 and read as an EVEX prefix.
-        decoded="$(echo "$disassembly" | awk -F'\t' 'NF >= 3 && $2 ~ /^[0-9a-f][0-9a-f] / { n++ } END { print n + 0 }')"
+        decoded="$(awk -F'\t' 'NF >= 3 && $2 ~ /^[0-9a-f][0-9a-f] / { n++ } END { print n + 0 }' <<<"$disassembly")"
         # Other disassemblers lay the columns out differently -- llvm-objdump, for one, puts
         # the raw bytes on the address's own field, so this parse would match nothing and
         # report a clean binary no matter what it holds. A scan that cannot fail is worse
         # than no scan, so an unparseable disassembly is a build failure rather than a pass.
         [[ "$decoded" -gt 0 ]] || die "could not read instructions out of $(basename "$binary"); $(objdump --version | head -n 1) does not lay out disassembly the way this check parses it"
-        offenders="$(echo "$disassembly" | awk -F'\t' 'NF >= 3 && $2 ~ /^62 / { print }')"
-        if [[ -n "$offenders" ]]; then
-            echo "$offenders" | head -n 5 >&2
-            die "$(basename "$binary") carries AVX-512 code and would SIGILL on x86-64 devices without AVX-512 (EVEX-encoded instructions: $(echo "$offenders" | wc -l | tr -d ' '))"
+        # Output: the offender count, then up to 5 distinct offending function names. A
+        # "Disassembly of section" line clears the current function so a label from one
+        # section is never credited with the next section's instructions.
+        offenders="$(awk -F'\t' '
+            /^Disassembly of section/ { fn = ""; next }
+            /^[0-9a-f]+ <.*>:$/ { fn = $0; sub(/^[0-9a-f]+ </, "", fn); sub(/>:$/, "", fn); next }
+            NF >= 3 && $2 ~ /^62 / {
+                if (fn ~ /^_ZNK?7simdutf7icelake/) next
+                n++
+                name = (fn == "" ? "(no enclosing function)" : fn)
+                if (!(name in seen)) { seen[name] = 1; if (++u <= 5) names = names name "\n" }
+            }
+            END { print n + 0; printf "%s", names }
+        ' <<<"$disassembly")"
+        offender_count="$(head -n 1 <<<"$offenders")"
+        if [[ "$offender_count" -gt 0 ]]; then
+            offender_names="$(tail -n +2 <<<"$offenders")"
+            echo "$offender_names" >&2
+            die "$(basename "$binary") carries AVX-512 code outside simdutf::icelake and would SIGILL on x86-64 devices without AVX-512 (EVEX-encoded instructions: $offender_count, first functions, mangled, listed above)"
         fi
     done
-    echo "==> Verified packaged x86_64 binaries carry no AVX-512 instructions"
+    echo "==> Verified packaged x86_64 binaries carry no AVX-512 instructions outside simdutf's runtime-dispatched icelake kernels"
 }
 
 copy_swift_runtime_libraries() {
@@ -868,10 +799,7 @@ require_command git
 require_command python3
 require_command sha256sum
 
-if [[ "$BUILD_GHOSTTY_VT" -eq 1 ]]; then
-    build_ghostty_vt
-fi
-stage_ghostty_vt_development_artifacts
+require_staged_ghostty_vt
 build_spaces_products
 package_artifact
 if [[ "$SMOKE" -eq 1 ]]; then

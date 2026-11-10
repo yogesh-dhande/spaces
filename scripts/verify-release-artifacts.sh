@@ -154,7 +154,7 @@ if [[ ! -d "$spacesapp_bundle" ]]; then
 fi
 
 ghostty_vt_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.dylib"
-ghostty_vt_real_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.0.1.0.dylib"
+ghostty_vt_real_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.1.1.0.dylib"
 if [[ ! -e "$ghostty_vt_dylib" && ! -L "$ghostty_vt_dylib" ]]; then
   echo "Error: Missing bundled libghostty-vt dylib at $ghostty_vt_dylib" >&2
   exit 1

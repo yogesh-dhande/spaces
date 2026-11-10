@@ -71,7 +71,7 @@ import Foundation
         }
 
         var liveMirrorCountForTesting: Int { mirror == nil ? 0 : 1 }
-        var mirrorSurfaceIdentityForTesting: UInt? { mirror.flatMap(ghostty_mirror_surface).map { surface in UInt(bitPattern: surface) } }
+        var mirrorSurfaceIdentityForTesting: UInt? { mirror.map(ghostty_mirror_surface).map { surface in UInt(bitPattern: surface) } }
         var isSurfaceHostAttachedForTesting: Bool { surfaceHostView.superview != nil }
         var isSurfaceHostVisibleForTesting: Bool { !surfaceHostView.isHidden }
         var appliedFontSizeForTesting: TerminalFontSize? { appliedFontSize }
@@ -174,14 +174,13 @@ import Foundation
         /// default in Ghostty. The other half of what `park()` clears, occlusion, is restored by the
         /// holder's geometry pass, which re-runs on acquire.
         private func focusSurface(of mirror: ghostty_mirror_t) {
-            guard let surface = ghostty_mirror_surface(mirror) else { return }
-            ghostty_surface_set_focus(surface, true)
+            ghostty_surface_set_focus(ghostty_mirror_surface(mirror), true)
         }
 
         private func park() {
             surfaceHostView.isHidden = true
             surfaceHostView.removeFromSuperview()
-            if let surface = mirror.flatMap(ghostty_mirror_surface) {
+            if let surface = mirror.map(ghostty_mirror_surface) {
                 GhosttyMobileAppService.shared.unregisterActionHandler(for: surface)
                 ghostty_surface_set_focus(surface, false)
                 ghostty_surface_set_occlusion(surface, false)
@@ -223,7 +222,8 @@ import Foundation
         }
 
         private func applyFontSize(_ fontSize: TerminalFontSize, to mirror: ghostty_mirror_t) {
-            guard appliedFontSize != fontSize, let surface = ghostty_mirror_surface(mirror) else { return }
+            guard appliedFontSize != fontSize else { return }
+            let surface = ghostty_mirror_surface(mirror)
             let action = "set_font_size:\(fontSize.points)"
             let applied = action.withCString { pointer in ghostty_surface_binding_action(surface, pointer, UInt(action.utf8.count)) }
             guard applied else { return }

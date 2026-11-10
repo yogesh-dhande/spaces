@@ -17,8 +17,8 @@
         /// reads are not), and a program running on that Mac could read the same clipboard directly, so
         /// this is not a privacy boundary.
         static func readClipboard(
-            userdata: UnsafeMutableRawPointer?, location: ghostty_clipboard_e, state: UnsafeMutableRawPointer?,
-            mimes: UnsafePointer<UnsafePointer<CChar>?>?, mimesCount: Int, list: Bool, pasteboard: NSPasteboard = .general
+            userdata: UnsafeMutableRawPointer?, location: ghostty_clipboard_e, state: UnsafeMutableRawPointer,
+            mimes: UnsafePointer<UnsafePointer<CChar>>, mimesCount: Int, list: Bool, pasteboard: NSPasteboard = .general
         ) -> ghostty_clipboard_read_result_e {
             // Mirror surfaces set no `GhosttyEmbeddedSurfaceUserData` (they parse no VT stream, so they
             // never originate a clipboard request; paste on a mirror goes through `onSendText`, not
@@ -32,16 +32,7 @@
             // other selection-clipboard read) has no backing store here.
             guard location == GHOSTTY_CLIPBOARD_STANDARD else { return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED }
 
-            var wantsPlainText = false
-            if let mimes {
-                for i in 0..<mimesCount {
-                    guard let ptr = mimes[i] else { continue }
-                    if String(cString: ptr) == "text/plain" {
-                        wantsPlainText = true
-                        break
-                    }
-                }
-            }
+            let wantsPlainText = (0..<mimesCount).contains { String(cString: mimes[$0]) == "text/plain" }
 
             // A listing request (mimesCount == 0, list == true, e.g. Kitty paste-event mode probing for
             // MIME types) must inspect metadata only, never load the clipboard payload. `types` reflects
@@ -67,13 +58,12 @@
         /// Kitty clipboard read or write inside a session is granted silently, matching the silent
         /// OSC 52 write behavior documented in docs/spec.md.
         static func confirmReadClipboard(
-            userdata: UnsafeMutableRawPointer?, confirm: UnsafePointer<ghostty_clipboard_confirm_s>?, state: UnsafeMutableRawPointer?
+            userdata: UnsafeMutableRawPointer?, confirm: UnsafePointer<ghostty_clipboard_confirm_s>, state: UnsafeMutableRawPointer
         ) {
             // A null userdata (a mirror surface) can never reach this callback: it never originates a
             // clipboard request in the first place (see readClipboard above), so there is nothing to
             // confirm or deny here.
             guard let userdata else { return }
-            guard let confirm else { return }
             let c = confirm.pointee
 
             // `confirm`'s contents/available are borrowed for the duration of this call only, so copy
@@ -82,17 +72,14 @@
             if let raw = c.contents {
                 for i in 0..<c.contents_len {
                     let item = raw[i]
-                    guard let mimePointer = item.mime else { continue }
-                    let data: Data
-                    if let dataPointer = item.data, item.len > 0 { data = Data(bytes: dataPointer, count: Int(item.len)) } else { data = Data() }
-                    contents.append((mime: String(cString: mimePointer), data: data))
+                    let data = item.len > 0 ? Data(bytes: item.data, count: Int(item.len)) : Data()
+                    contents.append((mime: String(cString: item.mime), data: data))
                 }
             }
             var available: [String] = []
             if let raw = c.available {
                 for i in 0..<c.available_len {
-                    guard let ptr = raw[i] else { continue }
-                    available.append(String(cString: ptr))
+                    available.append(String(cString: raw[i]))
                 }
             }
 
@@ -118,14 +105,14 @@
         /// exactly `len` bytes rather than scanning for a terminator.
         static func preferredPlainText(from content: UnsafeBufferPointer<ghostty_clipboard_content_s>) -> String? {
             for item in content {
-                guard let mime = item.mime.map(String.init(cString:)), mime.hasPrefix("text/plain") else { continue }
+                guard String(cString: item.mime).hasPrefix("text/plain") else { continue }
                 return String(decoding: UnsafeRawBufferPointer(start: item.data, count: Int(item.len)), as: UTF8.self)
             }
             return nil
         }
 
         private static func completeClipboardRequest(
-            userdata: UnsafeMutableRawPointer?, contents: [(mime: String, data: Data)], available: [String], state: UnsafeMutableRawPointer?,
+            userdata: UnsafeMutableRawPointer?, contents: [(mime: String, data: Data)], available: [String], state: UnsafeMutableRawPointer,
             confirmed: Bool, remember: Bool
         ) {
             guard let userdata else { return }
@@ -134,14 +121,13 @@
             // early-returns for the null mirror userdata). Hop to the engine actor to read the surface,
             // matching the codebase's "complete on a later turn" pattern.
             let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
-            let stateAddress = state.map { UInt(bitPattern: $0) }
+            nonisolated(unsafe) let state = state
             Task { @TerminalEngineActor in
                 // If the surface vanished before this turn lands, the request is left uncompleted: Ghostty
                 // owns tearing down `state` on its own in that case, and this only happens during teardown.
                 guard let surface = surfaceUserData.surface() else { return }
-                let statePointer = stateAddress.flatMap(UnsafeMutableRawPointer.init(bitPattern:))
                 sendClipboardCompletion(
-                    surface: surface, contents: contents, available: available, state: statePointer, confirmed: confirmed, remember: remember)
+                    surface: surface, contents: contents, available: available, state: state, confirmed: confirmed, remember: remember)
             }
         }
 
@@ -150,7 +136,7 @@
         /// C-owned memory (via `strdup`/`allocate`) that outlives the call, then freed once the call
         /// returns -- Ghostty only borrows the completion struct for the duration of the call.
         private static func sendClipboardCompletion(
-            surface: ghostty_surface_t, contents: [(mime: String, data: Data)], available: [String], state: UnsafeMutableRawPointer?, confirmed: Bool,
+            surface: ghostty_surface_t, contents: [(mime: String, data: Data)], available: [String], state: UnsafeMutableRawPointer, confirmed: Bool,
             remember: Bool
         ) {
             var cStrings: [UnsafeMutablePointer<CChar>] = []
@@ -176,7 +162,7 @@
                 cContents.append(ghostty_clipboard_content_s(mime: mime, data: buffer.assumingMemoryBound(to: CChar.self), len: byteCount))
             }
 
-            var cAvailable: [UnsafePointer<CChar>?] = []
+            var cAvailable: [UnsafePointer<CChar>] = []
             for mime in available {
                 guard let str = strdup(mime) else { continue }
                 cStrings.append(str)

@@ -36,46 +36,52 @@ import Foundation
 
         private init() {}
 
+        /// Built outside the isolated instance so the C callbacks stay nonisolated: Ghostty invokes them
+        /// from its own threads.
+        private nonisolated static func makeRuntimeConfig(userdata: UnsafeMutableRawPointer) -> ghostty_runtime_config_s {
+            ghostty_runtime_config_s(
+                userdata: userdata,
+                supports_selection_clipboard: true,
+                wakeup_cb: { _ in GhosttyEmbeddedAppService.requestTick() },
+                action_cb: { _, target, action in
+                    guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
+                    guard let event = GhosttyActionEventParser.parse(action) else { return true }
+                    // A handoff replay re-raises every report the transcript carried, and replaying them
+                    // would settle old turns into done notifications. Like the clipboard write, the decision
+                    // is read where the action fires: delivery below is a later engine turn, after the
+                    // replay bracket has closed.
+                    if case .programStatus = event, let surface = target.target.surface, let userdata = ghostty_surface_userdata(surface),
+                        Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue().isReplayingHistoricalOutput
+                    {
+                        return true
+                    }
+                    let surfaceKey = UInt(bitPattern: target.target.surface)
+                    Task { @TerminalEngineActor in GhosttyEmbeddedAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
+                    return true
+                },
+                read_clipboard_cb: { userdata, location, state, mimes, mimesCount, list in
+                    GhosttyClipboardBridge.readClipboard(
+                        userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
+                },
+                confirm_read_clipboard_cb: { userdata, confirm, state, _ in
+                    GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, confirm: confirm, state: state)
+                },
+                write_clipboard_cb: { userdata, location, content, len, _ in
+                    GhosttyEmbeddedClipboardWriteForwarder.forward(userdata: userdata, location: location, content: content, count: Int(len))
+                },
+                close_surface_cb: { userdata, _ in
+                    guard let userdata else { return }
+                    let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
+                    Task { @TerminalEngineActor in surfaceUserData.handleClose() }
+                })
+        }
+
         public func startIfNeeded() throws {
             guard app == nil else { return }
             try GhosttyProcessAppRuntime.initializeOnce(owner: .daemon)
             let config = try GhosttyProcessAppRuntime.makeThemeConfiguration()
 
-            var runtimeConfig = ghostty_runtime_config_s()
-            runtimeConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
-            runtimeConfig.supports_selection_clipboard = true
-            runtimeConfig.wakeup_cb = { _ in GhosttyEmbeddedAppService.requestTick() }
-            runtimeConfig.action_cb = { _, target, action in
-                guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
-                guard let event = GhosttyActionEventParser.parse(action) else { return true }
-                // A handoff replay re-raises every report the transcript carried, and replaying them
-                // would settle old turns into done notifications. Like the clipboard write, the decision
-                // is read where the action fires: delivery below is a later engine turn, after the
-                // replay bracket has closed.
-                if case .programStatus = event, let userdata = ghostty_surface_userdata(target.target.surface),
-                    Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue().isReplayingHistoricalOutput
-                {
-                    return true
-                }
-                let surfaceKey = UInt(bitPattern: target.target.surface)
-                Task { @TerminalEngineActor in GhosttyEmbeddedAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
-                return true
-            }
-            runtimeConfig.read_clipboard_cb = { userdata, location, state, mimes, mimesCount, list in
-                GhosttyClipboardBridge.readClipboard(
-                    userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
-            }
-            runtimeConfig.confirm_read_clipboard_cb = { userdata, confirm, state, _ in
-                GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, confirm: confirm, state: state)
-            }
-            runtimeConfig.write_clipboard_cb = { userdata, location, content, len, _ in
-                GhosttyEmbeddedClipboardWriteForwarder.forward(userdata: userdata, location: location, content: content, count: Int(len))
-            }
-            runtimeConfig.close_surface_cb = { userdata, _ in
-                guard let userdata else { return }
-                let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
-                Task { @TerminalEngineActor in surfaceUserData.handleClose() }
-            }
+            var runtimeConfig = Self.makeRuntimeConfig(userdata: Unmanaged.passUnretained(self).toOpaque())
 
             // ghostty_app_new drives Ghostty's app-init path deep into Zig-side code, the same class
             // of large-stack consumer as `ghostty_session_new_headless` (see the SIGBUS this fixes,

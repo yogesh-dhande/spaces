@@ -20,13 +20,13 @@ rsync -a --delete \
 
 cd /root/src/apps/macos
 # The Linux ELF build of libghostty-vt stages into lib-linux (the shared lib/ holds the macOS
-# artifacts); it is produced by build_linux_spacesd_artifact.sh — see docs/dev.md for the
+# artifacts); it is produced by build_linux_ghostty_vt.sh — see docs/dev.md for the
 # docker invocation. Fail up front with instructions rather than letting every suite die with
 # an opaque vtSessionUnavailable.
 export SPACES_GHOSTTY_VT_DYLIB_PATH=/root/src/apps/macos/.local/ghosttyvt/lib-linux/libghostty-vt.so
 if [ ! -e "$SPACES_GHOSTTY_VT_DYLIB_PATH" ]; then
   echo "error: $SPACES_GHOSTTY_VT_DYLIB_PATH is missing." >&2
-  echo "Build the Linux artifacts first: run the build_linux_spacesd_artifact.sh docker command from docs/dev.md." >&2
+  echo "Build the Linux artifacts first: run build_linux_ghostty_vt_in_docker.sh as documented in docs/dev.md." >&2
   exit 1
 fi
 # Linux daemon-side test suites must use Swift Testing (async-main runner), not XCTest:

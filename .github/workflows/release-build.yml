@@ -85,6 +85,7 @@ jobs:
       - name: Build and smoke Linux spacesd artifact
         run: |
           set -euo pipefail
+          apps/macos/scripts/build_linux_ghostty_vt_in_docker.sh --arch ${{ matrix.arch }} --zig-cache-volume spaces-linux-zig
           builder_image="$(apps/macos/scripts/ensure_linux_builder_image.sh --arch ${{ matrix.arch }})"
           docker run --rm --platform ${{ matrix.docker-platform }} \
             -v "$PWD":/workspace \

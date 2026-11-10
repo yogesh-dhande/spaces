@@ -101,6 +101,7 @@ build_linux_remote_artifact() {
   local platform="$2"
   local docker_args=(run --rm --platform "$platform")
   local builder_image
+  "$REPO_ROOT/apps/macos/scripts/build_linux_ghostty_vt_in_docker.sh" --arch "$arch" --zig-cache-volume spaces-linux-zig
   builder_image="$("$REPO_ROOT/apps/macos/scripts/ensure_linux_builder_image.sh" --arch "$arch")"
 
   if [[ "$GIT_COMMON_DIR" != "$REPO_ROOT/.git" ]]; then

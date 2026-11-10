@@ -16,137 +16,77 @@
 #include <string.h>
 #include <unistd.h>
 
-typedef GhosttyResult (*GhosttyTerminalNewFn)(const GhosttyAllocator *, GhosttyTerminal *, uint16_t, uint16_t);
-typedef void (*GhosttyTerminalFreeFn)(GhosttyTerminal);
-typedef void (*GhosttyTerminalVtWriteFn)(GhosttyTerminal, const uint8_t *, size_t);
-typedef void (*GhosttyTerminalScrollViewportFn)(GhosttyTerminal, GhosttyTerminalScrollViewport);
-typedef GhosttyResult (*GhosttyTerminalResizeFn)(GhosttyTerminal, uint16_t, uint16_t, uint32_t, uint32_t);
-typedef GhosttyResult (*GhosttyTerminalGetFn)(GhosttyTerminal, GhosttyTerminalData, void *);
-typedef GhosttyResult (*GhosttyTerminalSetFn)(GhosttyTerminal, GhosttyTerminalOption, const void *);
-typedef GhosttyResult (*GhosttyPasteEncodeFn)(char *, size_t, bool, char *, size_t, size_t *);
-typedef GhosttyResult (*GhosttyKeyEncoderNewFn)(const GhosttyAllocator *, GhosttyKeyEncoder *);
-typedef void (*GhosttyKeyEncoderFreeFn)(GhosttyKeyEncoder);
-typedef void (*GhosttyKeyEncoderSetoptFromTerminalFn)(GhosttyKeyEncoder, GhosttyTerminal);
-typedef GhosttyResult (*GhosttyKeyEncoderEncodeFn)(GhosttyKeyEncoder, GhosttyKeyEvent, char *, size_t, size_t *);
-typedef GhosttyResult (*GhosttyKeyEventNewFn)(const GhosttyAllocator *, GhosttyKeyEvent *);
-typedef void (*GhosttyKeyEventFreeFn)(GhosttyKeyEvent);
-typedef void (*GhosttyKeyEventSetActionFn)(GhosttyKeyEvent, GhosttyKeyAction);
-typedef void (*GhosttyKeyEventSetKeyFn)(GhosttyKeyEvent, GhosttyKey);
-typedef void (*GhosttyKeyEventSetModsFn)(GhosttyKeyEvent, GhosttyMods);
-typedef void (*GhosttyKeyEventSetUtf8Fn)(GhosttyKeyEvent, const char *, size_t);
-typedef void (*GhosttyKeyEventSetUnshiftedCodepointFn)(GhosttyKeyEvent, uint32_t);
-typedef GhosttyResult (*GhosttyMouseEncoderNewFn)(const GhosttyAllocator *, GhosttyMouseEncoder *);
-typedef void (*GhosttyMouseEncoderFreeFn)(GhosttyMouseEncoder);
-typedef void (*GhosttyMouseEncoderSetoptFn)(GhosttyMouseEncoder, GhosttyMouseEncoderOption, const void *);
-typedef void (*GhosttyMouseEncoderSetoptFromTerminalFn)(GhosttyMouseEncoder, GhosttyTerminal);
-typedef GhosttyResult (*GhosttyMouseEncoderEncodeFn)(GhosttyMouseEncoder, GhosttyMouseEvent, char *, size_t, size_t *);
-typedef GhosttyResult (*GhosttyMouseEventNewFn)(const GhosttyAllocator *, GhosttyMouseEvent *);
-typedef void (*GhosttyMouseEventFreeFn)(GhosttyMouseEvent);
-typedef void (*GhosttyMouseEventSetActionFn)(GhosttyMouseEvent, GhosttyMouseAction);
-typedef void (*GhosttyMouseEventSetButtonFn)(GhosttyMouseEvent, GhosttyMouseButton);
-typedef void (*GhosttyMouseEventSetModsFn)(GhosttyMouseEvent, GhosttyMods);
-typedef void (*GhosttyMouseEventSetPositionFn)(GhosttyMouseEvent, GhosttyMousePosition);
-typedef GhosttyResult (*GhosttyFormatterTerminalNewFn)(
-    const GhosttyAllocator *,
-    GhosttyFormatter *,
-    GhosttyTerminal,
-    GhosttyFormatterTerminalOptions
-);
-typedef GhosttyResult (*GhosttyFormatterFormatAllocFn)(GhosttyFormatter, const GhosttyAllocator *, uint8_t **, size_t *);
-typedef void (*GhosttyFormatterFreeFn)(GhosttyFormatter);
-typedef void (*GhosttyFreeFn)(const GhosttyAllocator *, uint8_t *, size_t);
-typedef GhosttyResult (*GhosttyRenderStateNewFn)(const GhosttyAllocator *, GhosttyRenderState *);
-typedef void (*GhosttyRenderStateFreeFn)(GhosttyRenderState);
-typedef GhosttyResult (*GhosttyRenderStateUpdateFn)(GhosttyRenderState, GhosttyTerminal);
-typedef GhosttyResult (*GhosttyRenderStateGetFn)(GhosttyRenderState, GhosttyRenderStateData, void *);
-typedef GhosttyResult (*GhosttyRenderStateRowIteratorNewFn)(const GhosttyAllocator *, GhosttyRenderStateRowIterator *);
-typedef void (*GhosttyRenderStateRowIteratorFreeFn)(GhosttyRenderStateRowIterator);
-typedef bool (*GhosttyRenderStateRowIteratorNextFn)(GhosttyRenderStateRowIterator);
-typedef GhosttyResult (*GhosttyRenderStateRowGetFn)(GhosttyRenderStateRowIterator, GhosttyRenderStateRowData, void *);
-typedef GhosttyResult (*GhosttyRenderStateRowCellsNewFn)(const GhosttyAllocator *, GhosttyRenderStateRowCells *);
-typedef void (*GhosttyRenderStateRowCellsFreeFn)(GhosttyRenderStateRowCells);
-typedef bool (*GhosttyRenderStateRowCellsNextFn)(GhosttyRenderStateRowCells);
-typedef GhosttyResult (*GhosttyRenderStateRowCellsGetFn)(GhosttyRenderStateRowCells, GhosttyRenderStateRowCellsData, void *);
-typedef GhosttyResult (*GhosttyCellGetFn)(GhosttyCell, GhosttyCellData, void *);
-typedef GhosttyResult (*GhosttyRowGetFn)(GhosttyRow, GhosttyRowData, void *);
-typedef GhosttyResult (*GhosttyTerminalGridRefFn)(GhosttyTerminal, GhosttyPoint, GhosttyGridRef *);
-typedef GhosttyResult (*GhosttyGridRefHyperlinkUriFn)(const GhosttyGridRef *, uint8_t *, size_t, size_t *);
-typedef GhosttyResult (*GhosttyTerminalPointFromGridRefFn)(GhosttyTerminal, const GhosttyGridRef *, GhosttyPointTag, GhosttyPointCoordinate *);
-typedef GhosttyResult (*GhosttyTerminalSelectionFormatAllocFn)(
-    GhosttyTerminal, const GhosttyAllocator *, GhosttyTerminalSelectionFormatOptions, uint8_t **, size_t *
-);
-typedef GhosttyResult (*GhosttyTerminalSelectAllFn)(GhosttyTerminal, GhosttySelection *);
-typedef size_t (*GhosttyTerminalTakeRenderScrollRectsFn)(GhosttyTerminal, GhosttyTerminalScrollRect *, size_t, bool *);
-typedef GhosttyResult (*GhosttyTerminalSetActiveScreenFn)(GhosttyTerminal, GhosttyTerminalScreen);
-typedef GhosttyResult (*GhosttyTerminalTabstopFn)(GhosttyTerminal, uint16_t, bool *);
-typedef GhosttyResult (*GhosttyTerminalClearScreenSequenceFn)(GhosttyTerminal, uint8_t *, size_t, size_t *, bool *);
-
-// Every libghostty-vt entry point the shim calls, as (table field, function-pointer type, library
-// function). This one list drives the symbol table's layout, how it is filled, and the completeness
-// check, so those three cannot drift apart; adding an entry here is the only step needed to use a new
-// libghostty-vt function.
-#define SPACES_GHOSTTY_VT_FOR_EACH_SYMBOL(X)                                                                                   \
-    X(terminal_new, GhosttyTerminalNewFn, ghostty_terminal_new)                                                                \
-    X(terminal_free, GhosttyTerminalFreeFn, ghostty_terminal_free)                                                             \
-    X(terminal_vt_write, GhosttyTerminalVtWriteFn, ghostty_terminal_vt_write)                                                  \
-    X(terminal_scroll_viewport, GhosttyTerminalScrollViewportFn, ghostty_terminal_scroll_viewport)                             \
-    X(terminal_resize, GhosttyTerminalResizeFn, ghostty_terminal_resize)                                                       \
-    X(terminal_get, GhosttyTerminalGetFn, ghostty_terminal_get)                                                                \
-    X(terminal_set, GhosttyTerminalSetFn, ghostty_terminal_set)                                                                \
-    X(paste_encode, GhosttyPasteEncodeFn, ghostty_paste_encode)                                                                \
-    X(key_encoder_new, GhosttyKeyEncoderNewFn, ghostty_key_encoder_new)                                                        \
-    X(key_encoder_free, GhosttyKeyEncoderFreeFn, ghostty_key_encoder_free)                                                     \
-    X(key_encoder_setopt_from_terminal, GhosttyKeyEncoderSetoptFromTerminalFn, ghostty_key_encoder_setopt_from_terminal)       \
-    X(key_encoder_encode, GhosttyKeyEncoderEncodeFn, ghostty_key_encoder_encode)                                               \
-    X(key_event_new, GhosttyKeyEventNewFn, ghostty_key_event_new)                                                              \
-    X(key_event_free, GhosttyKeyEventFreeFn, ghostty_key_event_free)                                                           \
-    X(key_event_set_action, GhosttyKeyEventSetActionFn, ghostty_key_event_set_action)                                          \
-    X(key_event_set_key, GhosttyKeyEventSetKeyFn, ghostty_key_event_set_key)                                                   \
-    X(key_event_set_mods, GhosttyKeyEventSetModsFn, ghostty_key_event_set_mods)                                                \
-    X(key_event_set_utf8, GhosttyKeyEventSetUtf8Fn, ghostty_key_event_set_utf8)                                                \
-    X(key_event_set_unshifted_codepoint, GhosttyKeyEventSetUnshiftedCodepointFn, ghostty_key_event_set_unshifted_codepoint)    \
-    X(mouse_encoder_new, GhosttyMouseEncoderNewFn, ghostty_mouse_encoder_new)                                                  \
-    X(mouse_encoder_free, GhosttyMouseEncoderFreeFn, ghostty_mouse_encoder_free)                                               \
-    X(mouse_encoder_setopt, GhosttyMouseEncoderSetoptFn, ghostty_mouse_encoder_setopt)                                         \
-    X(mouse_encoder_setopt_from_terminal, GhosttyMouseEncoderSetoptFromTerminalFn, ghostty_mouse_encoder_setopt_from_terminal) \
-    X(mouse_encoder_encode, GhosttyMouseEncoderEncodeFn, ghostty_mouse_encoder_encode)                                         \
-    X(mouse_event_new, GhosttyMouseEventNewFn, ghostty_mouse_event_new)                                                        \
-    X(mouse_event_free, GhosttyMouseEventFreeFn, ghostty_mouse_event_free)                                                     \
-    X(mouse_event_set_action, GhosttyMouseEventSetActionFn, ghostty_mouse_event_set_action)                                    \
-    X(mouse_event_set_button, GhosttyMouseEventSetButtonFn, ghostty_mouse_event_set_button)                                    \
-    X(mouse_event_set_mods, GhosttyMouseEventSetModsFn, ghostty_mouse_event_set_mods)                                          \
-    X(mouse_event_set_position, GhosttyMouseEventSetPositionFn, ghostty_mouse_event_set_position)                              \
-    X(formatter_terminal_new, GhosttyFormatterTerminalNewFn, ghostty_formatter_terminal_new)                                   \
-    X(formatter_format_alloc, GhosttyFormatterFormatAllocFn, ghostty_formatter_format_alloc)                                   \
-    X(formatter_free, GhosttyFormatterFreeFn, ghostty_formatter_free)                                                          \
-    X(ghostty_free, GhosttyFreeFn, ghostty_free)                                                                               \
-    X(render_state_new, GhosttyRenderStateNewFn, ghostty_render_state_new)                                                     \
-    X(render_state_free, GhosttyRenderStateFreeFn, ghostty_render_state_free)                                                  \
-    X(render_state_update, GhosttyRenderStateUpdateFn, ghostty_render_state_update)                                            \
-    X(render_state_get, GhosttyRenderStateGetFn, ghostty_render_state_get)                                                     \
-    X(row_iterator_new, GhosttyRenderStateRowIteratorNewFn, ghostty_render_state_row_iterator_new)                             \
-    X(row_iterator_free, GhosttyRenderStateRowIteratorFreeFn, ghostty_render_state_row_iterator_free)                          \
-    X(row_iterator_next, GhosttyRenderStateRowIteratorNextFn, ghostty_render_state_row_iterator_next)                          \
-    X(row_get, GhosttyRenderStateRowGetFn, ghostty_render_state_row_get)                                                       \
-    X(row_cells_new, GhosttyRenderStateRowCellsNewFn, ghostty_render_state_row_cells_new)                                      \
-    X(row_cells_free, GhosttyRenderStateRowCellsFreeFn, ghostty_render_state_row_cells_free)                                   \
-    X(row_cells_next, GhosttyRenderStateRowCellsNextFn, ghostty_render_state_row_cells_next)                                   \
-    X(row_cells_get, GhosttyRenderStateRowCellsGetFn, ghostty_render_state_row_cells_get)                                      \
-    X(cell_get, GhosttyCellGetFn, ghostty_cell_get)                                                                            \
-    X(grid_row_get, GhosttyRowGetFn, ghostty_row_get)                                                                          \
-    X(terminal_grid_ref, GhosttyTerminalGridRefFn, ghostty_terminal_grid_ref)                                                  \
-    X(grid_ref_hyperlink_uri, GhosttyGridRefHyperlinkUriFn, ghostty_grid_ref_hyperlink_uri)                                    \
-    X(terminal_point_from_grid_ref, GhosttyTerminalPointFromGridRefFn, ghostty_terminal_point_from_grid_ref)                   \
-    X(terminal_selection_format_alloc, GhosttyTerminalSelectionFormatAllocFn, ghostty_terminal_selection_format_alloc)         \
-    X(terminal_select_all, GhosttyTerminalSelectAllFn, ghostty_terminal_select_all)                                            \
-    X(terminal_take_render_scroll_rects, GhosttyTerminalTakeRenderScrollRectsFn, ghostty_terminal_take_render_scroll_rects) \
-    X(terminal_set_active_screen, GhosttyTerminalSetActiveScreenFn, ghostty_terminal_set_active_screen)                        \
-    X(terminal_tabstop, GhosttyTerminalTabstopFn, ghostty_terminal_tabstop)                                                    \
-    X(terminal_clear_screen_sequence, GhosttyTerminalClearScreenSequenceFn, ghostty_terminal_clear_screen_sequence)
+// Every libghostty-vt entry point the shim calls, as (table field, library function). This one list
+// drives the symbol table's layout, how it is filled, and the completeness check, so those three
+// cannot drift apart; adding an entry here is the only step needed to use a new libghostty-vt
+// function.
+//
+// Each field's type comes from the header's declaration of the function rather than from a
+// hand-written prototype: the dlsym binding casts away every type, so a signature change upstream
+// would otherwise compile cleanly and become an ABI mismatch at runtime instead of a compile error
+// at the call site.
+#define SPACES_GHOSTTY_VT_FOR_EACH_SYMBOL(X)                                          \
+    X(terminal_new, ghostty_terminal_new)                                             \
+    X(terminal_free, ghostty_terminal_free)                                           \
+    X(terminal_vt_write, ghostty_terminal_vt_write)                                   \
+    X(terminal_scroll_viewport, ghostty_terminal_scroll_viewport)                     \
+    X(terminal_resize, ghostty_terminal_resize)                                       \
+    X(terminal_get, ghostty_terminal_get)                                             \
+    X(terminal_set, ghostty_terminal_set)                                             \
+    X(paste_encode, ghostty_paste_encode)                                             \
+    X(key_encoder_new, ghostty_key_encoder_new)                                       \
+    X(key_encoder_free, ghostty_key_encoder_free)                                     \
+    X(key_encoder_set_from_terminal, ghostty_key_encoder_set_from_terminal)     \
+    X(key_encoder_encode, ghostty_key_encoder_encode)                                 \
+    X(key_event_new, ghostty_key_event_new)                                           \
+    X(key_event_free, ghostty_key_event_free)                                         \
+    X(key_event_set_action, ghostty_key_event_set_action)                             \
+    X(key_event_set_key, ghostty_key_event_set_key)                                   \
+    X(key_event_set_mods, ghostty_key_event_set_mods)                                 \
+    X(key_event_set_utf8, ghostty_key_event_set_utf8)                                 \
+    X(key_event_set_unshifted_codepoint, ghostty_key_event_set_unshifted_codepoint)   \
+    X(mouse_encoder_new, ghostty_mouse_encoder_new)                                   \
+    X(mouse_encoder_free, ghostty_mouse_encoder_free)                                 \
+    X(mouse_encoder_set, ghostty_mouse_encoder_set)                             \
+    X(mouse_encoder_set_from_terminal, ghostty_mouse_encoder_set_from_terminal) \
+    X(mouse_encoder_encode, ghostty_mouse_encoder_encode)                             \
+    X(mouse_event_new, ghostty_mouse_event_new)                                       \
+    X(mouse_event_free, ghostty_mouse_event_free)                                     \
+    X(mouse_event_set_action, ghostty_mouse_event_set_action)                         \
+    X(mouse_event_set_button, ghostty_mouse_event_set_button)                         \
+    X(mouse_event_set_mods, ghostty_mouse_event_set_mods)                             \
+    X(mouse_event_set_position, ghostty_mouse_event_set_position)                     \
+    X(formatter_terminal_new, ghostty_formatter_terminal_new)                         \
+    X(formatter_set, ghostty_formatter_set)                                           \
+    X(formatter_format_alloc, ghostty_formatter_format_alloc)                         \
+    X(formatter_free, ghostty_formatter_free)                                         \
+    X(ghostty_free, ghostty_free)                                                     \
+    X(render_state_new, ghostty_render_state_new)                                     \
+    X(render_state_free, ghostty_render_state_free)                                   \
+    X(render_state_update, ghostty_render_state_update)                               \
+    X(render_state_get, ghostty_render_state_get)                                     \
+    X(row_iterator_new, ghostty_render_state_row_iterator_new)                        \
+    X(row_iterator_free, ghostty_render_state_row_iterator_free)                      \
+    X(row_iterator_next, ghostty_render_state_row_iterator_next)                      \
+    X(row_get, ghostty_render_state_row_get)                                          \
+    X(row_cells_new, ghostty_render_state_row_cells_new)                              \
+    X(row_cells_free, ghostty_render_state_row_cells_free)                            \
+    X(row_cells_next, ghostty_render_state_row_cells_next)                            \
+    X(row_cells_get, ghostty_render_state_row_cells_get)                              \
+    X(cell_get, ghostty_cell_get)                                                     \
+    X(grid_row_get, ghostty_row_get)                                                  \
+    X(terminal_grid_ref, ghostty_terminal_grid_ref)                                   \
+    X(grid_ref_hyperlink_uri, ghostty_grid_ref_hyperlink_uri)                         \
+    X(terminal_point_from_grid_ref, ghostty_terminal_point_from_grid_ref)             \
+    X(terminal_select_all, ghostty_terminal_select_all)                               \
+    X(terminal_take_render_scroll_rects, ghostty_terminal_take_render_scroll_rects)   \
+    X(terminal_set_active_screen, ghostty_terminal_set_active_screen)                 \
+    X(terminal_tabstop, ghostty_terminal_tabstop)                                     \
+    X(terminal_clear_screen_sequence, ghostty_terminal_clear_screen_sequence)
 
 typedef struct {
     void *handle;
-#define SPACES_GHOSTTY_VT_DECLARE_FIELD(field, type, symbol) type field;
+#define SPACES_GHOSTTY_VT_DECLARE_FIELD(field, symbol) __typeof__(&symbol) field;
     SPACES_GHOSTTY_VT_FOR_EACH_SYMBOL(SPACES_GHOSTTY_VT_DECLARE_FIELD)
 #undef SPACES_GHOSTTY_VT_DECLARE_FIELD
 } SpacesGhosttyVtSymbols;
@@ -238,12 +178,12 @@ static void *spaces_ghostty_vt_dlopen_in_directory(const char *directory) {
     const char *names[] = {
 #if defined(__APPLE__)
         "libghostty-vt.dylib",
-        "libghostty-vt.0.dylib",
-        "libghostty-vt.0.1.0.dylib",
+        "libghostty-vt.1.dylib",
+        "libghostty-vt.1.1.0.dylib",
 #else
         "libghostty-vt.so",
-        "libghostty-vt.so.0",
-        "libghostty-vt.so.0.1.0",
+        "libghostty-vt.so.1",
+        "libghostty-vt.so.1.1.0",
 #endif
         NULL,
     };
@@ -402,9 +342,9 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
 
     if (handle == NULL) {
 #if defined(__APPLE__)
-        handle = dlopen("libghostty-vt.0.dylib", RTLD_NOW | RTLD_LOCAL);
+        handle = dlopen("libghostty-vt.1.dylib", RTLD_NOW | RTLD_LOCAL);
 #else
-        handle = dlopen("libghostty-vt.so.0", RTLD_NOW | RTLD_LOCAL);
+        handle = dlopen("libghostty-vt.so.1", RTLD_NOW | RTLD_LOCAL);
 #endif
     }
 
@@ -434,9 +374,9 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
 #if SPACES_GHOSTTY_VT_STATIC_LINK
     // Direct binding, uncast: the compiler checks each function against the table's type, so a
     // libghostty-vt signature change is a build error here rather than a crash on the phone.
-#define SPACES_GHOSTTY_VT_BIND(field, type, symbol) symbols->field = symbol;
+#define SPACES_GHOSTTY_VT_BIND(field, symbol) symbols->field = symbol;
 #else
-#define SPACES_GHOSTTY_VT_BIND(field, type, symbol) symbols->field = (type)dlsym(handle, #symbol);
+#define SPACES_GHOSTTY_VT_BIND(field, symbol) symbols->field = (__typeof__(&symbol))dlsym(handle, #symbol);
 #endif
 
     symbols->handle = handle;
@@ -447,7 +387,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     // table would fault on first use. A static build cannot get here incomplete: a missing function
     // fails the link.
     bool complete = true;
-#define SPACES_GHOSTTY_VT_REQUIRE(field, type, symbol) complete = complete && symbols->field != NULL;
+#define SPACES_GHOSTTY_VT_REQUIRE(field, symbol) complete = complete && symbols->field != NULL;
     SPACES_GHOSTTY_VT_FOR_EACH_SYMBOL(SPACES_GHOSTTY_VT_REQUIRE)
 #undef SPACES_GHOSTTY_VT_REQUIRE
 
@@ -588,6 +528,38 @@ static uint32_t spaces_ghostty_vt_link_table_index(
     return (uint32_t)table->count;
 }
 
+// Creates a formatter with every option set explicitly. A new formatter starts with trimming on and
+// the palette, style, and hyperlink extras on, so a caller that wants the bare content (no extras, no
+// trimming) must say so rather than rely on the defaults. `selection` is NULL to format the whole
+// screen. The caller releases the formatter with `symbols->formatter_free`.
+static bool spaces_ghostty_vt_formatter_new(
+    const SpacesGhosttyVtSymbols *symbols,
+    GhosttyTerminal terminal,
+    GhosttyFormatterFormat emit,
+    bool unwrap,
+    bool trim,
+    GhosttyFormatterExtras extras,
+    const GhosttySelection *selection,
+    GhosttyFormatter *out_formatter
+) {
+    GhosttyFormatter formatter = NULL;
+    if (symbols->formatter_terminal_new(NULL, &formatter, terminal) != GHOSTTY_SUCCESS) return false;
+
+    if (
+        symbols->formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EMIT, &emit) != GHOSTTY_SUCCESS ||
+        symbols->formatter_set(formatter, GHOSTTY_FORMATTER_OPT_UNWRAP, &unwrap) != GHOSTTY_SUCCESS ||
+        symbols->formatter_set(formatter, GHOSTTY_FORMATTER_OPT_TRIM, &trim) != GHOSTTY_SUCCESS ||
+        symbols->formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EXTRAS, &extras) != GHOSTTY_SUCCESS ||
+        (selection != NULL && symbols->formatter_set(formatter, GHOSTTY_FORMATTER_OPT_SELECTION, selection) != GHOSTTY_SUCCESS)
+    ) {
+        symbols->formatter_free(formatter);
+        return false;
+    }
+
+    *out_formatter = formatter;
+    return true;
+}
+
 static bool spaces_ghostty_vt_format_plain_for_terminal(
     const SpacesGhosttyVtSymbols *symbols,
     GhosttyTerminal terminal,
@@ -600,10 +572,8 @@ static bool spaces_ghostty_vt_format_plain_for_terminal(
     *out_len = 0;
 
     GhosttyFormatter formatter = NULL;
-    GhosttyFormatterTerminalOptions formatter_options = GHOSTTY_INIT_SIZED(GhosttyFormatterTerminalOptions);
-    formatter_options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
-    formatter_options.trim = true;
-    if (symbols->formatter_terminal_new(NULL, &formatter, terminal, formatter_options) != GHOSTTY_SUCCESS) {
+    if (!spaces_ghostty_vt_formatter_new(
+            symbols, terminal, GHOSTTY_FORMATTER_FORMAT_PLAIN, false, true, GHOSTTY_FORMATTER_EXTRAS_NONE, NULL, &formatter)) {
         return false;
     }
 
@@ -635,13 +605,13 @@ static bool spaces_ghostty_vt_format_plain_for_terminal(
 static uint16_t spaces_ghostty_vt_flags_for_style(const GhosttyStyle *style, GhosttyCellWide wide) {
     uint16_t flags = 0;
     if (style != NULL) {
-        if (style->bold) flags |= SPACES_GHOSTTY_VT_FLAG_BOLD;
-        if (style->italic) flags |= SPACES_GHOSTTY_VT_FLAG_ITALIC;
-        if (style->faint) flags |= SPACES_GHOSTTY_VT_FLAG_FAINT;
-        if (style->inverse) flags |= SPACES_GHOSTTY_VT_FLAG_INVERSE;
-        if (style->invisible) flags |= SPACES_GHOSTTY_VT_FLAG_INVISIBLE;
-        if (style->strikethrough) flags |= SPACES_GHOSTTY_VT_FLAG_STRIKE;
-        if (style->underline != 0) flags |= SPACES_GHOSTTY_VT_FLAG_UNDERLINE;
+        if (style->flags & GHOSTTY_STYLE_FLAG_BOLD) flags |= SPACES_GHOSTTY_VT_FLAG_BOLD;
+        if (style->flags & GHOSTTY_STYLE_FLAG_ITALIC) flags |= SPACES_GHOSTTY_VT_FLAG_ITALIC;
+        if (style->flags & GHOSTTY_STYLE_FLAG_FAINT) flags |= SPACES_GHOSTTY_VT_FLAG_FAINT;
+        if (style->flags & GHOSTTY_STYLE_FLAG_INVERSE) flags |= SPACES_GHOSTTY_VT_FLAG_INVERSE;
+        if (style->flags & GHOSTTY_STYLE_FLAG_INVISIBLE) flags |= SPACES_GHOSTTY_VT_FLAG_INVISIBLE;
+        if (style->flags & GHOSTTY_STYLE_FLAG_STRIKETHROUGH) flags |= SPACES_GHOSTTY_VT_FLAG_STRIKE;
+        if (GHOSTTY_STYLE_UNDERLINE(*style) != 0) flags |= SPACES_GHOSTTY_VT_FLAG_UNDERLINE;
     }
     if (wide == GHOSTTY_CELL_WIDE_SPACER_HEAD || wide == GHOSTTY_CELL_WIDE_SPACER_TAIL) {
         flags |= SPACES_GHOSTTY_VT_FLAG_SPACER;
@@ -888,10 +858,6 @@ static void spaces_ghostty_vt_on_clipboard_write(
     (void)terminal;
     SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
     if (session == NULL || request == NULL) return;
-    // Sized struct: a request smaller than this build's struct predates a field read below,
-    // including the `reply` field itself, so this must be checked before touching it. Returning
-    // without calling reply is the contract's own definition of a denial.
-    if (request->size < sizeof(GhosttyClipboardWrite)) return;
 
     // Spaces carries only the system clipboard; the selection clipboards have no counterpart here.
     if (request->location != GHOSTTY_CLIPBOARD_LOCATION_STANDARD) {
@@ -952,25 +918,35 @@ static void spaces_ghostty_vt_on_clipboard_write(
 
 bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
     if (session == NULL || session->terminal == NULL) return false;
-    GhosttyTerminalSetFn terminal_set = session->symbols.terminal_set;
+    __typeof__(&ghostty_terminal_set) terminal_set = session->symbols.terminal_set;
     // One userdata serves every callback, and callback options take the function pointer itself rather
     // than a pointer to it. The uintptr_t hop is what makes the function-to-object conversion explicit.
+    // Initializing a compound literal of the header's callback type is what makes the compiler check
+    // each callback's signature: once the pointer is erased to `const void *` a mismatch would
+    // otherwise surface only as a crash inside libghostty-vt.
+#define SPACES_GHOSTTY_VT_CALLBACK(type, function) ((const void *)(uintptr_t)(type){function})
     const struct {
         GhosttyTerminalOption option;
         const void *value;
     } registrations[] = {
         {GHOSTTY_TERMINAL_OPT_USERDATA, session},
-        {GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)(uintptr_t)spaces_ghostty_vt_on_write_pty},
-        {GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES, (const void *)(uintptr_t)spaces_ghostty_vt_on_device_attributes},
-        {GHOSTTY_TERMINAL_OPT_SIZE, (const void *)(uintptr_t)spaces_ghostty_vt_on_size},
-        {GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, (const void *)(uintptr_t)spaces_ghostty_vt_on_color_scheme},
-        {GHOSTTY_TERMINAL_OPT_BELL, (const void *)(uintptr_t)spaces_ghostty_vt_on_bell},
-        {GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_title_changed},
-        {GHOSTTY_TERMINAL_OPT_PWD_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_pwd_changed},
-        {GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (const void *)(uintptr_t)spaces_ghostty_vt_on_clipboard_write},
+        {GHOSTTY_TERMINAL_OPT_WRITE_PTY, SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalWritePtyFn, spaces_ghostty_vt_on_write_pty)},
+        {GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES,
+         SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalDeviceAttributesFn, spaces_ghostty_vt_on_device_attributes)},
+        {GHOSTTY_TERMINAL_OPT_SIZE, SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalSizeFn, spaces_ghostty_vt_on_size)},
+        {GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
+         SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalColorSchemeFn, spaces_ghostty_vt_on_color_scheme)},
+        {GHOSTTY_TERMINAL_OPT_BELL, SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalBellFn, spaces_ghostty_vt_on_bell)},
+        {GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
+         SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalTitleChangedFn, spaces_ghostty_vt_on_title_changed)},
+        {GHOSTTY_TERMINAL_OPT_PWD_CHANGED,
+         SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalPwdChangedFn, spaces_ghostty_vt_on_pwd_changed)},
+        {GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
+         SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalClipboardWriteFn, spaces_ghostty_vt_on_clipboard_write)},
         // Setting this option is also what makes libghostty-vt answer the `OSC 7501 ; ?` capability
         // probe (through write_pty above); agents only report once they get that reply.
-        {GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS, (const void *)(uintptr_t)spaces_ghostty_vt_on_program_status},
+        {GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS,
+         SPACES_GHOSTTY_VT_CALLBACK(GhosttyTerminalProgramStatusFn, spaces_ghostty_vt_on_program_status)},
         // GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ is deliberately not registered: with no read callback,
         // libghostty-vt denies OSC 52 "?" and OSC 5522 reads itself, and Spaces has nothing to serve
         // there anyway. The daemon holds no clipboard of its own (a session's clipboard lives on the
@@ -985,6 +961,7 @@ bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
     for (size_t index = 0; index < sizeof(registrations) / sizeof(registrations[0]); index++) {
         registered &= terminal_set(session->terminal, registrations[index].option, registrations[index].value) == GHOSTTY_SUCCESS;
     }
+#undef SPACES_GHOSTTY_VT_CALLBACK
     return registered;
 }
 
@@ -1087,7 +1064,7 @@ bool spaces_ghostty_vt_session_encode_paste(
     }
 
     size_t written = 0;
-    result = session->symbols.paste_encode(mutable_input, input_len, bracketed, encoded, required, &written);
+    result = session->symbols.paste_encode(mutable_input, input_len, bracketed, (uint8_t *)encoded, required, &written);
     free(mutable_input);
     if (result != GHOSTTY_SUCCESS) {
         free(encoded);
@@ -1151,18 +1128,27 @@ bool spaces_ghostty_vt_session_encode_key(
     if (session->symbols.key_encoder_new(NULL, &encoder) != GHOSTTY_SUCCESS) return false;
     // Reading the options off the terminal is the whole point: it is what makes the encoding follow
     // the running program's Kitty keyboard flags, cursor-key mode, and modifyOtherKeys state.
-    session->symbols.key_encoder_setopt_from_terminal(encoder, session->terminal);
+    if (session->symbols.key_encoder_set_from_terminal(encoder, session->terminal) != GHOSTTY_SUCCESS) {
+        session->symbols.key_encoder_free(encoder);
+        return false;
+    }
 
     GhosttyKeyEvent event = NULL;
     if (session->symbols.key_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
         session->symbols.key_encoder_free(encoder);
         return false;
     }
-    session->symbols.key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS);
-    session->symbols.key_event_set_key(event, spaces_ghostty_vt_ghostty_key(key));
-    session->symbols.key_event_set_mods(event, (GhosttyMods)mods);
-    session->symbols.key_event_set_unshifted_codepoint(event, unshifted_codepoint);
-    if (utf8 != NULL && utf8_len > 0) session->symbols.key_event_set_utf8(event, utf8, utf8_len);
+    // The event setters fail only on a NULL event handle, which `key_event_new` just ruled out.
+    (void)session->symbols.key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS);
+    (void)session->symbols.key_event_set_key(event, spaces_ghostty_vt_ghostty_key(key));
+    (void)session->symbols.key_event_set_mods(event, (GhosttyMods)mods);
+    (void)session->symbols.key_event_set_unshifted_codepoint(event, unshifted_codepoint);
+    // The event borrows the bytes rather than copying them; the caller's buffer outlives the event,
+    // which is freed before this function returns.
+    if (utf8 != NULL && utf8_len > 0) {
+        GhosttyString text = { .ptr = (const uint8_t *)utf8, .len = utf8_len };
+        (void)session->symbols.key_event_set_utf8(event, text);
+    }
 
     size_t required = 0;
     GhosttyResult result = session->symbols.key_encoder_encode(encoder, event, NULL, 0, &required);
@@ -1187,7 +1173,7 @@ bool spaces_ghostty_vt_session_encode_key(
     }
 
     size_t written = 0;
-    result = session->symbols.key_encoder_encode(encoder, event, encoded, required, &written);
+    result = session->symbols.key_encoder_encode(encoder, event, (uint8_t *)encoded, required, &written);
     session->symbols.key_event_free(event);
     session->symbols.key_encoder_free(encoder);
     if (result != GHOSTTY_SUCCESS) {
@@ -1304,8 +1290,11 @@ bool spaces_ghostty_vt_session_encode_mouse(
     if (session->symbols.mouse_encoder_new(NULL, &encoder) != GHOSTTY_SUCCESS) return false;
     // Reading the options off the terminal is the whole point: it is what makes the encoding follow
     // the tracking mode and report format the running program enabled.
-    session->symbols.mouse_encoder_setopt_from_terminal(encoder, session->terminal);
-    // `setopt_from_terminal` deliberately leaves geometry alone, and a headless session has none: it
+    if (session->symbols.mouse_encoder_set_from_terminal(encoder, session->terminal) != GHOSTTY_SUCCESS) {
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
+    // `set_from_terminal` deliberately leaves geometry alone, and a headless session has none: it
     // is resized in cells with zero cell pixel sizes, which the encoder rejects. Give it a synthetic
     // one-pixel-per-cell screen so the caller's cell coordinates pass straight through as
     // surface-space pixels. The only consequence is that SGR-pixels reports cell granularity, which
@@ -1317,11 +1306,18 @@ bool spaces_ghostty_vt_session_encode_mouse(
         .cell_width = 1,
         .cell_height = 1,
     };
-    session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
+    if (session->symbols.mouse_encoder_set(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size) != GHOSTTY_SUCCESS) {
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
     // A press has its button down, and so does motion that names a held button.
     const bool any_button_pressed = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS ||
         (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION && !no_button);
-    session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed);
+    if (session->symbols.mouse_encoder_set(encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed) !=
+        GHOSTTY_SUCCESS) {
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
 
     GhosttyMouseEvent event = NULL;
     if (session->symbols.mouse_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
@@ -1331,13 +1327,14 @@ bool spaces_ghostty_vt_session_encode_mouse(
     GhosttyMouseAction ghostty_action = GHOSTTY_MOUSE_ACTION_RELEASE;
     if (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS) ghostty_action = GHOSTTY_MOUSE_ACTION_PRESS;
     if (action == SPACES_GHOSTTY_VT_MOUSE_ACTION_MOTION) ghostty_action = GHOSTTY_MOUSE_ACTION_MOTION;
-    session->symbols.mouse_event_set_action(event, ghostty_action);
+    // The event setters fail only on a NULL event handle, which `mouse_event_new` just ruled out.
+    (void)session->symbols.mouse_event_set_action(event, ghostty_action);
     // A new event starts with no button, which is what button-less motion needs.
-    if (!no_button) session->symbols.mouse_event_set_button(event, (GhosttyMouseButton)button);
-    session->symbols.mouse_event_set_mods(event, (GhosttyMods)mods);
+    if (!no_button) (void)session->symbols.mouse_event_set_button(event, (GhosttyMouseButton)button);
+    (void)session->symbols.mouse_event_set_mods(event, (GhosttyMods)mods);
     // Aim at the middle of the cell so the encoder's floor-to-cell lands on the requested one.
     GhosttyMousePosition position = { .x = (float)cell_column + 0.5f, .y = (float)cell_row + 0.5f };
-    session->symbols.mouse_event_set_position(event, position);
+    (void)session->symbols.mouse_event_set_position(event, position);
 
     size_t required = 0;
     GhosttyResult result = session->symbols.mouse_encoder_encode(encoder, event, NULL, 0, &required);
@@ -1362,7 +1359,7 @@ bool spaces_ghostty_vt_session_encode_mouse(
     }
 
     size_t written = 0;
-    result = session->symbols.mouse_encoder_encode(encoder, event, encoded, required, &written);
+    result = session->symbols.mouse_encoder_encode(encoder, event, (uint8_t *)encoded, required, &written);
     session->symbols.mouse_event_free(event);
     session->symbols.mouse_encoder_free(encoder);
     if (result != GHOSTTY_SUCCESS) {
@@ -1486,7 +1483,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
         size_t row_end = row_start + (size_t)columns;
         while (cell_index < row_end && session->symbols.row_cells_next(session->row_cells)) {
             GhosttyCell raw_cell = 0;
-            GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+            GhosttyStyle style = {0};
             GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
             GhosttyColorRgb foreground = colors.foreground;
             GhosttyColorRgb background = colors.background;
@@ -1517,16 +1514,18 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
                 background = colors.background;
             }
 
-            // GRAPHEMES_BUF writes the full reported graphemes_len elements (base first, then the
-            // extras), so the buffer is sized from that exact count; the cap keeps it on the stack and
-            // keeps one cell from driving an unbounded copy. A cluster the library reports but declines
+            // GRAPHEMES_BUF writes up to `cap` codepoints (base first, then the extras) and reports
+            // OUT_OF_SPACE when they do not all fit, so a buffer sized from the exact graphemes_len
+            // always succeeds; the cap keeps it on the stack and keeps one cell from driving an
+            // unbounded copy. A cluster the library reports but declines
             // to write leaves the cell at its base codepoint alone, the same degradation the preamble
             // painter takes.
             if (grapheme_len > 1 && grapheme_len <= SPACES_GHOSTTY_VT_MAX_GRAPHEME_CODEPOINTS) {
                 uint32_t cluster[SPACES_GHOSTTY_VT_MAX_GRAPHEME_CODEPOINTS];
+                GhosttyCodepointBuffer cluster_buffer = {.ptr = cluster, .cap = grapheme_len, .len = 0};
                 if (
                     session->symbols.row_cells_get(
-                        session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cluster
+                        session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, &cluster_buffer
                     ) == GHOSTTY_SUCCESS
                 ) {
                     uint16_t extra_len = (uint16_t)(grapheme_len - 1);
@@ -1700,7 +1699,7 @@ bool spaces_ghostty_vt_session_erase_faint_run_at_cursor(SpacesGhosttyVtSession 
             bool run_ended = false;
             while (column < columns && session->symbols.row_cells_next(session->row_cells)) {
                 GhosttyCell raw_cell = 0;
-                GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+                GhosttyStyle style = {0};
                 if (
                     session->symbols.row_cells_get(
                         session->row_cells,
@@ -1718,7 +1717,7 @@ bool spaces_ghostty_vt_session_erase_faint_run_at_cursor(SpacesGhosttyVtSession 
                 }
 
                 if (column >= start_column) {
-                    if (!style.faint) {
+                    if (!(style.flags & GHOSTTY_STYLE_FLAG_FAINT)) {
                         run_ended = true;
                         break;
                     }
@@ -1818,9 +1817,9 @@ bool spaces_ghostty_vt_session_scroll_viewport_with_info(
     }
 
     GhosttyTerminalScrollViewport behavior = {0};
-    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA;
+    behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA;
     behavior.value.delta = delta_rows;
-    session->symbols.terminal_scroll_viewport(session->terminal, behavior);
+    if (session->symbols.terminal_scroll_viewport(session->terminal, behavior) != GHOSTTY_SUCCESS) return false;
 
     if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &after) != GHOSTTY_SUCCESS) {
         return false;
@@ -1830,8 +1829,8 @@ bool spaces_ghostty_vt_session_scroll_viewport_with_info(
     return true;
 }
 
-// Jumps the viewport to the live bottom row (the GHOSTTY_SCROLL_VIEWPORT_BOTTOM tag libghostty-vt
-// already exposes) rather than stepping by rows.
+// Jumps the viewport to the live bottom row (the GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM tag
+// libghostty-vt already exposes) rather than stepping by rows.
 bool spaces_ghostty_vt_session_scroll_viewport_to_bottom_with_info(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtScrollbar *out_before,
@@ -1846,8 +1845,8 @@ bool spaces_ghostty_vt_session_scroll_viewport_to_bottom_with_info(
     }
 
     GhosttyTerminalScrollViewport behavior = {0};
-    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM;
-    session->symbols.terminal_scroll_viewport(session->terminal, behavior);
+    behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM;
+    if (session->symbols.terminal_scroll_viewport(session->terminal, behavior) != GHOSTTY_SUCCESS) return false;
 
     if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &after) != GHOSTTY_SUCCESS) {
         return false;
@@ -1985,7 +1984,7 @@ static bool spaces_ghostty_vt_session_screen_selection(
     if (!spaces_ghostty_vt_session_screen_grid_ref(session, start_x, start_y, max_x, max_y, &start_ref)) return false;
     if (!spaces_ghostty_vt_session_screen_grid_ref(session, end_x, end_y, max_x, max_y, &end_ref)) return false;
 
-    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    GhosttySelection selection = {0};
     selection.start = start_ref;
     selection.end = end_ref;
     selection.rectangle = rectangle;
@@ -2000,18 +1999,25 @@ static char *spaces_ghostty_vt_session_format_selection_text(
     if (out_len != NULL) *out_len = 0;
     if (session == NULL || session->terminal == NULL) return NULL;
 
-    GhosttyTerminalSelectionFormatOptions options = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
-    options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
-    options.unwrap = true;
-    options.trim = true;
-    options.selection = selection;
+    // Plain output with unwrap and trim both on is the text Ghostty copies to the clipboard.
+    GhosttyFormatter formatter = NULL;
+    if (!spaces_ghostty_vt_formatter_new(
+            &session->symbols,
+            session->terminal,
+            GHOSTTY_FORMATTER_FORMAT_PLAIN,
+            true,
+            true,
+            GHOSTTY_FORMATTER_EXTRAS_NONE,
+            selection,
+            &formatter)) {
+        return NULL;
+    }
 
     uint8_t *formatted = NULL;
     size_t formatted_len = 0;
-    if (session->symbols.terminal_selection_format_alloc(session->terminal, NULL, options, &formatted, &formatted_len) !=
-        GHOSTTY_SUCCESS) {
-        return NULL;
-    }
+    GhosttyResult format_result = session->symbols.formatter_format_alloc(formatter, NULL, &formatted, &formatted_len);
+    session->symbols.formatter_free(formatter);
+    if (format_result != GHOSTTY_SUCCESS) return NULL;
 
     char *result = (char *)malloc(formatted_len + 1);
     if (result == NULL) {
@@ -2031,7 +2037,7 @@ char *spaces_ghostty_vt_session_range_text_copy(
     SpacesGhosttyVtSession *session, uint16_t start_x, uint32_t start_y, uint16_t end_x, uint32_t end_y, bool rectangle, size_t *out_len
 ) {
     if (out_len != NULL) *out_len = 0;
-    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    GhosttySelection selection = {0};
     if (!spaces_ghostty_vt_session_screen_selection(session, start_x, start_y, end_x, end_y, rectangle, &selection)) return NULL;
     return spaces_ghostty_vt_session_format_selection_text(session, &selection, out_len);
 }
@@ -2075,7 +2081,7 @@ bool spaces_ghostty_vt_session_select_all_state(SpacesGhosttyVtSession *session,
     memset(out, 0, sizeof(*out));
     if (session == NULL || session->terminal == NULL) return false;
 
-    GhosttySelection selection = GHOSTTY_INIT_SIZED(GhosttySelection);
+    GhosttySelection selection = {0};
     GhosttyResult result = session->symbols.terminal_select_all(session->terminal, &selection);
     if (result == GHOSTTY_NO_VALUE) return true;  // No selectable content; `out` is already zeroed.
     if (result != GHOSTTY_SUCCESS) return false;
@@ -2272,9 +2278,9 @@ static SpacesGhosttyVtPen spaces_ghostty_vt_pen_from_style(const GhosttyStyle *s
     pen.fg_value = spaces_ghostty_vt_style_color_value(style->fg_color);
     pen.bg_value = spaces_ghostty_vt_style_color_value(style->bg_color);
     // memset above zeroed these; populate the decorations the flags enum does not carry.
-    pen.blink = style->blink;
-    pen.overline = style->overline;
-    pen.underline_style = (uint8_t)style->underline;  // GHOSTTY_SGR_UNDERLINE_* fits in a byte
+    pen.blink = (style->flags & GHOSTTY_STYLE_FLAG_BLINK) != 0;
+    pen.overline = (style->flags & GHOSTTY_STYLE_FLAG_OVERLINE) != 0;
+    pen.underline_style = (uint8_t)GHOSTTY_STYLE_UNDERLINE(*style);  // GHOSTTY_SGR_UNDERLINE_* fits in a byte
     pen.ul_tag = style->underline_color.tag;
     pen.ul_value = spaces_ghostty_vt_style_color_value(style->underline_color);
     return pen;
@@ -2414,7 +2420,7 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
         size_t row_end = row_start + (size_t)columns;
         while (cell_index < row_end && session->symbols.row_cells_next(session->row_cells)) {
             GhosttyCell raw_cell = 0;
-            GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+            GhosttyStyle style = {0};
             GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
             uint32_t codepoint = 0;
             uint32_t grapheme_len = 0;
@@ -2435,8 +2441,8 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
             model->pen = spaces_ghostty_vt_pen_from_style(&style);
             model->spacer = (wide == GHOSTTY_CELL_WIDE_SPACER_HEAD || wide == GHOSTTY_CELL_WIDE_SPACER_TAIL);
             model->base_codepoint = codepoint;
-            // GRAPHEMES_BUF writes the full reported graphemes_len elements (see render.h), so the buffer
-            // must be sized from that exact count. A cluster over 0xFFFF codepoints cannot be stored in the
+            // GRAPHEMES_BUF writes up to `cap` codepoints (see render.h), so a buffer sized from the exact
+            // graphemes_len receives the whole cluster. A cluster over 0xFFFF codepoints cannot be stored in the
             // uint16_t model field and would also let output drive an arbitrarily large allocation, so such a
             // degenerate cell (combining-mark spam) falls back to its base codepoint alone.
             model->grapheme_len = grapheme_len > 0xFFFF ? 1 : (uint16_t)grapheme_len;
@@ -2449,9 +2455,10 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
                     ok = false;
                     break;
                 }
+                GhosttyCodepointBuffer cluster_buffer = {.ptr = cluster, .cap = model->grapheme_len, .len = 0};
                 if (
                     session->symbols.row_cells_get(
-                        session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cluster
+                        session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, &cluster_buffer
                     ) != GHOSTTY_SUCCESS
                 ) {
                     free(cluster);
@@ -2551,11 +2558,11 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
     return ok && buf->ok;
 }
 
-// Formats the session's terminal with the given options into a library-allocated buffer. The caller
+// Formats the session's terminal as untrimmed VT output carrying `extras` into a library-allocated buffer. The caller
 // owns the buffer and must release it with `symbols->ghostty_free(NULL, ptr, len)`.
 static bool spaces_ghostty_vt_format_terminal(
     SpacesGhosttyVtSession *session,
-    GhosttyFormatterTerminalOptions options,
+    GhosttyFormatterExtras extras,
     uint8_t **out_ptr,
     size_t *out_len
 ) {
@@ -2563,7 +2570,8 @@ static bool spaces_ghostty_vt_format_terminal(
     *out_len = 0;
 
     GhosttyFormatter formatter = NULL;
-    if (session->symbols.formatter_terminal_new(NULL, &formatter, session->terminal, options) != GHOSTTY_SUCCESS) {
+    if (!spaces_ghostty_vt_formatter_new(
+            &session->symbols, session->terminal, GHOSTTY_FORMATTER_FORMAT_VT, false, false, extras, NULL, &formatter)) {
         return false;
     }
     bool ok = session->symbols.formatter_format_alloc(formatter, NULL, out_ptr, out_len) == GHOSTTY_SUCCESS;
@@ -2596,13 +2604,9 @@ static bool spaces_ghostty_vt_copy_replay_root_state(SpacesGhosttyVtSession *ses
     *out_ptr = NULL;
     *out_len = 0;
 
-    GhosttyFormatterTerminalOptions content_only = GHOSTTY_INIT_SIZED(GhosttyFormatterTerminalOptions);
-    content_only.emit = GHOSTTY_FORMATTER_FORMAT_VT;
-    content_only.extra.size = sizeof(content_only.extra);
-    content_only.extra.screen.size = sizeof(content_only.extra.screen);
-    GhosttyFormatterTerminalOptions content_and_state = content_only;
-    content_and_state.extra.scrolling_region = true;
-    content_and_state.extra.screen.charsets = true;
+    const GhosttyFormatterExtras content_only = GHOSTTY_FORMATTER_EXTRAS_NONE;
+    const GhosttyFormatterExtras content_and_state =
+        content_only | GHOSTTY_FORMATTER_EXTRA_SCROLLING_REGION | GHOSTTY_FORMATTER_EXTRA_CHARSETS;
 
     uint8_t *content = NULL;
     size_t content_len = 0;
@@ -2872,7 +2876,7 @@ static bool spaces_ghostty_vt_preamble_append_screen_contents(
 // unmapped. A stale alternate-screen mode flag left set after the program exited by a different mode
 // (enter 1047, leave 1049) is not carried: it only changes what a later toggle does for a program that
 // mixes modes. In addition, the pinned libghostty-vt exposes no cursor-SHAPE getter
-// (GHOSTTY_TERMINAL_DATA_CURSOR_STYLE returns the pen SGR style, not a block/underline/bar shape), so
+// (GHOSTTY_TERMINAL_DATA_CURSOR_SGR_STYLE returns the pen SGR style, not a block/underline/bar shape), so
 // DECSCUSR is not emitted. These are acceptable because they cannot change how the bytes following the
 // preamble lay out on the screen: a program that depends on one of them re-establishes it as part of
 // the drawing that follows.

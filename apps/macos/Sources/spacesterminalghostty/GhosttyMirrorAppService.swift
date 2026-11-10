@@ -41,42 +41,49 @@
 
         private init() {}
 
+        /// Built outside the isolated instance so the C callbacks stay nonisolated: Ghostty invokes them
+        /// from its own threads.
+        private nonisolated static func makeRuntimeConfig(userdata: UnsafeMutableRawPointer) -> ghostty_runtime_config_s {
+            ghostty_runtime_config_s(
+                userdata: userdata,
+                supports_selection_clipboard: true,
+                wakeup_cb: { _ in Task { @MainActor in GhosttyMirrorAppService.shared.tick() } },
+                action_cb: { _, target, action in
+                    guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
+                    guard let event = GhosttyActionEventParser.parse(action) else { return true }
+                    let surfaceKey = UInt(bitPattern: target.target.surface)
+                    Task { @MainActor in GhosttyMirrorAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
+                    return true
+                },
+                read_clipboard_cb: { userdata, location, state, mimes, mimesCount, list in
+                    GhosttyClipboardBridge.readClipboard(
+                        userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
+                },
+                confirm_read_clipboard_cb: { userdata, confirm, state, _ in
+                    GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, confirm: confirm, state: state)
+                },
+                write_clipboard_cb: { _, kind, content, len, _ in
+                    // A mirror's selection must never reach the pasteboard from here: it would be
+                    // viewport-clipped (it only knows what this mirror can see), whereas a copy reads the
+                    // pane's replay through `RemoteGhosttySessionHost.copySelectionToPasteboard`, which
+                    // reaches rows above the viewport. Ghostty's own copy-on-select defaults to `none` on
+                    // macOS and the generated config never enables it, so no such write is expected; any
+                    // that does arrive is reported as GHOSTTY_CLIPBOARD_SELECTION
+                    // (`supports_selection_clipboard` above) and dropped.
+                    guard kind != GHOSTTY_CLIPBOARD_SELECTION else { return }
+                    GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len))
+                },
+                // Mirror surfaces set no `GhosttyEmbeddedSurfaceUserData` (they are not host-managed sessions),
+                // so no close_surface_cb is wired — it would never receive a valid userdata here.
+                close_surface_cb: nil)
+        }
+
         public func startIfNeeded() throws {
             guard app == nil else { return }
             try GhosttyProcessAppRuntime.initializeOnce(owner: .mirror)
             let config = try GhosttyProcessAppRuntime.makeThemeConfiguration()
 
-            var runtimeConfig = ghostty_runtime_config_s()
-            runtimeConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
-            runtimeConfig.supports_selection_clipboard = true
-            runtimeConfig.wakeup_cb = { _ in Task { @MainActor in GhosttyMirrorAppService.shared.tick() } }
-            runtimeConfig.action_cb = { _, target, action in
-                guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
-                guard let event = GhosttyActionEventParser.parse(action) else { return true }
-                let surfaceKey = UInt(bitPattern: target.target.surface)
-                Task { @MainActor in GhosttyMirrorAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
-                return true
-            }
-            runtimeConfig.read_clipboard_cb = { userdata, location, state, mimes, mimesCount, list in
-                GhosttyClipboardBridge.readClipboard(
-                    userdata: userdata, location: location, state: state, mimes: mimes, mimesCount: mimesCount, list: list)
-            }
-            runtimeConfig.confirm_read_clipboard_cb = { userdata, confirm, state, _ in
-                GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, confirm: confirm, state: state)
-            }
-            runtimeConfig.write_clipboard_cb = { _, kind, content, len, _ in
-                // A mirror's selection must never reach the pasteboard from here: it would be
-                // viewport-clipped (it only knows what this mirror can see), whereas a copy reads the
-                // pane's replay through `RemoteGhosttySessionHost.copySelectionToPasteboard`, which
-                // reaches rows above the viewport. Ghostty's own copy-on-select defaults to `none` on
-                // macOS and the generated config never enables it, so no such write is expected; any
-                // that does arrive is reported as GHOSTTY_CLIPBOARD_SELECTION
-                // (`supports_selection_clipboard` above) and dropped.
-                guard kind != GHOSTTY_CLIPBOARD_SELECTION else { return }
-                GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len))
-            }
-            // Mirror surfaces set no `GhosttyEmbeddedSurfaceUserData` (they are not host-managed sessions),
-            // so no close_surface_cb is wired — it would never receive a valid userdata here.
+            var runtimeConfig = Self.makeRuntimeConfig(userdata: Unmanaged.passUnretained(self).toOpaque())
 
             guard let app = ghostty_app_new(&runtimeConfig, config) else {
                 ghostty_config_free(config)

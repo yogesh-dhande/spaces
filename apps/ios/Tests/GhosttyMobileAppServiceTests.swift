@@ -47,8 +47,10 @@
                 hover.action.mouse_over_link = ghostty_action_mouse_over_link_s(url: pointer, len: "image.png".utf8.count)
                 XCTAssertEqual(GhosttyMobileActionEventParser.parse(hover), .mouseOverLink("image.png"))
             }
-            hover.action.mouse_over_link = ghostty_action_mouse_over_link_s(url: nil, len: 0)
-            XCTAssertEqual(GhosttyMobileActionEventParser.parse(hover), .mouseOverLink(nil))
+            "".withCString { pointer in
+                hover.action.mouse_over_link = ghostty_action_mouse_over_link_s(url: pointer, len: 0)
+                XCTAssertEqual(GhosttyMobileActionEventParser.parse(hover), .mouseOverLink(nil))
+            }
         }
 
         func testRuntimeActionCallbackDispatchesMainThreadOpenURLSynchronously() {
@@ -69,7 +71,7 @@
                 action.action.open_url = ghostty_action_open_url_s(
                     kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN, url: pointer, len: UInt(url.utf8.count))
                 let runtimeConfig = GhosttyMobileAppService.makeRuntimeConfig()
-                XCTAssertTrue(runtimeConfig.action_cb(nil, target, action))
+                XCTAssertTrue(runtimeConfig.action_cb(surface, target, action))
                 XCTAssertEqual(handledEvents, [.openURL(kind: .unknown, value: url)])
             }
         }

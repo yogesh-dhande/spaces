@@ -34,8 +34,8 @@
 
         /// Runs `body` with a C clipboard-content array holding one representation.
         private func withContent(mime: String, data: String, _ body: (UnsafePointer<ghostty_clipboard_content_s>, Int) -> Void) {
-            let mimePointer = strdup(mime)
-            let dataPointer = strdup(data)
+            let mimePointer = strdup(mime)!
+            let dataPointer = strdup(data)!
             defer {
                 free(mimePointer)
                 free(dataPointer)

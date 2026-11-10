@@ -48,11 +48,9 @@ public enum GhosttyActionEvent: Sendable, Equatable {
         static func parse(_ action: ghostty_action_s) -> GhosttyActionEvent? {
             switch action.tag {
             case GHOSTTY_ACTION_SET_TITLE, GHOSTTY_ACTION_SET_TAB_TITLE:
-                guard let title = action.action.set_title.title else { return nil }
-                return .setTitle(String(cString: title))
+                return .setTitle(String(cString: action.action.set_title.title))
             case GHOSTTY_ACTION_PWD:
-                guard let pwd = action.action.pwd.pwd else { return nil }
-                return .setWorkingDirectory(String(cString: pwd))
+                return .setWorkingDirectory(String(cString: action.action.pwd.pwd))
             case GHOSTTY_ACTION_OPEN_URL:
                 let openURL = action.action.open_url
                 guard let value = string(pointer: openURL.url, count: Int(openURL.len)), !value.isEmpty else { return nil }
@@ -62,14 +60,13 @@ public enum GhosttyActionEvent: Sendable, Equatable {
                 guard link.len > 0 else { return .mouseOverLink(nil) }
                 return .mouseOverLink(string(pointer: link.url, count: link.len))
             case GHOSTTY_ACTION_START_SEARCH:
-                guard let needle = action.action.start_search.needle else { return .startSearch(nil) }
-                let value = String(cString: needle)
+                let value = String(cString: action.action.start_search.needle)
                 return .startSearch(value.isEmpty ? nil : value)
             case GHOSTTY_ACTION_RING_BELL: return .ringBell
             case GHOSTTY_ACTION_PROGRAM_STATUS:
                 let report = action.action.program_status
                 guard let state = programStatusState(report.state) else { return nil }
-                return .programStatus(state: state, id: report.id.map { String(cString: $0) } ?? "")
+                return .programStatus(state: state, id: String(cString: report.id))
             case GHOSTTY_ACTION_END_SEARCH: return .endSearch
             case GHOSTTY_ACTION_SEARCH_TOTAL:
                 let total = action.action.search_total.total
@@ -93,8 +90,8 @@ public enum GhosttyActionEvent: Sendable, Equatable {
             }
         }
 
-        private static func string(pointer: UnsafePointer<CChar>?, count: Int) -> String? {
-            guard let pointer, count > 0 else { return nil }
+        private static func string(pointer: UnsafePointer<CChar>, count: Int) -> String? {
+            guard count > 0 else { return nil }
             let data = Data(bytes: pointer, count: count)
             return String(data: data, encoding: .utf8)
         }

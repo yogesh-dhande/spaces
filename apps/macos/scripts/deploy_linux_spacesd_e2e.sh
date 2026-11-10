@@ -284,6 +284,8 @@ key_paths=(
   apps/macos/Package.swift
   apps/macos/Package.resolved
   apps/macos/scripts/build_linux_spacesd_artifact.sh
+  apps/macos/scripts/build_linux_ghostty_vt.sh
+  apps/macos/scripts/build_linux_ghostty_vt_in_docker.sh
   apps/macos/scripts/ensure_linux_builder_image.sh
   apps/macos/scripts/linux-builder-versions.sh
 )
@@ -312,7 +314,9 @@ if valid_cached_archive "$cached_archive_path" "$cached_archive_sha256_path"; th
 else
   # The builder image carries the Swift toolchain, the build's apt packages, and the pinned zig,
   # so the container starts compiling instead of provisioning itself. It is built once per
-  # machine and reused by every worktree.
+  # machine and reused by every worktree. Zig runs in the Docker host's native-arch image (see
+  # build_linux_ghostty_vt_in_docker.sh); Swift, packaging, and the smoke test run in the
+  # artifact-arch image named here.
   builder_image="$("$script_dir/ensure_linux_builder_image.sh" --arch "$arch")"
   echo "==> Building $artifact_id with $builder_image" >&2
   # Keep zig and SwiftPM cache/build state in named Docker volumes, not host bind mounts:
@@ -337,16 +341,15 @@ else
   docker volume create --label dev.usespaces.spaces.lane=linux-e2e --label dev.usespaces.spaces.worktree="$repo_root" "$zig_cache_volume" >/dev/null
   docker volume create --label dev.usespaces.spaces.lane=linux-e2e --label dev.usespaces.spaces.worktree="$repo_root" "$swift_cache_volume" >/dev/null
 
+  "$script_dir/build_linux_ghostty_vt_in_docker.sh" --arch "$arch" --zig-cache-volume "$zig_cache_volume" >&2
+
   docker_args=(run --rm --init --platform "$docker_platform")
   if [[ "$git_common_dir" != "$repo_root/.git" ]]; then
     docker_args+=(-v "$git_common_dir:$git_common_dir")
   fi
   docker "${docker_args[@]}" \
     -v "$repo_root:/workspace" \
-    -v "$zig_cache_volume:/root/spaces-zig-cache" \
     -v "$swift_cache_volume:/root/spaces-swift-cache" \
-    -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local \
-    -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
     -e SPACES_LINUX_SWIFT_BUILD_PATH=/root/spaces-swift-cache/build \
     -e SPACES_LINUX_SWIFT_CACHE_PATH=/root/spaces-swift-cache/cache \
     -e SPACES_LINUX_SWIFT_CONFIG_PATH=/root/spaces-swift-cache/config \
