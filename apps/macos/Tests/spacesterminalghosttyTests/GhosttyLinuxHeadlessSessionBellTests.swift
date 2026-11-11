@@ -187,10 +187,9 @@
             let seed = Data("SEED_MARKER_OLD\r\n\u{07}\r\n".utf8)
             try seed.write(to: URL(fileURLWithPath: paths.outputPath))
 
-            let core = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
-                Box(
-                    GhosttyEmbeddedSessionCore(
-                        launchConfiguration: makeConfiguration(named: "bell-seed", script: "printf 'SETTLED\\n'"), paths: paths))
+            let configuration = makeConfiguration(named: "bell-seed", script: "printf 'SETTLED\\n'")
+            let core = await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
             }.value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
             try await core.startReplayingSeedTranscript(columns: 80, rows: 24)
