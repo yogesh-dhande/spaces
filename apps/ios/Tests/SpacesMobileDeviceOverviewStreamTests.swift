@@ -239,6 +239,98 @@
             XCTAssertEqual(model.overview, second, "a later push lands through the same path a refresh would have")
         }
 
+        // MARK: - In-app alert banner seeding
+
+        /// Returning to the foreground re-seeds the banner per device from that device's own fresh
+        /// overview. Another device's cached overview, present while the first one's fresh overview
+        /// arrives, must not count as a delivery: an alert created while the app was backgrounded would
+        /// otherwise banner when the second device reconnects.
+        func testADevicesCachedOverviewDoesNotSeedItsBannerBeforeItsFreshOneArrives() async {
+            func waiting(_ ids: [String]) -> SpacesDeviceOverviewPayload {
+                makeOverview(
+                    codingAgentRows: ids.enumerated().map { index, id in
+                        makeAgentRow(id: id, activityState: .waiting, updatedAt: "2026-01-01T00:\(10 + index):00Z")
+                    })
+            }
+            let hubA = SpacesMobileFakeStreamHub(initialOverview: waiting(["a-old"]))
+            let hubB = SpacesMobileFakeStreamHub(initialOverview: waiting(["b-old"]))
+            var settings = SpacesMobileConnectionSettings()
+            settings.authToken = "token"
+            settings.certificateFingerprint = "fp-active"
+            let clientA = SpacesDeviceAPIClient(settings: settings, backend: SpacesMobileFakeStreamingBackend(hub: hubA))
+            let clientB = SpacesDeviceAPIClient(settings: settings, backend: SpacesMobileFakeStreamingBackend(hub: hubB))
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceRecord(id: "device-b")]
+            model.startDeviceStreams()
+            await settle()
+            model.stopDeviceStreams()
+            await settle()
+
+            // While the app was backgrounded device B raised an alert; its stream reconnects after A's.
+            let gate = SpacesMobileAsyncGate()
+            await hubB.setOpenGate(gate)
+            await hubB.push(waiting(["b-old", "b-while-away"]))
+            model.startDeviceStreams()
+            await settle()
+            XCTAssertNil(model.alertBanner, "device A's fresh overview carries nothing new")
+
+            await gate.open()
+            await settle()
+
+            XCTAssertNil(model.alertBanner, "device B's first fresh overview only seeds, whatever it already holds")
+
+            await hubB.push(waiting(["b-old", "b-while-away", "b-new"]))
+            await settle()
+
+            XCTAssertEqual(model.alertBanner?.sourceID, "agent:b-new", "and an alert after that seeding still banners")
+        }
+
+        /// A non-selected device only becomes offline once a separate handshake classifies its failure, and
+        /// that verdict is discarded when the stream reconnects first. The reconnect must still be a
+        /// seeding overview, or whatever was raised during the outage banners as new.
+        func testAStreamThatReconnectsBeforeItsFailureIsClassifiedStillReseedsTheBanner() async {
+            func waiting(_ ids: [String]) -> SpacesDeviceOverviewPayload {
+                makeOverview(
+                    codingAgentRows: ids.enumerated().map { index, id in
+                        makeAgentRow(id: id, activityState: .waiting, updatedAt: "2026-01-01T00:\(10 + index):00Z")
+                    })
+            }
+            let hubA = SpacesMobileFakeStreamHub(initialOverview: waiting(["a-old"]))
+            let hubB = SpacesMobileFakeStreamHub(initialOverview: waiting(["b-old"]))
+            var settings = SpacesMobileConnectionSettings()
+            settings.authToken = "token"
+            settings.certificateFingerprint = "fp-active"
+            let clientA = SpacesDeviceAPIClient(settings: settings, backend: SpacesMobileFakeStreamingBackend(hub: hubA))
+            let gate = SpacesMobileAsyncGate()
+            let backendB = SpacesMobileFakeStreamingBackend(
+                hub: hubB,
+                requestHandler: { _ in
+                    await gate.wait()
+                    throw SpacesDeviceAPIClientError.requestFailed("still unreachable")
+                })
+            let clientB = SpacesDeviceAPIClient(settings: settings, backend: backendB)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: clientA, overviewStreamClientsForTesting: ["device-b": clientB])
+            model.activeDeviceID = "device-a"
+            model.pairedDevices = [deviceRecord(id: "device-a"), deviceRecord(id: "device-b")]
+            model.startDeviceStreams()
+            await settle()
+
+            // Device B drops with its classification handshake held open, and raises an alert during the outage.
+            await hubB.disconnectAll(error: SpacesDeviceAPIClientError.requestFailed("stream dropped"))
+            await settle()
+            await hubB.push(waiting(["b-old", "b-during-outage"]))
+
+            // The stream reconnects before the handshake answers; the device never enters `offlineDeviceIDs`.
+            await model.drainPendingDeviceStreamRetryForTesting()
+            await settle()
+            await gate.open()
+            await settle()
+
+            XCTAssertFalse(model.offlineDeviceIDs.contains("device-b"), "precondition: the classification was discarded")
+            XCTAssertNil(model.alertBanner, "the reconnect overview only seeds, so the outage's alert does not banner")
+        }
+
         // MARK: - Per-device lifecycle
 
         func testEveryPairedDeviceStreamsWhileForegroundAndClosesOnBackground() async {

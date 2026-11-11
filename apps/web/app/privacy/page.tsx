@@ -7,7 +7,7 @@ const githubDiscussionsURL = "https://github.com/yogesh-dhande/spaces/discussion
 export const metadata: Metadata = {
   title: "Privacy Policy",
   description:
-    "The Spaces apps have no accounts, collect no personal data, and route nothing through developer-operated servers. The website counts visits without cookies.",
+    "The Spaces apps have no accounts, analytics, or tracking. Terminal and workspace data never touches developer-operated servers; the optional iPhone alert notifications use a small relay that stores only device identifiers and alert counts. The website counts visits without cookies.",
 };
 
 export default function PrivacyPolicyPage() {
@@ -21,7 +21,7 @@ export default function PrivacyPolicyPage() {
             Privacy Policy
           </h1>
           <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-            Effective October 1, 2026. Spaces (the macOS app, the iOS app, and the
+            Effective October 16, 2026. Spaces (the macOS app, the iOS app, and the
             <code className="mx-1 rounded bg-background-soft px-1.5 py-0.5 text-sm">spacesd</code>
             daemon) is built so your terminal and workspace data never has a reason to leave your
             own devices. This website, usespaces.dev, counts visits; the &ldquo;This website&rdquo;
@@ -39,12 +39,13 @@ export default function PrivacyPolicyPage() {
           </article>
 
           <article className="border-t border-line/70 pt-8">
-            <h2 className="text-2xl font-semibold tracking-tight">No data collection in the apps</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">No analytics or tracking in the apps</h2>
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
-              The developer collects no personal data from the Spaces apps or the daemon. They
-              contain no analytics, no usage tracking, and no third-party SDK phoning data home,
-              and they do not report what you run, what you type, or which projects and
-              workspaces you have.
+              The Spaces apps and the daemon contain no analytics, no usage tracking, and no
+              third-party SDK phoning data home, and they do not report what you run, what you
+              type, or which projects and workspaces you have. The only data the developer
+              receives is what the optional notification relay below needs to deliver
+              notifications: device identifiers and alert counts.
             </p>
           </article>
 
@@ -55,7 +56,45 @@ export default function PrivacyPolicyPage() {
               between your own devices — for example, your iPhone and your Mac, or your Mac and a
               remote Linux box you control — over a TLS connection pinned to that device&apos;s
               certificate. None of it is routed through, or stored on, servers operated by the
-              developer. Pairing only ever connects to a device you chose to pair.
+              developer. Pairing only ever connects to a device you chose to pair. The one
+              developer-operated server the apps can talk to is the notification relay described
+              below, and it never receives any of this.
+            </p>
+          </article>
+
+          <article className="border-t border-line/70 pt-8">
+            <h2 className="text-2xl font-semibold tracking-tight">Push notifications</h2>
+            <p className="mt-3 text-sm leading-7 text-foreground-soft">
+              After you pair your first device, the iOS app asks whether it may send notifications.
+              If you allow it, your iPhone can show a notification and an app icon badge when an
+              agent needs input or has finished, even when the app is closed. Apple only delivers
+              notifications through its own push service, and its key cannot ship inside your
+              devices, so the developer runs a small relay at push.usespaces.dev for this one job.
+            </p>
+            <p className="mt-3 text-sm leading-7 text-foreground-soft">
+              Your iPhone gives the relay its Apple push token and an identifier of the
+              app installation, and gets back a sealed code that only the relay can open.
+              The token lives inside that code, which your iPhone hands to your paired
+              Macs and Linux boxes; the relay never stores the token. Each paired device
+              then reports to the relay how many alerts it has and how many are agents
+              waiting for input. The relay stores only those counts, when each device last
+              reported, and the list of devices paired with the phone, filed under a hash
+              of the installation identifier, with each device known by an identifier
+              derived from its pairing certificate. It stores no names, no project,
+              workspace, or agent text, no terminal output, and no account, and the
+              notification it sends contains only counts, such as &ldquo;4 alerts, 1 agent
+              needs input&rdquo;. Like any web service, its hosting provider (Google
+              Cloud) may keep standard request logs. The device identifier and alert
+              counts are used only to deliver notifications; they are not linked to you
+              and not used for tracking.
+            </p>
+            <p className="mt-3 text-sm leading-7 text-foreground-soft">
+              In Settings you can choose which alerts buzz your phone (agents waiting for
+              input, and agents that finished), and you can turn notifications off
+              entirely in iOS Settings. Unpairing a device removes its counts from the
+              relay; if that device is offline while notifications are turned off, the
+              removal happens once notifications are back on. If you never allow
+              notifications, the iOS app never contacts the relay.
             </p>
           </article>
 

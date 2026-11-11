@@ -23,7 +23,7 @@ function count(body: Body, field: string): number | undefined {
 
 export function parseRegister(
   body: Body,
-): Parsed<{ apnsToken: string; environment: ApnsEnvironment; installID: string }> {
+): Parsed<{ apnsToken: string; environment: ApnsEnvironment; installID: string; deviceIDs: string[] }> {
   const token = body.apnsToken;
   // APNs tokens are 32 bytes today; the range leaves room for longer ones.
   if (typeof token !== "string" || !/^[0-9a-fA-F]{64,200}$/.test(token)) return fail("invalid_apnsToken");
@@ -31,7 +31,15 @@ export function parseRegister(
   if (environment !== "sandbox" && environment !== "production") return fail("invalid_environment");
   const installID = id(body, "installID");
   if (installID === undefined) return fail("invalid_installID");
-  return { ok: true, value: { apnsToken: token.toLowerCase(), environment, installID } };
+  const listed = body.deviceIDs;
+  if (!Array.isArray(listed) || listed.length > MAX_DEVICES_PER_PHONE) return fail("invalid_deviceIDs");
+  for (const deviceID of listed) {
+    if (typeof deviceID !== "string" || deviceID.length < 1 || deviceID.length > MAX_ID_LENGTH) {
+      return fail("invalid_deviceIDs");
+    }
+  }
+  const deviceIDs = [...new Set(listed as string[])];
+  return { ok: true, value: { apnsToken: token.toLowerCase(), environment, installID, deviceIDs } };
 }
 
 export function parseReport(

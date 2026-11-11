@@ -20,6 +20,7 @@ struct SettingsTabView: View {
                             Text("\(model.pairedDevices.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
                         }
                     }
+                    notificationsGroup
                     SubscriptionSettingsSection(store: subscription)
                     appearanceGroup
                     demoModeGroup
@@ -72,14 +73,40 @@ struct SettingsTabView: View {
         }.buttonStyle(.plain).accessibilityIdentifier(identifier)
     }
 
+    /// The two buzz toggles. When iOS notifications are denied the toggles are greyed and a row sends the
+    /// user to iOS Settings; before the permission was ever asked (no pairing yet) they show normally.
+    private var notificationsGroup: some View {
+        let isDenied = model.push.isDenied
+        return settingsGroup("Notifications") {
+            if isDenied {
+                HStack(spacing: 10) {
+                    settingsLabel("Notifications are off in iOS Settings")
+                    Spacer(minLength: 0)
+                    Button("Open Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }.font(
+                        .system(size: 13, weight: .semibold)
+                    ).foregroundStyle(Theme.accent).buttonStyle(.plain).accessibilityIdentifier("settings.notifications.openSettings")
+                }.settingsRowPadding()
+            }
+            Toggle(isOn: Binding(get: { model.push.preferences.notifyBlocked }, set: { enabled in Task { await model.setNotifyBlocked(enabled) } })) {
+                settingsLabel("Blocked agents")
+            }.settingsRowPadding().tint(Theme.accent).disabled(isDenied).accessibilityIdentifier("settings.notifications.blocked")
+            Toggle(isOn: Binding(get: { model.push.preferences.notifyFinished }, set: { enabled in Task { await model.setNotifyFinished(enabled) } }))
+            { settingsLabel("Finished agents") }.settingsRowPadding().tint(Theme.accent).disabled(isDenied).accessibilityIdentifier(
+                "settings.notifications.finished")
+            Text(
+                "Your phone buzzes for these about 10 seconds after they happen, unless you've already handled them. The app icon always counts every alert."
+            ).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20)
+                .padding(.top, 2)
+        }.task { await model.push.refreshAuthorization() }
+    }
+
     /// Theme picker plus terminal font size picker, with a footer explaining the font size row.
     private var appearanceGroup: some View {
         settingsGroup("Appearance") {
             themeRow
             fontSizeRow
-            Text("Terminal text size on this device. Larger text fits fewer columns.").font(.system(size: 12)).foregroundStyle(
-                Theme.mutedSecondary
-            ).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 2)
+            Text("Terminal text size on this device. Larger text fits fewer columns.").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 2)
         }
     }
 
