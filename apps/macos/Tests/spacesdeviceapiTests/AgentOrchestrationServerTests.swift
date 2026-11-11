@@ -651,8 +651,7 @@
                     server.stop()
                 }
                 func overview() throws -> SpacesDeviceOverviewPayload {
-                    try XCTUnwrap(
-                        try client.send(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp)).overview)
+                    try XCTUnwrap(try client.send(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp)).overview)
                 }
                 let doneKey = "agent:agent:\(agent.id):done:\(agent.updatedAt)"
                 XCTAssertEqual(try overview().alertCandidates().map(\.key), [doneKey])
@@ -689,8 +688,7 @@
                 }
                 let response = try client.send(
                     SpacesDeviceAPIRequest(
-                        command: .setComeBackLater(.init(rowKind: .agent, rowID: "agent:ghost", isOn: true)), authToken: token,
-                        clientApp: clientApp))
+                        command: .setComeBackLater(.init(rowKind: .agent, rowID: "agent:ghost", isOn: true)), authToken: token, clientApp: clientApp))
                 XCTAssertFalse(response.ok)
                 XCTAssertTrue(response.message.contains("agent:ghost"), response.message)
             }
@@ -925,6 +923,9 @@
         func listDevices() throws -> [SpacesDevicePairedClient] { [] }
         func revoke(installationID _: String) throws {}
         func removeAll() throws {}
+        func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+        func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+        func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
         func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
             guard clientApp != nil, authToken == self.authToken else {
                 throw NSError(domain: "SpacesDeviceAPIServer", code: 401, userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."])

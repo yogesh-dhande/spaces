@@ -42,6 +42,9 @@
         func revoke(installationID: String) throws {}
 
         func removeAll() throws {}
+        func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+        func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+        func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
 
         func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws { throw SpacesDevicePairingError.invalidAuthToken }
 

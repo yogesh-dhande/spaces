@@ -189,6 +189,34 @@ import spacesterminalcore
         #expect(overview.visibleAlertCandidates().map(\.key) == ["agent:a-wait:waiting:2026-07-14T09:00:00Z"])
     }
 
+    @Test func visibleCountsExcludeDismissedKeysAndHiddenWorkspaces() {
+        let overview = Fixture.overview(
+            workspaces: [
+                Fixture.workspace(
+                    id: "w1", processes: [Fixture.process(id: "p-dismissed", sessionID: "s2", runState: .exited, exitedAt: "2026-07-14T09:01:00Z")],
+                    agents: [
+                        Fixture.agent(id: "a-wait", sessionID: "s1", state: .waiting, updatedAt: "2026-07-14T09:00:00Z"),
+                        Fixture.agent(id: "a-done", sessionID: "s5", state: .done, updatedAt: "2026-07-14T09:04:00Z"),
+                    ]),
+                Fixture.workspace(
+                    id: "w-hidden", isHidden: true,
+                    agents: [Fixture.agent(id: "a-hidden", sessionID: "s3", state: .waiting, updatedAt: "2026-07-14T09:02:00Z")]),
+            ], dismissed: ["process:p-dismissed:2026-07-14T09:01:00Z"])
+        #expect(overview.visibleAlertCounts() == SpacesDeviceAlertCounts(total: 2, blockedAgents: 1))
+    }
+
+    @Test func blockedAgentsCountOnlyWaitingAgentsNotDoneAgentsOrComeBackLaterFlags() {
+        let overview = Fixture.overview(
+            workspaces: [
+                Fixture.workspace(agents: [
+                    Fixture.agent(id: "a-wait", sessionID: "s1", state: .waiting, updatedAt: "2026-07-14T09:00:00Z"),
+                    Fixture.agent(id: "a-done", sessionID: "s2", state: .done, updatedAt: "2026-07-14T09:01:00Z"),
+                    Fixture.agent(id: "a-flagged", sessionID: "s3", state: .spinning, updatedAt: "2026-07-14T09:02:00Z"),
+                ])
+            ], flags: [SpacesDeviceComeBackLaterFlag(rowKind: .agent, rowID: "a-flagged", flaggedAt: "2026-07-14T09:03:00Z")])
+        #expect(overview.visibleAlertCounts() == SpacesDeviceAlertCounts(total: 3, blockedAgents: 1))
+    }
+
     @Test func aFailedAutomationRunCountsWithoutAWorkspace() {
         let overview = Fixture.overview(workspaces: [], runs: [Fixture.run(id: "r-fail", status: "failed", endedAt: "2026-07-14T09:00:00Z")])
         #expect(overview.visibleAlertCandidates().map(\.key) == ["automationrun:r-fail:failed"])
