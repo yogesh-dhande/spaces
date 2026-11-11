@@ -64,6 +64,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     enum SidebarArrowSelectionTarget: Equatable, Sendable {
         case alerts
         case automations
+        case resources
         case workspace(String)
     }
 
@@ -144,6 +145,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
     var showingAlerts: Bool { detailPane.isAlerts }
     var showingAutomations: Bool { detailPane.isAutomations }
+    var showingResources: Bool { detailPane.isResources }
     /// The `BlockRemedy` the visible compatibility block was last rendered with, so
     /// `reconcileCompatibilityBlock` can tell "still showing the current guidance" apart from "the
     /// device's wire status moved on and this block is now stale" without re-deriving what was already on
@@ -202,6 +204,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     lazy var terminalVisits = makeTerminalVisitTracker()
     lazy var shortcuts = ShortcutsController(host: self) { [unowned self] in try self.clientDatabase() }
     lazy var automations = AutomationsController(host: self)
+    lazy var resources = ResourcesController(host: self)
+    /// Whether the main window is visible to the user, from its occlusion state. Starts true because the
+    /// window is presented at launch and no occlusion change is reported until it first differs.
+    var mainWindowIsOnScreen = true
     lazy var automationEditor = AutomationEditorController(host: self)
     lazy var overlays = TransientOverlaysController(host: self)
     lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
@@ -265,6 +271,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     ]
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
+    private var appVisibilityObservers: [NSObjectProtocol] = []
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
     private var textInputDidEndEditingObserver: NSObjectProtocol?
     private var appEffectiveAppearanceObservation: NSKeyValueObservation?
@@ -509,6 +516,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             NotificationCenter.default.removeObserver(appDidResignActiveObserver)
             self.appDidResignActiveObserver = nil
         }
+        for observer in appVisibilityObservers { NotificationCenter.default.removeObserver(observer) }
+        appVisibilityObservers = []
         if let workspaceDidTerminateApplicationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceDidTerminateApplicationObserver)
             self.workspaceDidTerminateApplicationObserver = nil
@@ -1280,6 +1289,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func setupAppActivationObservers() {
+        appVisibilityObservers = [NSApplication.didHideNotification, NSApplication.didUnhideNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: NSApp, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.refreshMainWindowOnScreen() }
+            }
+        }
         appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
         ) { [weak self] _ in
@@ -2865,6 +2879,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let automationsRow = sidebar.makeAutomationsSidebarRow()
         automationsRow.translatesAutoresizingMaskIntoConstraints = false
 
+        let resourcesRow = sidebar.makeResourcesSidebarRow()
+        resourcesRow.translatesAutoresizingMaskIntoConstraints = false
+
         // The cycling row is pinned to the bottom of the scrolling content, just above the
         // footer separator: it reports a state that applies to the whole sidebar, so it stays
         // put while projects scroll past it.
@@ -2880,6 +2897,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         container.addSubview(alertsRow)
         container.addSubview(automationsRow)
+        container.addSubview(resourcesRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
         container.addSubview(cycleModeRow)
@@ -2897,7 +2915,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            sectionHeader.topAnchor.constraint(equalTo: automationsRow.bottomAnchor, constant: 10),
+            resourcesRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            resourcesRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            resourcesRow.topAnchor.constraint(equalTo: automationsRow.bottomAnchor, constant: 2),
+
+            sectionHeader.topAnchor.constraint(equalTo: resourcesRow.bottomAnchor, constant: 10),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
@@ -2943,6 +2965,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc func automationsRowClicked() { automations.showAutomationsDetail() }
     func showAutomationsDetail() { automations.showAutomationsDetail() }
+    @objc func resourcesRowClicked() { resources.showResourcesDetail() }
+    func showResourcesDetail() { resources.showResourcesDetail() }
     func updateAutomationsSidebarRow() { sidebar.updateAutomationsSidebarRow() }
 
     /// The per-device automation slices for the pane and sidebar row: every device section mapped to its
@@ -3160,9 +3184,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func updateAlertsSidebarBadge() { sidebar.updateAlertsSidebarBadge() }
     func updateAlertsRowAppearance() {
         sidebar.updateAlertsRowAppearance()
-        // The Alerts and Automations rows share a mutually-exclusive selection highlight, so refresh both
-        // whenever the detail pane changes.
+        // The Alerts, Automations, and Resources rows share a mutually-exclusive selection highlight, so
+        // refresh all of them whenever the detail pane changes.
         sidebar.updateAutomationsRowAppearance()
+        sidebar.updateResourcesRowAppearance()
     }
     func refreshSidebarSelectionRows(previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?)
     {
@@ -3664,6 +3689,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         updateAlertsSidebarBadge()
         if showingAlerts { alerts.showAlertsDetail() }
         if showingAutomations { showAutomationsDetail() }
+        if showingResources { showResourcesDetail() }
     }
 
     /// `epoch` is `panelCoordinator.paneReplacementEpoch` as the caller read it before dispatching the
@@ -3731,6 +3757,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         if showingAutomations {
             showAutomationsDetail()
+            return
+        }
+        if showingResources {
+            showResourcesDetail()
             return
         }
         if let selectedWorkspaceID {
@@ -3864,6 +3894,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // pane was rendered from stops describing anything on screen and must not be reused to skip a
         // later render.
         if !pane.isAlerts { alerts.invalidateRenderedAlertsDetail() }
+        // Resource measurement exists only while its pane is on screen, so any other pane ends it.
+        if !pane.isResources { resources.stop() }
         // A visit follows the workspace the main window shows, so a pane change can start or end one.
         refreshTerminalVisit()
     }
@@ -4154,6 +4186,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard sender === window else { return true }
         window.orderOut(nil)
+        refreshMainWindowOnScreen()
         return false
     }
 
@@ -6472,32 +6505,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Whether clearing the outline selection should fall back to the detail placeholder.
     ///
-    /// Alerts and Automations both clear the outline selection while presenting themselves, and that
+    /// Alerts, Automations, and Resources all clear the outline selection while presenting themselves, and that
     /// `deselectAll` re-enters `outlineViewSelectionDidChange` synchronously. Presenting the placeholder
     /// from there resets the detail pane to `.none` underneath the pane that just opened, which leaves
     /// the pane rendered but no longer identified as showing. Sidebar arrow navigation reads those pane
     /// flags to know where the selection currently sits, so it then has neither a pane nor a selected
     /// row to move from and stops responding.
-    nonisolated static func sidebarClearedSelectionPresentsPlaceholder(showingAlerts: Bool, showingAutomations: Bool) -> Bool {
-        !showingAlerts && !showingAutomations
+    nonisolated static func sidebarClearedSelectionPresentsPlaceholder(
+        showingAlerts: Bool, showingAutomations: Bool, showingResources: Bool = false
+    ) -> Bool {
+        !showingAlerts && !showingAutomations && !showingResources
     }
 
     nonisolated static func sidebarArrowSelectionTarget(
         visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], hiddenWorkspaceIDs: [String], selectedProjectID: String?,
-        selectedWorkspaceID: String?, showingAlerts: Bool, showingAutomations: Bool, direction: Int
+        selectedWorkspaceID: String?, showingAlerts: Bool, showingAutomations: Bool, showingResources: Bool = false, direction: Int
     ) -> SidebarArrowSelectionTarget? {
         guard direction == -1 || direction == 1 else { return nil }
         let visibleWorkspaceIDs = visibleWorkspaceIDsByProject.flatMap(\.workspaceIDs) + hiddenWorkspaceIDs
-        // Top-level row order is Alerts ↔ Automations ↔ first workspace; the Automations row is always present.
+        // Top-level row order is Alerts ↔ Automations ↔ Resources ↔ first workspace; the Automations and
+        // Resources rows are always present.
         if showingAlerts { return direction > 0 ? .automations : nil }
-        if showingAutomations {
-            guard direction > 0 else { return .alerts }
+        if showingAutomations { return direction > 0 ? .resources : .alerts }
+        if showingResources {
+            guard direction > 0 else { return .automations }
             guard let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
             return .workspace(firstWorkspaceID)
         }
         if let selectedWorkspaceID, let currentIndex = visibleWorkspaceIDs.firstIndex(of: selectedWorkspaceID) {
             let targetIndex = currentIndex + direction
-            if targetIndex < 0 { return .automations }
+            if targetIndex < 0 { return .resources }
             guard targetIndex < visibleWorkspaceIDs.count else { return nil }
             return .workspace(visibleWorkspaceIDs[targetIndex])
         }
@@ -6507,7 +6544,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if direction < 0 {
             let priorProjects = visibleWorkspaceIDsByProject[..<projectIndex].reversed()
             for project in priorProjects { if let workspaceID = project.workspaceIDs.last { return .workspace(workspaceID) } }
-            return .automations
+            return .resources
         }
         for project in visibleWorkspaceIDsByProject[(projectIndex + 1)...] {
             if let workspaceID = project.workspaceIDs.first { return .workspace(workspaceID) }
@@ -6756,6 +6793,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .none: return
         case .alerts: alerts.showAlertsDetail()
         case .automations: showAutomationsDetail()
+        case .resources: showResourcesDetail()
         case .workspace(let workspaceID, _):
             guard let (project, workspace) = findWorkspace(id: workspaceID) else { return }
             showWorkspaceDetail(project: project, workspace: workspace)
@@ -6804,6 +6842,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             await Task.yield()
             self.isApplyingSplitViewWidth = false
         }
+    }
+
+    /// Resources measures only while the main window is on screen: visible (closing only orders it out),
+    /// not minimized, and the app not hidden. Each of those transitions is observed directly, because an
+    /// occlusion change alone misses a hide or minimize of a window that was already fully covered.
+    /// Being covered by another app's window or sitting on another desktop leaves the pane open, so it
+    /// keeps measuring there instead of resetting its history whenever another app comes to the front.
+    func refreshMainWindowOnScreen() {
+        let isOnScreen = window.isVisible && !window.isMiniaturized && !NSApp.isHidden
+        guard isOnScreen != mainWindowIsOnScreen else { return }
+        mainWindowIsOnScreen = isOnScreen
+        resources.mainWindowOnScreenChanged()
+    }
+
+    /// Covers the reveal paths (reopen, showing the window from a menu or hotkey), which all change the
+    /// window's occlusion.
+    public func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        refreshMainWindowOnScreen()
+    }
+
+    public func windowDidMiniaturize(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        refreshMainWindowOnScreen()
+    }
+
+    public func windowDidDeminiaturize(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        refreshMainWindowOnScreen()
     }
 
     public func windowDidBecomeKey(_ notification: Notification) {

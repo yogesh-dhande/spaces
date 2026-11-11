@@ -17,6 +17,10 @@ import Foundation
 
         public static func configFilePath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy.json") }
 
+        /// Caddy writes its pid here at launch (`--pidfile`), so resource sampling can find this profile's
+        /// router without an `lsof` sweep of the admin socket's owners.
+        public static func pidFilePath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy.pid") }
+
         /// Callers must embed this in the generated config (admin.listen) so it matches the address
         /// used for reloads.
         ///
@@ -82,7 +86,7 @@ import Foundation
             let executableURL = try resolveExecutableURL()
             let process = Process()
             process.executableURL = executableURL
-            process.arguments = ["run", "--config", configPath]
+            process.arguments = ["run", "--config", configPath, "--pidfile", try pidFilePath()]
             process.environment = ProcessInfo.processInfo.environment
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice

@@ -48,6 +48,15 @@ public enum TerminalServicePaths {
         return socketRoot.appendingPathComponent("\(name).sock", isDirectory: false).path
     }
 
+    /// Profile-scoped unix socket the daemon streams device resource frames on (see
+    /// `subscribeDeviceResources`). One socket per profile: the subscription has no scope key.
+    public static func deviceResourcesSocketPath(fileManager: FileManager = .default) throws -> String {
+        let root = try terminalRootDirectory(fileManager: fileManager)
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
+        let name = "device-resources-\(socketPathComponent(for: root.path))"
+        return socketRoot.appendingPathComponent("\(name).sock", isDirectory: false).path
+    }
+
     /// Profile-scoped unix socket Linux database writers connect to after a
     /// committed write so the daemon can translate the wakeup into its in-process
     /// database-change notification.

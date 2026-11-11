@@ -311,6 +311,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             /// Set only for a `subscribeWorkspaceFileListSignature` relay; `closeStreamRelay` uses it to
             /// release that workspace's poll-subscriber slot when this relay's connection closes.
             var fileListSignatureWorkspaceID: String? = nil
+            /// True only for a `subscribeDeviceResources` relay; `closeStreamRelay` uses it to release the
+            /// resources subscriber slot when this relay's connection closes.
+            var holdsDeviceResourcesSubscriber: Bool = false
         }
 
         private final class StreamSendSequencer: @unchecked Sendable {
@@ -605,6 +608,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             /// Set only for a `subscribeWorkspaceFileListSignature` relay; `relayLinuxSubscription` uses it
             /// to release that workspace's poll-subscriber slot once the relay loop returns.
             var fileListSignatureWorkspaceID: String? = nil
+            /// True only for a `subscribeDeviceResources` relay; `relayLinuxSubscription` uses it to release
+            /// the resources subscriber slot once the relay loop returns.
+            var holdsDeviceResourcesSubscriber: Bool = false
         }
 
         /// Serializes the terminal keepalive timer's writes against the relay thread's writes on the same
@@ -1350,6 +1356,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// keyed by workspace id. Entries are `queue`-confined: created on a workspace's first subscriber
     /// and removed when its last relay closes.
     private var workspaceFileListSignatureSubscriptions: [String: WorkspaceFileListSignatureSubscription] = [:]
+    /// The single device-wide producer for `subscribeDeviceResources`. Entries are `queue`-confined:
+    /// created on the first subscriber and removed when the last relay closes (see
+    /// `addDeviceResourcesSubscriber`/`removeDeviceResourcesSubscriber`), which is what stops all sampling.
+    private var deviceResourcesSubscription: DeviceResourcesSubscription?
     /// One `WorkspaceWatch` per workspace id, shared by that workspace's diff-signature and
     /// file-list-signature subscriptions (see `acquireWorkspaceWatch`). An entry is created on a
     /// workspace's first-ever subscriber and then kept for the daemon's life: it is never removed on a
@@ -2890,6 +2900,37 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return socketPath
     }
 
+    /// Registers one subscriber for the device-resources stream, starting the sampler and its 2 s timer
+    /// on the first one and returning the producer's socket path either way. Must run on `queue`.
+    private func addDeviceResourcesSubscriber() throws -> String {
+        if let existing = deviceResourcesSubscription {
+            existing.subscriberCount += 1
+            return existing.socketPath
+        }
+        let subscription = DeviceResourcesSubscription(
+            socketPath: try TerminalServicePaths.deviceResourcesSocketPath(), queue: DispatchQueue(label: "spaces.device-resources"),
+            liveSessions: { [provider = liveInMemoryTerminalSessionsProvider] in
+                (provider?() ?? []).compactMap { entry in
+                    guard let childPID = entry.runtimeState.childPID, childPID > 0 else { return nil }
+                    return (sessionID: entry.sessionID, shellProcessID: pid_t(childPID))
+                }
+            })
+        try subscription.start()
+        subscription.subscriberCount = 1
+        deviceResourcesSubscription = subscription
+        return subscription.socketPath
+    }
+
+    /// Releases one subscriber, stopping the sampler and dropping its state once none remain. As with the
+    /// other streams, a relay's connection closing is the only unsubscribe. Must run on `queue`.
+    private func removeDeviceResourcesSubscriber() {
+        guard let subscription = deviceResourcesSubscription else { return }
+        subscription.subscriberCount -= 1
+        guard subscription.subscriberCount <= 0 else { return }
+        subscription.stop()
+        deviceResourcesSubscription = nil
+    }
+
     /// Releases one subscriber for `scope`, tearing its producer + poll timer down once the count reaches
     /// zero. There is no explicit unsubscribe command by design; a relay's connection closing is the only
     /// unsubscribe. Must run on `queue`.
@@ -3460,8 +3501,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .terminalTranscript: return try handleTerminalTranscriptLaneRequest(request)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
-        case .subscribe, .subscribeDeviceOverview, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
-            .subscribeWorkspaceFileListSignature:
+        case .subscribe, .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature,
+            .subscribeWorkspaceFileSignature, .subscribeWorkspaceFileListSignature:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
         case .agentHooksStatus, .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer: return try handleAgentHookRequest(request)
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
@@ -7283,6 +7324,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         installationID: request.clientApp?.installationID ?? "", subscriptionSocketPath: socketPath, controlSocketPath: "",
                         clientID: nil, fileSignatureScope: scope))
             }
+            if request.command.isDeviceResourcesSubscription {
+                let socketPath: String
+                do { socketPath = try addDeviceResourcesSubscriber() } catch { return .response(SpacesDeviceAPIServer.failureResponse(for: error)) }
+                // The producer broadcasts every tick, so the relay needs no empty-line keepalive.
+                return .relay(
+                    LinuxSubscription(
+                        sessionID: "device-resources", installationID: request.clientApp?.installationID ?? "",
+                        subscriptionSocketPath: socketPath, controlSocketPath: "", clientID: nil, holdsDeviceResourcesSubscriber: true))
+            }
             if let workspaceID = request.command.workspaceFileListSignatureWorkspaceID {
                 let socketPath: String
                 do {
@@ -7328,6 +7378,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             defer {
                 if let scope = subscription.diffSignatureScope { performOnQueue { self.removeWorkspaceDiffSignatureSubscriber(scope: scope) } }
                 if let scope = subscription.fileSignatureScope { performOnQueue { self.removeWorkspaceFileSignatureSubscriber(scope: scope) } }
+                if subscription.holdsDeviceResourcesSubscriber { performOnQueue { self.removeDeviceResourcesSubscriber() } }
                 if let workspaceID = subscription.fileListSignatureWorkspaceID {
                     performOnQueue { self.removeWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID) }
                 }
@@ -7510,6 +7561,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 try relayWorkspaceFileSignatureSubscription(
                     connection: connection, scope: WorkspaceFileScope(workspaceID: scopePayload.workspaceID, path: scopePayload.path),
                     installationID: request.clientApp?.installationID ?? "")
+                return
+            }
+            if request.command.isDeviceResourcesSubscription {
+                try relayDeviceResourcesSubscription(connection: connection, installationID: request.clientApp?.installationID ?? "")
                 return
             }
             if let workspaceID = request.command.workspaceFileListSignatureWorkspaceID {
@@ -7712,6 +7767,31 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 // The relay never made it into `streamRelays`, so `closeStreamRelay` will never see this
                 // subscriber's scope and release its slot; release it here instead.
                 removeWorkspaceFileSignatureSubscriber(scope: scope)
+                throw error
+            }
+        }
+
+        /// Relays the device-wide resources producer socket to a subscribing connection. The producer
+        /// broadcasts on its own timer, so the relay needs no keepalive.
+        private func relayDeviceResourcesSubscription(connection: NWConnection, installationID: String) throws {
+            let socketPath = try addDeviceResourcesSubscriber()
+            do {
+                let relaySocketFD = try connectUnixSocket(path: socketPath)
+                try setNonBlocking(relaySocketFD)
+                let relayQueue = DispatchQueue(label: "spaces.device.api.device-resources.\(ObjectIdentifier(connection))")
+                let relaySource = DispatchSource.makeReadSource(fileDescriptor: relaySocketFD, queue: relayQueue)
+                relaySource.setEventHandler { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.relayStateData(from: relaySocketFD, to: connection)
+                }
+                relaySource.setCancelHandler { close(relaySocketFD) }
+                streamRelays[ObjectIdentifier(connection)] = StreamRelay(
+                    sessionID: "device-resources", installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue,
+                    relaySource: relaySource, heartbeatTimer: nil, connection: connection,
+                    sendSequencer: StreamSendSequencer(queueKey: queueKey), holdsDeviceResourcesSubscriber: true)
+                relaySource.resume()
+            } catch {
+                removeDeviceResourcesSubscriber()
                 throw error
             }
         }
@@ -7924,6 +8004,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             if let scope = relay.diffSignatureScope { removeWorkspaceDiffSignatureSubscriber(scope: scope) }
             if let scope = relay.fileSignatureScope { removeWorkspaceFileSignatureSubscriber(scope: scope) }
             if let workspaceID = relay.fileListSignatureWorkspaceID { removeWorkspaceFileListSignatureSubscriber(workspaceID: workspaceID) }
+            if relay.holdsDeviceResourcesSubscriber { removeDeviceResourcesSubscriber() }
             if cancelNetworkConnection { connection.cancel() }
         }
 

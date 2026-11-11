@@ -148,7 +148,7 @@ import Testing
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
             .renameAgentSession, .dismissAlerts, .visitTerminalSession, .setComeBackLater, .state, .terminalControl, .terminalPasteImage,
             .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview,
-            .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature, .subscribeWorkspaceFileListSignature, .openServiceTunnel,
+            .subscribeDeviceResources, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature, .subscribeWorkspaceFileListSignature, .openServiceTunnel,
             .listAgentSessions, .writeAgentBrief, .readAgentBrief, .clearAgentBrief, .listAutomations, .listAutomationRuns,
             .workspaceReviewCommentList, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete, .workspaceReviewCommentsSend:
             10
