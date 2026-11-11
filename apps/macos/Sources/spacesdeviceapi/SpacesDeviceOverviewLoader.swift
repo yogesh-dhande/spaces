@@ -104,7 +104,7 @@ struct SpacesDeviceOverviewLoader {
             activeSessionCount: activeSessionCount, protocolVersion: SpacesWireProtocol.version, runningProcesses: impact.runningProcesses,
             activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents,
             timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier, deviceAPIAddresses: deviceAPIAddresses,
-            restorableSessions: restorableSessions)
+            restorableSessions: restorableSessions, selfUpdate: DaemonSelfUpdateStatusCache.shared.current)
     }
 
     /// Builds the overview's automation section: every automation, plus the runs a client needs — all

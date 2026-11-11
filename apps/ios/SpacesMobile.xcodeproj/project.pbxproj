@@ -25,6 +25,7 @@
 		1CEC201CDB2F0F869548081A /* spacesdevicecore in Frameworks */ = {isa = PBXBuildFile; productRef = 00CDBDF150520E591B1DB017 /* spacesdevicecore */; };
 		1DD19A4D90A87EBA9936D326 /* SpacesMobileOverviewFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03B40812BE74196E4313853F /* SpacesMobileOverviewFixtures.swift */; };
 		1F3CCD60D9A8819D7AA7D42A /* BaselineLaneConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C309F3F3FB565542BD0E2BF /* BaselineLaneConfiguration.swift */; };
+		21F706142DDA297B5AB4E157 /* DaemonSelfUpdateCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C82314FE4AEA6997696F349 /* DaemonSelfUpdateCardView.swift */; };
 		246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */; };
 		259117C21026E9071D437823 /* TerminalSessionFollowDiffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C40DA304D3593F0545D0C5C /* TerminalSessionFollowDiffTests.swift */; };
 		25F1FF914F8A41423C26637D /* ManualVisitClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65EF1A1B66CB38D3C3CA087F /* ManualVisitClock.swift */; };
@@ -56,6 +57,7 @@
 		5E74AE9B5CC2326AD53BA04E /* AlertsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 895AC546F077905FD8E53CF9 /* AlertsTabView.swift */; };
 		5FD4313E441F15B6AFE8A029 /* BrowserProxyTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C39C8CAB0348FE24E6F0A46D /* BrowserProxyTunnel.swift */; };
 		5FEC6F4E2B46F77A5B34223B /* TerminalRetainedScreenStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BDF1CD54A70A681DCBCED2C /* TerminalRetainedScreenStoreTests.swift */; };
+		600857FA4FA59758B2A226F7 /* DaemonSelfUpdateProgressBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63F854FCD896E8F9F11CD02B /* DaemonSelfUpdateProgressBar.swift */; };
 		6162BE4BD77CFC8BA373EBC1 /* ShaperControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D9E8E0FBC4750AB7C917D62 /* ShaperControlClient.swift */; };
 		636C2B8EB59BDDBE8707D1E1 /* TerminalArtifactViewersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C3A209B5AB578545E3F3D74 /* TerminalArtifactViewersTests.swift */; };
 		64386B5E52455F5574BB70E3 /* TerminalViewerSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6F95FD027F230D6B74B751F /* TerminalViewerSmokeUITests.swift */; };
@@ -87,6 +89,7 @@
 		8D4631F6072D0D6F5FB8FC01 /* MobileAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684BF4A0996100451CA52A51 /* MobileAppVersion.swift */; };
 		8D7BDE377CE95CEA15E0F28F /* AgentsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70794A5FB7ED310FA4568364 /* AgentsTabView.swift */; };
 		8FB9A76DA91E3C93B4E48CE5 /* BaselineLaneMarkers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B22CB448437015A0C6FDB35 /* BaselineLaneMarkers.swift */; };
+		8FFEFBF8B29C17D64E028F3D /* DaemonSelfUpdateContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4577A59CA8FCD4B58296622E /* DaemonSelfUpdateContent.swift */; };
 		913DCFD3AD91359729209DC2 /* SpacesDeviceAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03832ADD9E34BC981F089A96 /* SpacesDeviceAPIClient.swift */; };
 		969615CD070550D747528A64 /* SessionRestoreOfferSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 003D20B58290E4E008E6F5C6 /* SessionRestoreOfferSheet.swift */; };
 		97C8F1FB9702650BC7FB37BC /* BrowserSessionDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07AE33B363649D6D32B8D2D8 /* BrowserSessionDetailView.swift */; };
@@ -122,6 +125,7 @@
 		C24148CFBBE2C8AF70320093 /* SettingsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01EA5212204832CDA41A1793 /* SettingsTabView.swift */; };
 		C6392CABE75E9726AD7A1889 /* WorkspaceDeleteSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F212A2A4F1C77A98126476E /* WorkspaceDeleteSheet.swift */; };
 		C706060C201EF9713ABFCF33 /* TerminalBlockedLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97AD27E88CF7DAC1E69938DF /* TerminalBlockedLink.swift */; };
+		C75C7953CCA52250EF90DDFC /* DaemonVersionPairLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31C1EC9035A28037FBB462F7 /* DaemonVersionPairLabel.swift */; };
 		C7FDBFF19E88F01DCABE05E6 /* terminal-markdown.css in Resources */ = {isa = PBXBuildFile; fileRef = 75ADBC1DFE5DC487F78D5BC2 /* terminal-markdown.css */; };
 		C86C93B403B5D24C1C907C07 /* StagedScreenshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68ACEAFCA89C7E530880B3F0 /* StagedScreenshotStore.swift */; };
 		C89EA4905FBBFA2C7E358961 /* TerminalComposerSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CDCD5118B25B0A1ACA33A12 /* TerminalComposerSendTests.swift */; };
@@ -213,11 +217,13 @@
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2CCC44AEB1DD8AF293DDE88E /* SpacesMobileDeviceOverviewStreamTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDeviceOverviewStreamTests.swift; sourceTree = "<group>"; };
 		2CF67C175137536FB11A2A77 /* PairingScannerSmokeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScannerSmokeUITests.swift; sourceTree = "<group>"; };
+		31C1EC9035A28037FBB462F7 /* DaemonVersionPairLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonVersionPairLabel.swift; sourceTree = "<group>"; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		38B8B376D14D9A659066191F /* SpacesMobileDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDeviceStore.swift; sourceTree = "<group>"; };
 		3B22CB448437015A0C6FDB35 /* BaselineLaneMarkers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BaselineLaneMarkers.swift; sourceTree = "<group>"; };
 		3B48F6727BD662C4E5C4B2EE /* SpacesDeviceAPITransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesDeviceAPITransport.swift; sourceTree = "<group>"; };
 		3C3A209B5AB578545E3F3D74 /* TerminalArtifactViewersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalArtifactViewersTests.swift; sourceTree = "<group>"; };
+		3C82314FE4AEA6997696F349 /* DaemonSelfUpdateCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonSelfUpdateCardView.swift; sourceTree = "<group>"; };
 		3F43E94C97CCD53AD3020F39 /* WorkspaceActionsMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceActionsMenuTests.swift; sourceTree = "<group>"; };
 		40CD3C75E9ABAB788175912A /* SpacesMobileBaselineUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileBaselineUITests.swift; sourceTree = "<group>"; };
 		40D769DF78657F01555B2ABE /* SettingsTabSmokeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTabSmokeUITests.swift; sourceTree = "<group>"; };
@@ -225,6 +231,7 @@
 		41C157DD37A42EDAF1DC5407 /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = ../macos; sourceTree = SOURCE_ROOT; };
 		41E15C5763CA61AE8C9C2D6E /* SubscriptionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStore.swift; sourceTree = "<group>"; };
 		42A85B8A8B93B30B9FD7E61B /* AlertListItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertListItem.swift; sourceTree = "<group>"; };
+		4577A59CA8FCD4B58296622E /* DaemonSelfUpdateContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonSelfUpdateContent.swift; sourceTree = "<group>"; };
 		48C23068DC0BCEFED66259E6 /* SpacesMobileDemoModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDemoModeTests.swift; sourceTree = "<group>"; };
 		4AB35B6A91EFCEA885942088 /* SubscriptionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStoreTests.swift; sourceTree = "<group>"; };
 		4B5CCA2DCCA472988D2E29C9 /* AutomationNextRunSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationNextRunSheet.swift; sourceTree = "<group>"; };
@@ -243,6 +250,7 @@
 		5E02383690BCB874939E2463 /* PinnedTLSLoopbackServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedTLSLoopbackServer.swift; sourceTree = "<group>"; };
 		60522C1D741A5B3997C39125 /* AgentBriefVisibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentBriefVisibility.swift; sourceTree = "<group>"; };
 		62FF73FDCE8A0B4AAFF043E4 /* DaemonCompatibilityPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonCompatibilityPresentation.swift; sourceTree = "<group>"; };
+		63F854FCD896E8F9F11CD02B /* DaemonSelfUpdateProgressBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonSelfUpdateProgressBar.swift; sourceTree = "<group>"; };
 		65EF1A1B66CB38D3C3CA087F /* ManualVisitClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualVisitClock.swift; sourceTree = "<group>"; };
 		67E1D4AB372BA78781DFCC3B /* TerminalViewerOpenPaintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewerOpenPaintTests.swift; sourceTree = "<group>"; };
 		684BF4A0996100451CA52A51 /* MobileAppVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppVersion.swift; sourceTree = "<group>"; };
@@ -410,7 +418,11 @@
 				BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */,
 				287FA9ABE17A92D0A80A6BCA /* CreateWorkspaceConfig.swift */,
 				62FF73FDCE8A0B4AAFF043E4 /* DaemonCompatibilityPresentation.swift */,
+				3C82314FE4AEA6997696F349 /* DaemonSelfUpdateCardView.swift */,
+				4577A59CA8FCD4B58296622E /* DaemonSelfUpdateContent.swift */,
+				63F854FCD896E8F9F11CD02B /* DaemonSelfUpdateProgressBar.swift */,
 				F5D30357B101A99C39E09E4C /* DaemonVersionHeroView.swift */,
+				31C1EC9035A28037FBB462F7 /* DaemonVersionPairLabel.swift */,
 				684BF4A0996100451CA52A51 /* MobileAppVersion.swift */,
 				A169D605A2F2531FCFBF185B /* PendingDaemonUpdateCardView.swift */,
 				A5C2B6685BB88364360E9184 /* QRCodeScannerView.swift */,
@@ -869,7 +881,11 @@
 				33641B9B5F7C4A0AE09EEA5D /* ConnectionSettingsView.swift in Sources */,
 				7FA3B26342D2139D12534FAE /* CreateWorkspaceConfig.swift in Sources */,
 				C1287CB131F488EC06CE9C9F /* DaemonCompatibilityPresentation.swift in Sources */,
+				21F706142DDA297B5AB4E157 /* DaemonSelfUpdateCardView.swift in Sources */,
+				8FFEFBF8B29C17D64E028F3D /* DaemonSelfUpdateContent.swift in Sources */,
+				600857FA4FA59758B2A226F7 /* DaemonSelfUpdateProgressBar.swift in Sources */,
 				9E4E70FE0BB5C7F3F710F316 /* DaemonVersionHeroView.swift in Sources */,
+				C75C7953CCA52250EF90DDFC /* DaemonVersionPairLabel.swift in Sources */,
 				C8E96C4D0660016873DBB35F /* DemoDeviceBackend.swift in Sources */,
 				80D3ABF883A2086A4640F3B2 /* DemoMode.swift in Sources */,
 				D183BA192ECF922B5E5C8ABB /* DemoRecordingLibrary.swift in Sources */,

@@ -62,17 +62,30 @@ export default function RemoteAccessDocsPage() {
       <Section id="update-and-uninstall-on-linux" title="Update and uninstall on Linux">
         <SubHeading>Update</SubHeading>
         <Prose>
-          Re-run the install command with a specific version to update in place, replacing{" "}
+          A Linux machine checks for a newer Spaces release every few hours. When one is out, the Mac
+          app and the iPhone app show &ldquo;Update available&rdquo; for it, and pressing Update has the
+          machine download, verify, and install the release itself, with no SSH access needed from the
+          phone. Both apps show each step: downloading, installing, and restarting. Terminals,
+          processes, and coding agents keep running throughout. When the machine is back on the new
+          version, both apps show &ldquo;Updated&rdquo; until you move to something else. A download that receives no data for 60
+          seconds stops and reports why, so you can try again.
+        </Prose>
+        <p className={paragraphClass}>
+          The machine follows stable releases unless you turn on &ldquo;Pre-release updates&rdquo; under it
+          in the Mac app&apos;s Settings → Devices, which offers each tagged release as soon as it is
+          published.
+        </p>
+        <p className={paragraphClass}>
+          A machine whose installed Spaces predates self-update needs one manual update. Re-run the install command with a specific version to update in place, replacing{" "}
           <InlineCode>&lt;version&gt;</InlineCode> with a released version such as{" "}
           <InlineCode>0.1.0</InlineCode>:
-        </Prose>
+        </p>
         <CodeBlock>{`curl -fsSL https://usespaces.dev/install.sh | bash -s -- <version>`}</CodeBlock>
         <p className={paragraphClass}>
           The Mac app and the <InlineCode>spaces</InlineCode> CLI print this command with the right
-          version already filled in whenever they reach a Linux machine that is behind. Terminals,
-          processes, and coding agents keep running across the update. For a machine paired over SSH,
-          the Mac app also offers an &ldquo;Update over SSH&rdquo; action that runs the same command for
-          you.
+          version already filled in whenever they reach such a machine while it is behind. For one
+          paired over SSH, the Mac app also offers an &ldquo;Update over SSH&rdquo; action that runs the
+          same command for you.
         </p>
         <SubHeading>Uninstall</SubHeading>
         <Prose>On the Linux machine:</Prose>

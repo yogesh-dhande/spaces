@@ -19,10 +19,17 @@ struct DaemonVersionHeroView: View {
             Text(content.eyebrow).font(.system(size: 11, weight: .semibold)).tracking(1.2).foregroundStyle(Theme.orange).multilineTextAlignment(
                 .center)
             versionPairRow.padding(.top, 14)
-            Text(content.whoLine).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).multilineTextAlignment(.center).padding(.top, 8)
+            // Wraps rather than truncates: a long device name must stay readable in full.
+            Text(content.whoLine).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).multilineTextAlignment(.center).fixedSize(
+                horizontal: false, vertical: true
+            ).padding(.top, 8)
             Text(content.body).font(.system(size: 14)).foregroundStyle(Theme.muted).multilineTextAlignment(.center).fixedSize(
                 horizontal: false, vertical: true
             ).padding(.top, 18)
+            if let progress = content.progress { DaemonSelfUpdateProgressBar(progress: progress).padding(.top, 14) }
+            if let footnote = content.footnote {
+                Text(footnote).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).multilineTextAlignment(.center).padding(.top, 8)
+            }
             if let actionTitle = content.actionTitle {
                 Button(action: onAction) {
                     HStack(spacing: 6) {

@@ -252,6 +252,17 @@ struct SpacesDeviceAPIClient: Sendable {
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
+    /// Frozen-core self-update request: asks a Linux daemon to download, verify, and install the newest
+    /// release on its channel itself. Like `requestDaemonRestart` it rides the frozen wire core, so it is
+    /// accepted from a client that is wire-incompatible with the daemon, which is the state an out-of-date
+    /// device is in.
+    func startDaemonSelfUpdate(commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws {
+        let response = try await sendRequest(
+            .init(command: .startDaemonSelfUpdate, authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), timeout: .seconds(8),
+            commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
     func fetchWorkspaceCreateOptions(projectID: String? = nil, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
         -> SpacesDeviceWorkspaceCreateOptions
     {

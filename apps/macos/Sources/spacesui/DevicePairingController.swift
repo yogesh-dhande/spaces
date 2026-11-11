@@ -201,10 +201,16 @@ import workspacecore
     /// invalidates. A row counts as showing its panel while its request runs, even before a code exists.
     private var inFlightPairingRequest: (deviceID: String, token: Int)?
     private var pairingRequestTokenSeed = 0
-    /// The device load states the pane last painted. Sidebar load-state transitions happen in the
-    /// background, so `refreshDeviceSettingsForDeviceStatusChange` compares against these to repaint
-    /// exactly when a device's connection state changed and never otherwise.
-    private var lastRenderedDeviceLoadStates: [String: DeviceModelStore.SidebarDeviceLoadState] = [:]
+    /// The sidebar facts the pane paints per device: its connection state and its reported update channel.
+    private struct RenderedDeviceFacts: Equatable {
+        var loadState: DeviceModelStore.SidebarDeviceLoadState
+        var updateChannel: DaemonUpdateChannel?
+    }
+
+    /// The device facts the pane last painted. They change in the background, so
+    /// `refreshDeviceSettingsForDeviceStatusChange` compares against these to repaint exactly when one
+    /// changed and never otherwise.
+    private var lastRenderedDeviceFacts: [String: RenderedDeviceFacts] = [:]
     var renamingClientDeviceID: String?
     weak var renamingClientDeviceField: NSTextField?
 
@@ -272,7 +278,7 @@ import workspacecore
 
     func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) {
         captureRemoteDeviceFormDraft()
-        lastRenderedDeviceLoadStates = deviceSectionLoadStates()
+        lastRenderedDeviceFacts = deviceSectionFacts()
         host.shortcuts.activeShortcutCaptureSetting = nil
         host.shortcuts.shortcutButtonsBySetting.removeAll()
         host.settings.renderSettingsCards(deviceSettingsCards(response: response))
@@ -396,12 +402,16 @@ import workspacecore
         for device in connectedClientDevices(response: response) {
             let isPairingExpanded = expandedDeviceRow == .pairing(deviceID: device.id)
             let row = connectedDeviceRow(device, isPairingExpanded: isPairingExpanded, response: response)
-            if isPairingExpanded, let panel = devicePairingPanel(for: device, response: response) {
+            let pairingPanel = isPairingExpanded ? devicePairingPanel(for: device, response: response) : nil
+            let channelControls = updateChannelControls(deviceID: device.id, deviceName: device.displayName)
+            // Panels belong to the row above them, so a row with any panel draws no hairline beneath it.
+            if pairingPanel != nil || channelControls != nil {
                 entries.append(.expandedRow(row))
-                entries.append(.panel(panel))
             } else {
                 entries.append(.row(row))
             }
+            if let pairingPanel { entries.append(.panel(pairingPanel)) }
+            if let channelControls { entries.append(.panel(channelControls)) }
         }
 
         // A non-ok control response means the local daemon (or just its Device API endpoint) is
@@ -527,6 +537,51 @@ import workspacecore
         toggle.isEnabled = !isRemoteDeviceAttemptInFlight
         addRemoteDeviceToggle = toggle
         return mobilePanelButtonRow([toggle])
+    }
+
+    /// The release channel a self-updating device follows, shown under its row. The device reports the
+    /// channel in its status (the sidebar's copy of it), so only a device that has reported one gets the
+    /// checkbox; a device that cannot update itself has no channel to choose.
+    private func updateChannelControls(deviceID: String, deviceName: String) -> NSView? {
+        guard let channel = host.deviceDaemonStatus(forDeviceID: deviceID)?.selfUpdate?.channel else { return nil }
+        let checkbox = NSButton(checkboxWithTitle: "Pre-release updates", target: self, action: #selector(deviceUpdateChannelChanged(_:)))
+        checkbox.translatesAutoresizingMaskIntoConstraints = false
+        checkbox.state = channel == .prerelease ? .on : .off
+        checkbox.identifier = NSUserInterfaceItemIdentifier(deviceID)
+        checkbox.setAccessibilityIdentifier("device-row-prerelease-updates-\(deviceID)")
+        let hint = host.helpTextLabel("Offer each tagged release on \(deviceName) before it is promoted to everyone.")
+        let stack = NSStackView(views: [checkbox, hint])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    /// Sends the choice to the device. On a failure the checkbox goes back to what the device still
+    /// follows, so it never claims a channel the device did not accept.
+    @objc private func deviceUpdateChannelChanged(_ sender: NSButton) {
+        let channel: DaemonUpdateChannel = sender.state == .on ? .prerelease : .stable
+        let previous: NSControl.StateValue = sender.state == .on ? .off : .on
+        guard let deviceID = sender.identifier?.rawValue, let device = host.deviceRecord(forDeviceID: deviceID) else {
+            sender.state = previous
+            host.showDeviceNotLoadedError()
+            return
+        }
+        Task { @MainActor [weak self, weak sender] in
+            do {
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try SpacesDeviceClient.setDaemonUpdateChannel(channel, context: DeviceRequestContext(device: device))
+                }.value
+            } catch {
+                sender?.state = previous
+                self?.host.showError(error)
+                return
+            }
+            // Pulls the status the device now reports, which is also how the sidebar learns of a release
+            // the new channel offers.
+            self?.host.requestSidebarReload(forceRemoteRefresh: true)
+        }
     }
 
     private func connectedDeviceRow(_ device: ClientConnectedDevice, isPairingExpanded: Bool, response: SpacesDeviceAPIControlResponse) -> NSView {
@@ -1350,8 +1405,9 @@ import workspacecore
     /// user-initiated, so it runs off the main actor and applies its answer back on it: a daemon that
     /// accepts the connection and then goes quiet must not freeze the app for its timeout.
     ///
-    /// Load state is therefore the only trigger, and it does not describe everything the pane paints: the
-    /// local Device API can stop answering while the terminal service keeps serving a loaded overview, and
+    /// The triggers are a device's load state and its reported update channel, the two sidebar facts the
+    /// pane paints per device. They do not describe everything the pane paints: the local Device API can
+    /// stop answering while the terminal service keeps serving a loaded overview, and
     /// this pane keeps its previous statuses until the next render (any action in it, or reselecting the
     /// section). Accepted: closing that gap means polling the daemon on a timer for as long as the pane sits
     /// open, and each answer rebuilds the pane wholesale — which resets its scroll position — for a status
@@ -1365,9 +1421,9 @@ import workspacecore
         // insertion point are not, so a repaint arriving mid-keystroke would drop the user out of the field.
         // A background status change therefore waits while the SSH form or a rename editor is open; closing
         // either repaints from current state, as does any action in the pane.
-        let probedLoadStates = deviceSectionLoadStates()
+        let probedDeviceFacts = deviceSectionFacts()
         guard expandedDeviceRow != .addRemoteDevice, renamingClientDeviceID == nil, !isProbingDeviceStatusForRefresh,
-            probedLoadStates != lastRenderedDeviceLoadStates
+            probedDeviceFacts != lastRenderedDeviceFacts
         else { return }
         isProbingDeviceStatusForRefresh = true
         Task { [weak self] in
@@ -1382,17 +1438,20 @@ import workspacecore
             // the same suppression that skips the refresh applies to landing it.
             guard self.expandedDeviceRow != .addRemoteDevice, self.renamingClientDeviceID == nil else { return }
             self.refreshVisibleDeviceSettings(response)
-            // The render stamps the load states as of now, but this response describes the ones the probe
-            // started from, and transitions that landed while it ran were skipped by the in-flight guard.
+            // The render stamps the device facts as of now, but this response describes the ones the probe
+            // started from, and changes that landed while it ran were skipped by the in-flight guard.
             // Stamping what the response actually describes leaves those pending, and asking again here
             // repaints them rather than waiting for a sidebar change that may not come.
-            self.lastRenderedDeviceLoadStates = probedLoadStates
+            self.lastRenderedDeviceFacts = probedDeviceFacts
             self.refreshDeviceSettingsForDeviceStatusChange()
         }
     }
 
-    private func deviceSectionLoadStates() -> [String: DeviceModelStore.SidebarDeviceLoadState] {
-        host.deviceModel.deviceSections.reduce(into: [:]) { $0[$1.deviceID] = $1.loadState }
+    private func deviceSectionFacts() -> [String: RenderedDeviceFacts] {
+        host.deviceModel.deviceSections.reduce(into: [:]) {
+            $0[$1.deviceID] = RenderedDeviceFacts(
+                loadState: $1.loadState, updateChannel: $1.daemonStatus?.selfUpdate?.channel)
+        }
     }
 
     /// Re-renders the Devices pane after this client's own device state changed. A failing local control
