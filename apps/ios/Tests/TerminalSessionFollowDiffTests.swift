@@ -103,6 +103,51 @@
                     for: row, displayedSessionID: "displayed", displayedCreatedAt: "2026-01-01T00:00:00Z", overview: overview))
         }
 
+        // MARK: - Terminal rows (a lost shell replaced under the same row)
+
+        private func terminalRow(id: String, sessionID: String?) -> SpacesDeviceWorkspaceTerminalRow {
+            SpacesDeviceWorkspaceTerminalRow(
+                id: id, workspaceID: "workspace-feature", title: "shell-1", workingDirectory: "/repo/feature", sessionID: sessionID,
+                runState: .running, canOpenTerminal: true)
+        }
+
+        private let terminal = TerminalSessionFollowDiff.TerminalRowIdentity(workspaceID: "workspace-feature", rowID: "terminal-window:1")
+
+        func testFollowsALostShellOntoItsReplacementOnTheSameTerminalRow() {
+            let overview = makeOverview(
+                terminalRows: [terminalRow(id: "terminal-window:1", sessionID: "fresh")],
+                sessions: [session(id: "fresh", createdAt: "2026-10-15T21:24:05.456Z")])
+
+            let replacement = TerminalSessionFollowDiff.replacementSession(
+                forTerminal: terminal, displayedSessionID: "lost", displayedCreatedAt: "2026-10-15T09:00:00.123Z", overview: overview)
+
+            XCTAssertEqual(replacement?.id, "fresh")
+        }
+
+        func testDoesNotFollowATerminalRowBackOntoAnOlderSessionOrOffItself() {
+            let stale = makeOverview(
+                terminalRows: [terminalRow(id: "terminal-window:1", sessionID: "older")],
+                sessions: [session(id: "older", createdAt: "2026-10-14T00:00:00Z")])
+            XCTAssertNil(
+                TerminalSessionFollowDiff.replacementSession(
+                    forTerminal: terminal, displayedSessionID: "fresh", displayedCreatedAt: "2026-10-15T21:24:05Z", overview: stale))
+
+            let unchanged = makeOverview(
+                terminalRows: [terminalRow(id: "terminal-window:1", sessionID: "lost")],
+                sessions: [session(id: "lost", createdAt: "2026-10-15T09:00:00Z")])
+            XCTAssertNil(
+                TerminalSessionFollowDiff.replacementSession(
+                    forTerminal: terminal, displayedSessionID: "lost", displayedCreatedAt: "2026-10-15T09:00:00Z", overview: unchanged))
+        }
+
+        func testTerminalRowIdentityIsCapturedOnlyForATerminalRow() {
+            let terminalRuntimeRow = SpacesMobileWorkspaceRuntimeRow(source: .terminal(terminalRow(id: "terminal-window:1", sessionID: "lost")))
+            XCTAssertEqual(TerminalSessionFollowDiff.terminalRowIdentity(for: terminalRuntimeRow), terminal)
+
+            let processRuntimeRow = SpacesMobileWorkspaceRuntimeRow(source: .process(processRow(id: "api", sessionID: "live")))
+            XCTAssertNil(TerminalSessionFollowDiff.terminalRowIdentity(for: processRuntimeRow))
+        }
+
         // MARK: - processRowIdentity(for:)
 
         func testProcessRowIdentityIsCapturedOnlyForAProcessRow() {

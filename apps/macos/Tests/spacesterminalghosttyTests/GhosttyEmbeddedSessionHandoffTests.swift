@@ -242,6 +242,96 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         XCTAssertEqual(Self.occurrences(of: secondMarker, in: transcript), 1, "post-handoff output must land in output.log exactly once")
     }
 
+    /// A lost shell's replacement starts from a seed transcript. The seed must reach the surface ahead of
+    /// the new shell's first output, must sit in `output.log` exactly once (the replay is silent, so it never
+    /// appends a second copy), and its bell must not raise an alert on the session that has only just started.
+    func testSeedTranscriptReplaysAheadOfTheShellAndIsKeptOnceInOutputLog() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let seedMarker = "SEED_MARKER_OLD"
+        let liveMarker = "SEED_MARKER_LIVE"
+        let seed = Data("\(seedMarker)\r\n\u{07}\r\n".utf8)
+        try seed.write(to: URL(fileURLWithPath: paths.outputPath))
+        let configuration = Self.makeConfiguration(
+            sessionID: "seeded-start-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(liveMarker)'; cat")
+        let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+        }
+        let core = coreBox.value
+        defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+
+        try await core.startReplayingSeedTranscript(columns: 80, rows: 24)
+
+        try await waitAsync { Self.snapshotText(of: core)?.contains(liveMarker) == true }
+        let screen = try XCTUnwrap(TerminalEngineActor.runSynchronously { Self.snapshotText(of: core) })
+        let seedRange = try XCTUnwrap(screen.range(of: seedMarker), "the seed must be on the surface")
+        let liveRange = try XCTUnwrap(screen.range(of: liveMarker))
+        XCTAssertLessThan(seedRange.lowerBound, liveRange.lowerBound, "the seed sits above the new shell's output")
+        try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(liveMarker) == true }
+        let transcript = try Data(contentsOf: URL(fileURLWithPath: paths.outputPath))
+        XCTAssertTrue(transcript.starts(with: seed))
+        let transcriptText = String(decoding: transcript, as: UTF8.self)
+        XCTAssertEqual(Self.occurrences(of: seedMarker, in: transcriptText), 1, "the silent replay must not append the seed again")
+        XCTAssertEqual(Self.occurrences(of: liveMarker, in: transcriptText), 1)
+        let bellAt = TerminalEngineActor.runSynchronously { core.inMemorySessionSummary()?.runtimeState?.bellAt }
+        XCTAssertNil(bellAt, "a bell in the seed is history, not an alert")
+    }
+
+    /// The seed replays at the grid the lost shell had, not the core's default: a 100-column line stays one
+    /// line on a 120-column grid, where 80 columns would wrap it.
+    func testSeedTranscriptReplaysAtTheSeedsGrid() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let wideLine = String(repeating: "W", count: 100)
+        try Data("\(wideLine)\r\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+        let configuration = Self.makeConfiguration(sessionID: "seeded-grid-\(UUID().uuidString)", command: "stty -echo; cat")
+        let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+        }
+        let core = coreBox.value
+        defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+
+        try await core.startReplayingSeedTranscript(columns: 120, rows: 30)
+
+        let screen = try XCTUnwrap(TerminalEngineActor.runSynchronously { Self.snapshotText(of: core) })
+        XCTAssertTrue(screen.contains(wideLine), "the seed must not wrap at the default 80 columns")
+    }
+
+    /// Shutdown or a handoff can terminate the core while the seed replay is suspended. The start must then
+    /// fail without touching the freed session or forking the shell.
+    func testTerminateDuringSeedReplayFailsTheStartWithoutForkingTheShell() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let liveMarker = "SHOULD_NEVER_RUN"
+        try Data("old output\r\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+        let configuration = Self.makeConfiguration(
+            sessionID: "seeded-terminate-\(UUID().uuidString)", command: "printf '%s\\n' '\(liveMarker)' >> '\(paths.outputPath).ran'; cat")
+        let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+        }
+        let core = coreBox.value
+        defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+
+        // The terminate job queues behind the start on the engine actor and runs when the start first
+        // suspends, which is inside the replay.
+        let start = Task { @TerminalEngineActor in try await core.startReplayingSeedTranscript(columns: 80, rows: 24) }
+        let terminate = Task { @TerminalEngineActor in core.terminate() }
+        await terminate.value
+
+        do {
+            try await start.value
+            XCTFail("a start whose core was terminated mid-replay must fail")
+        } catch {}
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.outputPath + ".ran"), "no shell may be forked after the terminate")
+    }
+
     /// A daemon update must not retract an alert the user has not dealt with. The bell timestamp is that
     /// alert's identity; the staged image's core is built with no bell of its own and rewrites runtime
     /// state as it resumes, so without seeding from the persisted row that write lands NULL over the bell

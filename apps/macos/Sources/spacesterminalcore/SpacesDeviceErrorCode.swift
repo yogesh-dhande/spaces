@@ -12,6 +12,13 @@ public enum SpacesDeviceErrorCode: String, Codable, Sendable, Equatable {
     /// argument was well-formed and named a real thing, it's specifically the version echo that lost the
     /// race. Refused before any write, same as `.invalidArgument` — see `isRequestVerdict`.
     case conflict
+    /// A directory the request needs to start something in no longer exists. Refused before anything
+    /// started, so a client can say the folder is gone instead of reporting a generic failure.
+    case workingDirectoryMissing
+    /// The shell a request names is held by a pending restore offer. Refused before anything started, and
+    /// temporary: once the offer is answered the same request succeeds, so a client keeps the session
+    /// eligible and asks again rather than treating this as final the way it treats `.conflict`.
+    case restorePending
     case sessionNotRunning
     case sessionNotAvailable
     case serviceNotRunning
@@ -49,7 +56,7 @@ extension SpacesDeviceErrorCode {
         switch self {
         // Rejected before any work: authorization, an unresolvable target, an argument the daemon would
         // not act on (a default workspace, a workspace already busy), or a daemon declining mid-handoff.
-        case .unauthorized, .notFound, .invalidArgument, .conflict, .handingOff: true
+        case .unauthorized, .notFound, .invalidArgument, .conflict, .workingDirectoryMissing, .restorePending, .handingOff: true
         default: false
         }
     }

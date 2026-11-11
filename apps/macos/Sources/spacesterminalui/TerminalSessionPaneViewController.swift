@@ -257,6 +257,20 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// owner close asks the daemon to stop an ad hoc terminal, and closing a viewer never stops one.
     var holdsOwnerAttachment: Bool { lastObservedOwnerClientID == client.id || lastObservedAttachmentMode == .owner }
     var lastObservedRuntimeState: TerminalSessionRuntimeState?
+    /// Set when the device refused to replace this lost shell because its working directory is gone. The
+    /// pane stays a dead pane, and its failed-session notice says why nothing came back.
+    var lostShellFolderIsMissing = false
+    /// Whether a failed session is awaiting the device's answer to a lost-shell replacement request (or is
+    /// about to ask for one), in which case the pane keeps what it was showing instead of presenting the
+    /// failure: the replacement follows within a second or two, and the failed banner and the render
+    /// placeholder would show for exactly that span. Read at presentation time because the answer arrives
+    /// from outside the pane; `lostShellResumeHoldDidChange` re-presents when it ends.
+    public var holdsFailedStateForLostShellResume: @MainActor () -> Bool = { false }
+    /// Set by a refresh that withheld a failed state, so a hold that later ends knows to present it.
+    var isHoldingFailedState = false
+    /// Whether a refresh has presented a runtime state, which is what separates a cold pane from one with
+    /// a frame to keep while a failure is withheld.
+    private var hasPresentedRuntimeState = false
     var shouldShowOwnerStateLabel = true
     var inputStatusIsError = false
     private let notificationObservers = NotificationObserverBag()
@@ -646,6 +660,18 @@ private final class NotificationObserverBag: @unchecked Sendable {
             }
             let runtimeState = stateProvider.currentRuntimeState
             lastObservedRuntimeState = runtimeState
+            // Withheld before anything presents the failure: neither the unavailable placeholder nor the
+            // failed banner appears, and the last painted frame stays as it was.
+            isHoldingFailedState = runtimeState?.state == .failed && holdsFailedStateForLostShellResume()
+            if isHoldingFailedState {
+                // A pane opened straight onto the failure has presented nothing yet, and the view builds
+                // with the takeover overlay and button showing. A failed session is not running, so the
+                // neutral look is the not-interactive one; a pane that already presented keeps its frame.
+                if !hasPresentedRuntimeState { updateInputOwnershipUI(isOwner: false, isInteractive: false) }
+                updatePersistentBanner(runtimeState: runtimeState)
+                return
+            }
+            hasPresentedRuntimeState = true
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
             let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
             var currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)

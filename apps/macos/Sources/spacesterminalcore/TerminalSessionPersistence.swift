@@ -292,7 +292,9 @@ public enum TerminalSessionPersistence {
 
     /// Writes the launch-time configuration. `user_title` is intentionally excluded: it is owned
     /// by `writeUserTitle` (the rename command), so launch-config rewrites can never clobber a
-    /// manual rename.
+    /// manual rename. The one exception is the session's first insert, which stores the configuration's
+    /// `userTitle` so a replacement shell inherits its predecessor's rename in the same write as the
+    /// session itself (a separate write could run before the write-behind insert commits).
     public static func writeLaunchConfiguration(
         _ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths, clearingPreviousRunRuntimeState: Bool = true,
         databasePath: String? = nil
@@ -323,9 +325,9 @@ public enum TerminalSessionPersistence {
                 sql: """
                     INSERT INTO terminal_sessions(
                       session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, command,
-                      created_at, automation_run_id, launch_command
+                      created_at, automation_run_id, launch_command, user_title
                     )
-                    VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''))
+                    VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
                     ON CONFLICT(session_id) DO UPDATE SET
                       root_directory = excluded.root_directory,
                       backend = excluded.backend,
@@ -344,7 +346,7 @@ public enum TerminalSessionPersistence {
                     configuration.sessionID, root, configuration.backend.rawValue, configuration.lifetimePolicy.rawValue,
                     configuration.workspaceID ?? "", configuration.kind.rawValue, configuration.title, configuration.workingDirectory,
                     configuration.shell, configuration.command ?? "", configuration.createdAt, configuration.automationRunID ?? "",
-                    configuration.launchCommand ?? "",
+                    configuration.launchCommand ?? "", configuration.userTitle ?? "",
                 ])
         }
     }

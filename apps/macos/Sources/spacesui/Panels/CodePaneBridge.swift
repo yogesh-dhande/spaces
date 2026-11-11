@@ -845,9 +845,9 @@ enum CodePaneBridge {
     private static func bridgeErrorCode(for code: SpacesDeviceErrorCode?) -> ErrorCode {
         guard let code else { return .internalError }
         switch code {
-        case .notFound: return .notFound
+        case .notFound, .workingDirectoryMissing: return .notFound
         case .invalidArgument, .ownershipRejected, .payloadTooLarge, .unsupportedFormat: return .invalidArgument
-        case .conflict: return .conflict
+        case .conflict, .restorePending: return .conflict
         case .internalError: return .internalError
         case .unauthorized, .sessionNotRunning, .sessionNotAvailable, .serviceNotRunning, .busy, .capabilityMissing, .misroutedRequest, .shuttingDown,
             .handingOff:

@@ -2644,6 +2644,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// Starts an arbitrary command in a background workspace terminal. Agent classification is deferred
     /// to the regular foreground detector so the command is never constrained to configured presets.
     case startWorkspaceCommandSession(SpacesDeviceStartWorkspaceCommandSessionRequest)
+    /// Replaces a shell lost without an exit with a fresh one; see `SpacesDeviceResumeLostShellRequest`.
+    case resumeLostShell(SpacesDeviceResumeLostShellRequest)
     case stopWorkspaceTerminal(SpacesDeviceWorkspaceTerminalRequest)
     /// Stops a workspace terminal only when the daemon finds it idle at a bare shell prompt: the
     /// close of the pane that owned an ad hoc terminal. A terminal with a real foreground process, a
@@ -2807,6 +2809,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .updateWorkspaceMetadata: "updateWorkspaceMetadata"
         case .openWorkspaceTerminal: "openWorkspaceTerminal"
         case .startWorkspaceCommandSession: "startWorkspaceCommandSession"
+        case .resumeLostShell: "resumeLostShell"
         case .stopWorkspaceTerminal: "stopWorkspaceTerminal"
         case .stopWorkspaceTerminalIfBareShell: "stopWorkspaceTerminalIfBareShell"
         case .renameTerminalSession: "renameTerminalSession"
@@ -3023,6 +3026,7 @@ extension SpacesDeviceAPICommand: Codable {
         case updateWorkspaceMetadata
         case openWorkspaceTerminal
         case startWorkspaceCommandSession
+        case resumeLostShell
         case stopWorkspaceTerminal
         case stopWorkspaceTerminalIfBareShell
         case renameTerminalSession
@@ -3134,6 +3138,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .openWorkspaceTerminal: self = .openWorkspaceTerminal(try container.decode(SpacesDeviceWorkspaceReference.self, forKey: key))
         case .startWorkspaceCommandSession:
             self = .startWorkspaceCommandSession(try container.decode(SpacesDeviceStartWorkspaceCommandSessionRequest.self, forKey: key))
+        case .resumeLostShell: self = .resumeLostShell(try container.decode(SpacesDeviceResumeLostShellRequest.self, forKey: key))
         case .stopWorkspaceTerminal: self = .stopWorkspaceTerminal(try container.decode(SpacesDeviceWorkspaceTerminalRequest.self, forKey: key))
         case .stopWorkspaceTerminalIfBareShell:
             self = .stopWorkspaceTerminalIfBareShell(try container.decode(SpacesDeviceWorkspaceTerminalRequest.self, forKey: key))
@@ -3254,6 +3259,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .updateWorkspaceMetadata(let payload): try container.encode(payload, forKey: .updateWorkspaceMetadata)
         case .openWorkspaceTerminal(let payload): try container.encode(payload, forKey: .openWorkspaceTerminal)
         case .startWorkspaceCommandSession(let payload): try container.encode(payload, forKey: .startWorkspaceCommandSession)
+        case .resumeLostShell(let payload): try container.encode(payload, forKey: .resumeLostShell)
         case .stopWorkspaceTerminal(let payload): try container.encode(payload, forKey: .stopWorkspaceTerminal)
         case .stopWorkspaceTerminalIfBareShell(let payload): try container.encode(payload, forKey: .stopWorkspaceTerminalIfBareShell)
         case .renameTerminalSession(let payload): try container.encode(payload, forKey: .renameTerminalSession)
@@ -3366,12 +3372,16 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
     /// `spaces.yaml`; a create carrying a reviewed configuration reports `false`. `nil` for every other
     /// mutation.
     public let spacesYAMLImported: Bool?
+    /// `resumeLostShell` reports the lost session its `sessionID` replaced, so a client can retarget the
+    /// pane showing it. `nil` for every other mutation.
+    public let replacedSessionID: String?
 
     public init(
         overview: SpacesDeviceOverviewPayload? = nil, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
         launchedTerminalSession: SpacesDeviceTerminalSessionSummary? = nil, notice: String? = nil, terminatedTerminalSession: Bool? = nil,
-        spacesYAMLImported: Bool? = nil
+        spacesYAMLImported: Bool? = nil, replacedSessionID: String? = nil
     ) {
+        self.replacedSessionID = replacedSessionID
         self.overview = overview
         self.projectID = projectID
         self.workspaceID = workspaceID

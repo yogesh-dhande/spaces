@@ -32,6 +32,7 @@ public struct TerminalPaneBannerNotice: Equatable, Sendable {
 extension TerminalPaneBannerNotice {
     static let sessionEnded = TerminalPaneBannerNotice(message: "Session ended. This pane is read-only.", kind: .stopped)
     static let sessionFailed = TerminalPaneBannerNotice(message: "Session failed. The process stopped unexpectedly.", kind: .stopped)
+    static let lostShellFolderMissing = TerminalPaneBannerNotice(message: "Folder no longer exists", kind: .stopped)
     /// Deliberately says nothing about the session: the process keeps running on the device through an
     /// outage, and the pane's frozen render is a viewing problem, not a death.
     static let disconnected = TerminalPaneBannerNotice(message: TerminalConnectionNotice.reconnectingText, kind: .disconnected)
@@ -61,10 +62,15 @@ extension TerminalPaneBannerNotice {
     /// doing is exactly what an unreachable device looks like), the connection stage decides: nothing
     /// while connected or still inside the grace, "Reconnecting…" for stage 1 once the banner is
     /// visible, "Device unreachable" for stage 2.
-    static func resolve(runtimeState: TerminalSessionState?, connectionStage: TerminalConnectionStage, isBannerVisible: Bool) -> TerminalPaneBannerNotice? {
+    ///
+    /// A failed session whose replacement the device refused for a missing folder says so instead of the
+    /// generic failure: the user's next step is the folder, not the shell.
+    static func resolve(
+        runtimeState: TerminalSessionState?, connectionStage: TerminalConnectionStage, isBannerVisible: Bool, lostShellFolderIsMissing: Bool
+    ) -> TerminalPaneBannerNotice? {
         switch runtimeState {
         case .exited: return .sessionEnded
-        case .failed: return .sessionFailed
+        case .failed: return lostShellFolderIsMissing ? .lostShellFolderMissing : .sessionFailed
         case .starting, .running, .none:
             guard isBannerVisible else { return nil }
             switch connectionStage {

@@ -1159,6 +1159,52 @@ import spacesterminalcore
         // via this same function and activates whatever this skipped.
         if case .codePane = pane.content, panels[scope]?.view?.window == nil { return }
         content.activate(focus: false)
+        // Only a built terminal in a displayed panel asks. A placeholder is re-activated when its terminal
+        // replaces it, which is the show that counts; and a terminal finishing preparation in a panel the
+        // user has since switched away from must not start a shell behind their back. The panel is checked
+        // rather than the pane, which a fresh build has not yet placed in the window. Showing the panel
+        // again re-runs this through `handlePanelViewWindowMembershipChanged`, and an overview install
+        // asks too (`visibleTerminalSessionIDs`).
+        if content is TerminalPaneContentController, panels[scope]?.view?.window?.isVisible == true,
+            case .terminalSession(let deviceID, let sessionID) = pane.content
+        {
+            host.lostShellResume.paneShown(deviceID: deviceID, sessionID: sessionID)
+        }
+    }
+
+    /// Sessions of `deviceID` whose built terminal pane the user can see right now: in a selected tab of a
+    /// panel that sits in an on-screen window, with the pane's own view in that window. A retained panel
+    /// of a workspace the user is not viewing has no window, and an overview install must not start a
+    /// shell (or mark a stopped workspace running) behind it. Lets an overview that arrives after the
+    /// panes were restored (a reboot restores them before the device has reported anything) ask about
+    /// the panes in front of the user.
+    func visibleTerminalSessionIDs(deviceID: String) -> [String] {
+        var sessionIDs: [String] = []
+        for (_, state) in panels {
+            guard let window = state.view?.window, window.isVisible, let tab = state.layout.tabs.first(where: { $0.id == state.layout.selectedTabID })
+            else { continue }
+            for pane in PanelLayoutEngine.panes(in: tab) {
+                if case .terminalSession(let paneDeviceID, let sessionID) = pane.content, paneDeviceID == deviceID,
+                    let content = contentControllers[sessionID] as? TerminalPaneContentController, content.contentView.window === window
+                {
+                    sessionIDs.append(sessionID)
+                }
+            }
+        }
+        return sessionIDs
+    }
+
+    /// Re-presents the panes of `deviceID` that withheld a failed state while a lost-shell request was
+    /// pending, once the request is answered or the overview rules it out.
+    func lostShellResumeHoldDidChange(deviceID: String) {
+        for case let content as TerminalPaneContentController in contentControllers.values {
+            if case .terminalSession(let paneDeviceID, _) = content.descriptor, paneDeviceID == deviceID { content.lostShellResumeHoldDidChange() }
+        }
+    }
+
+    /// Tells the pane showing a lost shell that the device could not replace it because its folder is gone.
+    func showLostShellFolderMissing(sessionID: String) {
+        (contentControllers[sessionID] as? TerminalPaneContentController)?.showLostShellFolderMissing()
     }
 
     // MARK: - Tabs and panes

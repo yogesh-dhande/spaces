@@ -4597,7 +4597,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     /// Seeds a ghostty-embedded session whose final render is available, in the given runtime state.
     @MainActor private func makeBannerController(
         sessionID: String, state: TerminalSessionState, root: URL,
-        connectionStageTracker: TerminalConnectionStageTracker = TerminalConnectionStageTracker()
+        connectionStageTracker: TerminalConnectionStageTracker = TerminalConnectionStageTracker(), hasFinalRender: Bool = true,
+        holdsFailedState: @escaping @MainActor () -> Bool = { false }
     ) throws -> TerminalSessionPaneViewController {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try FileManager.default.createDirectory(atPath: paths.rootDirectory, withIntermediateDirectories: true)
@@ -4609,10 +4610,62 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: state, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
         let host = FakeGhosttySessionHost()
-        host.snapshotValue = ghosttySnapshot(text: "final output")
-        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host, connectionStageTracker: connectionStageTracker)
+        if hasFinalRender { host.snapshotValue = ghosttySnapshot(text: "final output") } else { host.hasSurface = false }
+        // Like the app's pane factory: the hold is installed before the first refresh.
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: host, performInitialRefresh: false, connectionStageTracker: connectionStageTracker)
+        controller.holdsFailedStateForLostShellResume = holdsFailedState
         controller.showEmbedded(focus: true)
         return controller
+    }
+
+    /// A failed shell whose replacement is pending keeps what it was showing: no failed banner, and no
+    /// "Terminal render unavailable." placeholder in the frame's place. Once the request is refused the
+    /// pane presents the failure.
+    @MainActor func testFailedSessionWithPendingLostShellResumeShowsNeitherBannerNorPlaceholder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var isPending = true
+        let controller = try makeBannerController(
+            sessionID: "session-lost-pending", state: .failed, root: root, hasFinalRender: false, holdsFailedState: { isPending })
+
+        XCTAssertFalse(controller.debugBannerVisible)
+        XCTAssertNotEqual(controller.debugRenderedOutput, "Terminal render unavailable.")
+        // A pane opened straight onto the held failure has no takeover to offer: the session is not running.
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+        XCTAssertFalse(controller.debugShowsTakeoverScrim)
+
+        isPending = false
+        controller.lostShellResumeHoldDidChange()
+
+        XCTAssertEqual(controller.debugBannerMessage, "Session failed. The process stopped unexpectedly.")
+        XCTAssertEqual(controller.debugRenderedOutput, "Terminal render unavailable.")
+    }
+
+    /// A failure nothing will replace (a process, an agent, a shell that exited) shows at once.
+    @MainActor func testFailedSessionNobodyWillReplaceShowsBannerAndPlaceholderImmediately() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(
+            sessionID: "session-lost-not-candidate", state: .failed, root: root, hasFinalRender: false, holdsFailedState: { false })
+
+        XCTAssertEqual(controller.debugBannerMessage, "Session failed. The process stopped unexpectedly.")
+        XCTAssertEqual(controller.debugRenderedOutput, "Terminal render unavailable.")
+    }
+
+    /// A refusal because the shell's folder is gone ends the hold with its own notice, not the generic one.
+    @MainActor func testPendingLostShellResumeRefusedForMissingFolderShowsFolderNotice() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var isPending = true
+        let controller = try makeBannerController(
+            sessionID: "session-lost-folder", state: .failed, root: root, hasFinalRender: false, holdsFailedState: { isPending })
+
+        isPending = false
+        controller.showLostShellFolderMissing()
+        controller.lostShellResumeHoldDidChange()
+
+        XCTAssertEqual(controller.debugBannerMessage, "Folder no longer exists")
     }
 
     /// A pane whose session exited keeps rendering the frozen final Ghostty frame, which is
@@ -4942,18 +4995,27 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
     /// Precedence between the two facts a pane's persistent notice reports, as a pure rule.
     @MainActor func testPersistentNoticeSelection() {
-        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .connected, isBannerVisible: true))
-        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .starting, connectionStage: .connected, isBannerVisible: true))
-        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: nil, connectionStage: .connected, isBannerVisible: true))
+        func resolve(_ state: TerminalSessionState?, _ stage: TerminalConnectionStage, visible: Bool, folderMissing: Bool = false)
+            -> TerminalPaneBannerNotice?
+        {
+            TerminalPaneBannerNotice.resolve(
+                runtimeState: state, connectionStage: stage, isBannerVisible: visible, lostShellFolderIsMissing: folderMissing)
+        }
+        XCTAssertNil(resolve(.running, .connected, visible: true))
+        XCTAssertNil(resolve(.starting, .connected, visible: true))
+        XCTAssertNil(resolve(nil, .connected, visible: true))
         // The banner stays down until the tracker says to show it, even mid-outage (the grace window).
-        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .reconnecting, isBannerVisible: false))
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .reconnecting, isBannerVisible: true), .disconnected)
+        XCTAssertNil(resolve(.running, .reconnecting, visible: false))
+        XCTAssertEqual(resolve(.running, .reconnecting, visible: true), .disconnected)
         // An unreachable device is exactly the case where the session's state is unknown.
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: nil, connectionStage: .reconnecting, isBannerVisible: true), .disconnected)
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .running, connectionStage: .unreachable, isBannerVisible: true), .unreachable)
+        XCTAssertEqual(resolve(nil, .reconnecting, visible: true), .disconnected)
+        XCTAssertEqual(resolve(.running, .unreachable, visible: true), .unreachable)
         // A stopped session wins: the process is gone whatever the link is doing.
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .exited, connectionStage: .unreachable, isBannerVisible: true), .sessionEnded)
-        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .failed, connectionStage: .unreachable, isBannerVisible: true), .sessionFailed)
+        XCTAssertEqual(resolve(.exited, .unreachable, visible: true), .sessionEnded)
+        XCTAssertEqual(resolve(.failed, .unreachable, visible: true), .sessionFailed)
+        // A lost shell whose folder is gone says so in place of the generic failure, and only for a failed session.
+        XCTAssertEqual(resolve(.failed, .connected, visible: false, folderMissing: true)?.message, "Folder no longer exists")
+        XCTAssertEqual(resolve(.exited, .connected, visible: false, folderMissing: true), .sessionEnded)
     }
 
     /// Typing into a dead pane stays unconsumed — the pulse is emphasis only and must not start

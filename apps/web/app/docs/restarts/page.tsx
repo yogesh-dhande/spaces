@@ -35,9 +35,12 @@ export default function RestartsDocsPage() {
           machine does not: the installer enables lingering, so the Spaces service and everything running
           under it keep going without a login session open (see{" "}
           <DocLink href="/docs/remote-access#install-on-linux">install on Linux</DocLink>). Configured
-          processes stay stopped until you start the workspace again. A pane whose session was lost this
-          way shows &quot;Session failed. The process stopped unexpectedly.&quot; and stays read-only
-          until you start that target again (see{" "}
+          processes stay stopped until you start the workspace again. A plain shell terminal lost this way
+          is replaced when you next open it: a fresh shell starts in the same folder, under the old output
+          and a line saying when the old shell ended. If that folder no longer exists, the pane stays
+          read-only and says so. Any other pane whose session was lost this way shows &quot;Session
+          failed. The process stopped unexpectedly.&quot; and stays read-only until you start that target
+          again (see{" "}
           <DocLink href="/docs/workspaces#start-stop-and-restart">start, stop, and restart</DocLink>).
         </Prose>
       </Section>
