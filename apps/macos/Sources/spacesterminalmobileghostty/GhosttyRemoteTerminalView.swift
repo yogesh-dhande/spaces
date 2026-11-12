@@ -535,6 +535,27 @@ import Foundation
             scrollPanRecognizer.delegate = self
             addGestureRecognizer(scrollPanRecognizer)
             installSelectionInteraction()
+            installKeyboardGuideLayoutTrigger()
+        }
+
+        /// Pins a zero-size, invisible subview to the keyboard layout guide. Nothing else in this view's
+        /// layout depends on the guide, so without a constraint on it UIKit never schedules a layout pass
+        /// when the guide moves; the guide that `keyboardOccludingFrame()` reads then settles after the
+        /// last pass, and the crop and the reported grid stay at the old keyboard height until some frame
+        /// happens to arrive. The constraint makes every guide change mark this view as needing layout.
+        private func installKeyboardGuideLayoutTrigger() {
+            let trigger = UIView()
+            trigger.translatesAutoresizingMaskIntoConstraints = false
+            trigger.isHidden = true
+            trigger.isUserInteractionEnabled = false
+            trigger.isAccessibilityElement = false
+            addSubview(trigger)
+            NSLayoutConstraint.activate([
+                trigger.widthAnchor.constraint(equalToConstant: 0),
+                trigger.heightAnchor.constraint(equalToConstant: 0),
+                trigger.leadingAnchor.constraint(equalTo: leadingAnchor),
+                trigger.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
+            ])
         }
 
         /// The accessory Shift key is armed: Shift keeps its meaning of "this is for the terminal, not the
@@ -755,13 +776,15 @@ import Foundation
 
         public override func layoutSubviews() {
             super.layoutSubviews()
-            // A keyboard layout guide reports intermediate frames throughout its animation, and every one
-            // of them reaches here. On the primary screen none of them changes the reported grid (see
-            // `reportedViewportBounds()`), so the report below is a no-op for the whole transition. On the
-            // alternate screen each one does, and the burst is collapsed downstream: the viewer model
-            // restarts its ownership-sync debounce on every report, so one resize follows the animation.
-            // The render that follows is what tracks the keyboard, re-cropping the grid into whatever
-            // area is left so a newly exposed area is never left unpainted.
+            // The keyboard layout guide drives this pass: `installKeyboardGuideLayoutTrigger()` makes each
+            // guide change, intermediate animation frames and the final settled frame included, schedule a
+            // layout. Without that, the pass `setSoftwareKeyboardVisible` requests runs while the guide
+            // still shows the old keyboard and nothing re-measures once it settles. On the primary screen
+            // the intermediate frames do not change the reported grid (see `reportedViewportBounds()`), so
+            // the report below is a no-op for the transition. On the alternate screen each one does, and
+            // the burst is collapsed downstream: the viewer model restarts its ownership-sync debounce on
+            // every report, so one resize follows the animation. The render that follows re-crops the grid
+            // into whatever area is left so a newly exposed area is never left unpainted.
             reportViewportSizeIfNeeded()
             renderLatestSnapshot()
         }
@@ -1980,8 +2003,12 @@ import Foundation
         private func keyboardAndAccessoryOccludingFrames() -> [CGRect] {
             guard bounds.width > 0, bounds.height > 0 else { return [] }
             var frames: [CGRect] = []
-            if let keyboardFrame = keyboardOccludingFrame() { frames.append(keyboardFrame) }
-            if let accessoryFrame = accessoryOccludingFrame() { frames.append(accessoryFrame) }
+            let keyboardFrame = keyboardOccludingFrame()
+            if let keyboardFrame { frames.append(keyboardFrame) }
+            // The guide's frame already contains the toolbar. The toolbar's own frame lives in the
+            // keyboard's window and trails the guide, so reading it alongside the guide would crop to the
+            // old keyboard position after a hide with nothing to schedule another pass.
+            if keyboardFrame == nil, let accessoryFrame = accessoryOccludingFrame() { frames.append(accessoryFrame) }
             if frames.isEmpty, let fallbackAccessoryFrame = fallbackAccessoryOccludingFrame() { frames.append(fallbackAccessoryFrame) }
             return frames
         }
