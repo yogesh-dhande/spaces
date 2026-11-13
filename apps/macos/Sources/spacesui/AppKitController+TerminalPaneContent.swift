@@ -549,14 +549,15 @@ extension AppKitController {
             let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
             let windows = deviceTerminalWindows(from: detail.terminalRows)
             let processes = runningProcesses(from: detail.processRows)
-            let agentWindowRecords = agentWindows(from: detail.codingAgentRows)
+            let (agentWindowRecords, pinnedThreadSlots) = agentTargetInputs(from: detail)
             let settings = localWorkspaceSettings(from: detail.config)
             let browserSessions = detail.config.resolvedBrowserSessions.map(localBrowserSession(from:))
             let processEntries = orderedWorkspaceRunProcessEntries(
                 configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindowRecords)
             let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
             let shortcutTargets = orderedWorkspaceRunShortcutTargets(
-                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindowRecords)
+                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindowRecords,
+                pinnedThreads: pinnedThreadSlots)
             for (offset, target) in shortcutTargets.enumerated() {
                 // Browser targets can't live in a terminal pane, so the picker never offers them.
                 if target.kind == .browser { continue }
@@ -590,7 +591,8 @@ extension AppKitController {
                     detailText = terminalPaletteSecondaryLabel(
                         liveTitle: agentRow.liveTitle, sessionID: agentRow.sessionID, sessionsByID: sessionsByID)
                     status = .agent(agentWindow.status)
-                case .browser: continue
+                // A not-running pin has no terminal to place; resuming it is a sidebar or palette action.
+                case .browser, .pinnedThread: continue
                 }
 
                 let choice: SessionPickerChoice
@@ -600,7 +602,7 @@ extension AppKitController {
                     choice = .existingSession(request)
                 case .runProcess(let ws, let processKey, let processTemplateID):
                     choice = .startProcess(workspaceID: ws, processKey: processKey, processTemplateID: processTemplateID)
-                case .openURL, .noWorkspace, .noMatch: continue
+                case .openURL, .resumePinnedThread, .noWorkspace, .noMatch: continue
                 }
 
                 appendItem(

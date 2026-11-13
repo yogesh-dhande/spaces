@@ -35,15 +35,20 @@
 
     func makeWorkspace(
         id: String, branch: String?, isHidden: Bool = false, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
-        processRows: [SpacesDeviceWorkspaceProcessRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
+        processRows: [SpacesDeviceWorkspaceProcessRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
+        pinnedThreads: [SpacesDeviceWorkspacePinnedThread] = []
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)", isRunning: true,
             isHidden: isHidden, isDefault: false,
             hasTrackedRuntimeIndicators: processRows.contains { $0.runState == .running } || codingAgentRows.contains { $0.runState == .running }
                 || terminalRows.contains { $0.runState == .running }, processRows: processRows, codingAgentRows: codingAgentRows,
-            terminalRows: terminalRows)
+            pinnedThreads: pinnedThreads, terminalRows: terminalRows)
     }
+
+    func makePin(id: String, workspaceID: String = "workspace-feature", name: String = "Pinned", agentRowID: String? = nil, brief: String? = nil)
+        -> SpacesDeviceWorkspacePinnedThread
+    { SpacesDeviceWorkspacePinnedThread(id: id, workspaceID: workspaceID, name: name, agentRowID: agentRowID, brief: brief) }
 
     /// A home-project workspace fixture: the daemon's one workspace of `projectKind == .home`, rooted at a
     /// stand-in home directory. Kept separate from `makeWorkspace`, whose fixed "Project"/"project-1"
@@ -56,10 +61,12 @@
 
     func makeAgentRow(
         id: String, workspaceID: String = "workspace-feature", name: String = "claude", runState: SpacesDeviceRunState = .running,
-        activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil, brief: String? = nil, briefUpdatedAt: String? = nil
+        activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil, brief: String? = nil, briefUpdatedAt: String? = nil,
+        pinID: String? = nil, pinUnavailableReason: SpacesDeviceAgentPinUnavailableReason? = nil
     ) -> SpacesDeviceWorkspaceCodingAgentRow {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: name, agentID: "runtime-\(id)", sessionID: "session-\(id)", runState: runState,
-            activityState: activityState, updatedAt: updatedAt, brief: brief, briefUpdatedAt: briefUpdatedAt, canStop: true)
+            activityState: activityState, updatedAt: updatedAt, brief: brief, briefUpdatedAt: briefUpdatedAt, canStop: true, pinID: pinID,
+            pinUnavailableReason: pinUnavailableReason)
     }
 #endif

@@ -32,6 +32,7 @@ struct SpacesDeviceOverviewLoader {
         // so the grouped values match `store.<x>(workspaceID:)` element-for-element.
         let runningProcessesByWorkspace = try store.runningProcessesByWorkspace()
         let agentWindowsByWorkspace = try store.agentWindowsByWorkspace()
+        let pinnedThreadsByWorkspace = try store.pinnedThreadsByWorkspace()
         let windowsByWorkspace = try store.windowsByWorkspace()
         let portsByWorkspace = try store.workspacePortsNamedByWorkspace()
         let setupStateByWorkspace = try store.workspaceSetupStateByWorkspace()
@@ -68,7 +69,8 @@ struct SpacesDeviceOverviewLoader {
                     // Mirror `orchestrator.workspaceSetupState`, which returns a succeeded default when no
                     // `workspace_settings` row exists for the workspace.
                     setupState: setupStateByWorkspace[workspace.id]
-                        ?? WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil))
+                        ?? WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil),
+                    pinnedThreads: pinnedThreadsByWorkspace[workspace.id] ?? [])
             }
         }
         let localSessions = TerminalSessionCatalog.mergingLiveInMemorySessions(

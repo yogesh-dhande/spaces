@@ -30,9 +30,9 @@
             XCTAssertEqual(groups.map(\.kind), [.blocked, .done, .working])
             XCTAssertEqual(groups.map(\.kind.label), ["Blocked", "Done", "Working"])
             XCTAssertEqual(groups.map { $0.entries.count }, [1, 1, 2])
-            XCTAssertEqual(groups[0].entries.map { $0.row.id }, ["agent-waiting"])
-            XCTAssertEqual(groups[1].entries.map { $0.row.id }, ["agent-done"])
-            XCTAssertEqual(groups[2].entries.map { $0.row.id }, ["agent-spinning", "agent-running-idle"])
+            XCTAssertEqual(groups[0].entries.map { $0.runtimeRow.id }, ["agent:agent-waiting"])
+            XCTAssertEqual(groups[1].entries.map { $0.runtimeRow.id }, ["agent:agent-done"])
+            XCTAssertEqual(groups[2].entries.map { $0.runtimeRow.id }, ["agent:agent-spinning", "agent:agent-running-idle"])
         }
 
         /// Stopped agents are deliberately absent from the Agents tab: it surfaces agents with a state
@@ -123,14 +123,76 @@
         /// `showsDeviceSegment` rule decides that upstream, not this type).
         func testDetailAlwaysShowsProjectAndWorkspacePlusOptionalDevice() {
             let entry = SpacesMobileAgentEntry(
-                row: makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning), deviceID: "device-a", projectName: "spaces",
-                workspaceDisplayName: "ios-redesign", deviceText: nil, isDeviceOffline: false)
+                runtimeRow: .init(source: .codingAgent(makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning))),
+                deviceID: "device-a", projectName: "spaces", workspaceDisplayName: "ios-redesign", deviceText: nil, isDeviceOffline: false,
+                isInPinnedGroup: false)
             XCTAssertEqual(entry.detail, "spaces / ios-redesign")
 
             let withDevice = SpacesMobileAgentEntry(
-                row: makeAgentRow(id: "agent-b", runState: .running, activityState: .idle), deviceID: "device-b", projectName: "Notes-App",
-                workspaceDisplayName: "notes-app", deviceText: "MacBook Pro", isDeviceOffline: false)
+                runtimeRow: .init(source: .codingAgent(makeAgentRow(id: "agent-b", runState: .running, activityState: .idle))), deviceID: "device-b",
+                projectName: "Notes-App", workspaceDisplayName: "notes-app", deviceText: "MacBook Pro", isDeviceOffline: false, isInPinnedGroup: false
+            )
             XCTAssertEqual(withDevice.detail, "Notes-App / notes-app · MacBook Pro")
+        }
+
+        /// Pinned lists every pin of every paired device, running or not, after all the activity bands.
+        func testPinnedGroupSpansDevicesAndComesLast() {
+            let workspaceA = makeWorkspace(
+                id: "workspace-feature", branch: "feature",
+                codingAgentRows: [makeAgentRow(id: "agent-a", runState: .running, activityState: .waiting)],
+                pinnedThreads: [makePin(id: "pin-a", name: "Stopped A")])
+            let workspaceB = makeWorkspace(id: "workspace-feature", branch: "feature", pinnedThreads: [makePin(id: "pin-b", name: "Stopped B")])
+            let devices = [
+                SpacesMobileDeviceOverviewContext(
+                    deviceID: "device-a", deviceName: "MacBook Pro", overview: makeOverview(workspaces: [workspaceA]), isOffline: false),
+                SpacesMobileDeviceOverviewContext(
+                    deviceID: "device-b", deviceName: "Mac Studio", overview: makeOverview(workspaces: [workspaceB]), isOffline: false),
+            ]
+
+            let groups = SpacesMobileAgentGrouping.groups(devices: devices, showsDeviceSegment: true)
+
+            XCTAssertEqual(groups.map(\.kind), [.blocked, .pinned])
+            XCTAssertEqual(groups.last?.kind.label, "Pinned")
+            XCTAssertEqual(groups.last?.entries.map(\.runtimeRow.title), ["Stopped A", "Stopped B"])
+            XCTAssertEqual(groups.last?.entries.map(\.deviceID), ["device-a", "device-b"])
+        }
+
+        /// A running pin is still an agent in its activity band, so it is listed there and in Pinned, as two
+        /// entries that never share an identity.
+        func testRunningPinIsListedInItsBandAndInPinned() {
+            let workspace = makeWorkspace(
+                id: "workspace-feature", branch: "feature",
+                codingAgentRows: [makeAgentRow(id: "agent-a", name: "Review", runState: .running, activityState: .spinning, pinID: "pin-a")],
+                pinnedThreads: [makePin(id: "pin-a", name: "Review", agentRowID: "agent-a")])
+
+            let groups = makeGroups(makeOverview(workspaces: [workspace]))
+
+            XCTAssertEqual(groups.map(\.kind), [.working, .pinned])
+            let working = groups[0].entries[0]
+            let pinned = groups[1].entries[0]
+            XCTAssertEqual(working.runtimeRow.id, pinned.runtimeRow.id)
+            XCTAssertNotEqual(working.id, pinned.id)
+            XCTAssertNotNil(pinned.runtimeRow.sessionID)
+        }
+
+        /// A not-running pin has no session but is a launchable row: tapping it resumes it.
+        func testNotRunningPinRowIsLaunchableWithoutASession() {
+            let workspace = makeWorkspace(id: "workspace-feature", branch: "feature", pinnedThreads: [makePin(id: "pin-a", brief: "notes")])
+
+            let row = makeGroups(makeOverview(workspaces: [workspace]))[0].entries[0].runtimeRow
+
+            XCTAssertNil(row.sessionID)
+            XCTAssertTrue(row.canRun)
+            XCTAssertEqual(row.brief, "notes")
+            XCTAssertEqual(row.statusDotKind(exitAcknowledged: false), .idle)
+        }
+
+        func testPinsInHiddenWorkspacesAreExcluded() {
+            let workspace = makeWorkspace(id: "workspace-hidden", branch: "feature", isHidden: true, pinnedThreads: [makePin(id: "pin-a")])
+            XCTAssertTrue(makeGroups(makeOverview(workspaces: [workspace])).isEmpty)
+
+            let projectHidden = makeWorkspace(id: "workspace-feature", branch: "feature", pinnedThreads: [makePin(id: "pin-a")])
+            XCTAssertTrue(makeGroups(makeOverview(workspaces: [projectHidden], projectIsHidden: true)).isEmpty)
         }
 
         /// Two paired devices' agents land in the same band, each device's own agents keeping the
@@ -149,7 +211,7 @@
             let groups = SpacesMobileAgentGrouping.groups(devices: devices, showsDeviceSegment: true)
 
             XCTAssertEqual(groups.map(\.kind), [.blocked])
-            XCTAssertEqual(groups[0].entries.map(\.row.id), ["agent-a1", "agent-a2", "agent-b1"])
+            XCTAssertEqual(groups[0].entries.map(\.runtimeRow.id), ["agent:agent-a1", "agent:agent-a2", "agent:agent-b1"])
             XCTAssertEqual(groups[0].entries.map(\.deviceText), ["MacBook Pro", "MacBook Pro", "Mac Studio"])
             // Two devices' rows share a workspace id ("workspace-feature") from the shared fixture, so
             // only the device-qualified `id` keeps them apart in SwiftUI's `ForEach`.
@@ -199,6 +261,128 @@
 
             model.toggleWorkspaceCollapsed("workspace-feature")
             XCTAssertFalse(model.collapsedWorkspaceIDs.contains("workspace-feature"))
+        }
+
+        // MARK: - Pin actions
+
+        private func makePinModel(workspace: SpacesDeviceWorkspaceSummary) -> (SpacesMobileAppModel, DeviceAPIRequestRecorder) {
+            let recorder = DeviceAPIRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+            model.overview = makeOverview(workspaces: [workspace])
+            return (model, recorder)
+        }
+
+        func testRunningPinnedRowKeepsItsPositionAheadOfUnpinnedRows() throws {
+            let workspace = makeWorkspace(
+                id: "workspace-feature", branch: "feature",
+                codingAgentRows: [
+                    makeAgentRow(id: "agent-plain", name: "Plain", activityState: .idle),
+                    makeAgentRow(id: "agent-pinned", name: "Mine", activityState: .idle, pinID: "pin-b"),
+                ], pinnedThreads: [makePin(id: "pin-a", name: "Stopped"), makePin(id: "pin-b", name: "Mine", agentRowID: "agent-pinned")])
+            let (model, _) = makePinModel(workspace: workspace)
+
+            let titles = model.workspaceGroups.flatMap(\.rows).filter { $0.type == .codingAgents }.map(\.title)
+
+            XCTAssertEqual(titles, ["Stopped", "Mine", "Plain"])
+        }
+
+        func testTappingANotRunningPinResumesItOnItsDevice() async throws {
+            let workspace = makeWorkspace(id: "workspace-feature", branch: "feature", pinnedThreads: [makePin(id: "pin-a")])
+            let (model, recorder) = makePinModel(workspace: workspace)
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.pinID == "pin-a" })
+
+            _ = await model.performPrimaryAction(for: row, deviceID: "device-1")
+
+            guard case .resumePinnedThread(let request)? = await recorder.snapshot().first?.command else {
+                return XCTFail("Expected a resumePinnedThread command.")
+            }
+            XCTAssertEqual(request.workspaceID, "workspace-feature")
+            XCTAssertEqual(request.pinID, "pin-a")
+        }
+
+        /// A resumed agent whose conversation is gone exits at once, so the refreshed overview can already
+        /// lack its session; the launched session in the response still opens so its error is visible.
+        func testResumingAPinOpensTheLaunchedSessionEvenWhenTheOverviewLacksIt() async throws {
+            let workspace = makeWorkspace(id: "workspace-feature", branch: "feature", pinnedThreads: [makePin(id: "pin-a")])
+            let launched = SpacesDeviceTerminalSessionSummary(
+                id: "session-resumed", title: "Pinned", workingDirectory: "/repo/feature", shell: "/bin/zsh", command: "claude --resume abc",
+                state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: 101,
+                workspaceID: "workspace-feature", workspaceTitle: "Feature", projectID: "project-1", projectName: "Project",
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview(workspaces: [workspace], sessions: [])
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "Resumed pinned thread.",
+                    result: .mutation(.init(overview: overview, sessionID: "session-resumed", launchedTerminalSession: launched)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+            model.overview = overview
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.pinID == "pin-a" })
+
+            let session = await model.performPrimaryAction(for: row, deviceID: "device-1")
+
+            XCTAssertEqual(session?.id, "session-resumed")
+        }
+
+        func testRenamingPinnedRowsRenamesThePinAndDiscardsAnEmptyName() async throws {
+            let workspace = makeWorkspace(
+                id: "workspace-feature", branch: "feature",
+                codingAgentRows: [makeAgentRow(id: "agent-pinned", name: "Mine", activityState: .idle, pinID: "pin-b")],
+                pinnedThreads: [makePin(id: "pin-a", name: "Stopped"), makePin(id: "pin-b", name: "Mine", agentRowID: "agent-pinned")])
+            let (model, recorder) = makePinModel(workspace: workspace)
+            let rows = model.workspaceGroups.flatMap(\.rows)
+            let stopped = try XCTUnwrap(rows.first { $0.pinID == "pin-a" })
+            let running = try XCTUnwrap(rows.first { $0.pinID == "pin-b" })
+
+            await model.rename(row: stopped, to: "Archived")
+            await model.rename(row: running, to: "Renamed")
+            await model.rename(row: running, to: "  ")
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["renamePinnedThread", "renamePinnedThread"])
+            guard case .renamePinnedThread(let first)? = requests.first?.command, case .renamePinnedThread(let second)? = requests.last?.command
+            else { return XCTFail("Expected renamePinnedThread commands.") }
+            XCTAssertEqual([first.pinID, first.name], ["pin-a", "Archived"])
+            XCTAssertEqual([second.pinID, second.name], ["pin-b", "Renamed"])
+        }
+
+        func testPinAndUnpinSendTheirCommandsAndPinHonorsTheUnavailableReason() async throws {
+            let workspace = makeWorkspace(
+                id: "workspace-feature", branch: "feature",
+                codingAgentRows: [
+                    makeAgentRow(id: "agent-ok", name: "Ok", activityState: .idle),
+                    makeAgentRow(id: "agent-oneshot", name: "Job", activityState: .idle, pinUnavailableReason: .oneShotRun),
+                ], pinnedThreads: [makePin(id: "pin-a")])
+            let (model, recorder) = makePinModel(workspace: workspace)
+            let rows = model.workspaceGroups.flatMap(\.rows)
+            let ok = try XCTUnwrap(rows.first { $0.title == "Ok" })
+            let oneShot = try XCTUnwrap(rows.first { $0.title == "Job" })
+            let pinned = try XCTUnwrap(rows.first { $0.pinID == "pin-a" })
+
+            XCTAssertTrue(model.canPin(row: ok))
+            XCTAssertEqual(oneShot.pinUnavailableReason, .oneShotRun)
+            await model.pin(row: oneShot, name: "Job", deviceID: "device-1")
+            await model.pin(row: ok, name: "  ", deviceID: "device-1")
+            await model.pin(row: ok, name: "Kept", deviceID: "device-1")
+            XCTAssertFalse(model.canPin(row: pinned))
+            await model.unpin(row: pinned, deviceID: "device-1")
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["pinAgentSession", "unpinThread"])
+            guard case .pinAgentSession(let pin)? = requests.first?.command, case .unpinThread(let unpin)? = requests.last?.command else {
+                return XCTFail("Expected pin and unpin commands.")
+            }
+            XCTAssertEqual([pin.agentID, pin.name], ["runtime-agent-ok", "Kept"])
+            XCTAssertEqual(unpin.pinID, "pin-a")
         }
 
         // MARK: - Fixtures

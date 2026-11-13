@@ -13,16 +13,15 @@ extension OrchestratorTests {
         let reporting = ProgramStatusReportingSessions()
 
         func record(
-            _ signal: AgentStatusSignal, _ origin: AgentStatusSignalOrigin, sessionKey: AgentSessionKeyUpdate = .keep, detectedLabel: String? = "Codex"
+            _ signal: AgentStatusSignal, _ origin: AgentStatusSignalOrigin, sessionKey: AgentSessionKeyUpdate = .keep,
+            detectedLabel: String? = "Codex"
         ) throws -> AgentStatusSignalOutcome {
             // The daemon marks a session as reporting before it queues the report's write.
             if origin == .programStatus { reporting.insert(sessionID: "agent-terminal") }
             return try orchestrator.recordAgentStatusSignal(
                 signal, origin: origin, workspaceID: workspaceID, terminalSessionID: "agent-terminal", sessionKey: sessionKey,
                 detectedAgentLabel: detectedLabel, programStatusSessions: reporting,
-                makeNotificationEngine: {
-                    AgentNotificationEngine(store: store, deliver: { try delivered.submit($0, $1) }, logError: { _ in })
-                })
+                makeNotificationEngine: { AgentNotificationEngine(store: store, deliver: { try delivered.submit($0, $1) }, logError: { _ in }) })
         }
 
         var agent: AgentWindowRecord? { try? store.agentWindows(workspaceID: workspaceID).first }
@@ -81,14 +80,34 @@ extension OrchestratorTests {
             try fixture.orchestrator.recordAgentStatusSignal(
                 .done, origin: .programStatus, workspaceID: fixture.workspaceID, terminalSessionID: "agent-terminal", sessionKey: .keep,
                 detectedAgentLabel: "Codex", programStatusSessions: fixture.reporting,
-                makeNotificationEngine: { AgentNotificationEngine(store: fixture.store, deliver: { _, _ in }, logError: { _ in }) }),
-            .ignored)
+                makeNotificationEngine: { AgentNotificationEngine(store: fixture.store, deliver: { _, _ in }, logError: { _ in }) }), .ignored)
         XCTAssertEqual(fixture.agent?.status, .spinning)
 
         try fixture.store.updateAgentWindowStatus(id: child.id, status: .exited, updatedAt: "2000-01-01T00:00:00Z")
         XCTAssertEqual(try fixture.record(.done, .programStatus), .ignored)
         XCTAssertEqual(fixture.agent?.status, .exited)
         XCTAssertTrue(fixture.delivered.delivered.isEmpty)
+    }
+
+    /// A hook that reports its conversation as not resumable yet (a `/clear` in flight) moves the agent off
+    /// the conversation its pin holds, so the row splits from the pin and the pin keeps its name.
+    func testAPendingConversationHookOnAPinnedRowSplitsItFromThePin() throws {
+        let fixture = try makeStatusSignalFixture()
+        let row = try fixture.orchestrator.registerAgentWindow(
+            workspaceID: fixture.workspaceID, provider: .spaces, label: "Codex", terminalTrackingID: "agent-terminal",
+            sessionKey: .set("conversation-1"), status: .idle)
+        try fixture.store.insertPinnedThread(
+            PinnedThreadRecord(
+                id: "pin-1", workspaceID: fixture.workspaceID, sessionKey: "conversation-1", name: "Fix checkout", launchCommand: "codex",
+                workingDirectory: "/tmp", agentSessionID: row.id, pinnedAt: "2026-06-06T00:00:00Z"))
+        try fixture.store.setAgentSessionUserLabel(id: row.id, userLabel: "Fix checkout")
+
+        _ = try fixture.record(.working, .hook, sessionKey: .clear)
+
+        XCTAssertNil(try fixture.store.pinnedThread(id: "pin-1")?.agentSessionID)
+        XCTAssertEqual(try fixture.store.pinnedThread(id: "pin-1")?.name, "Fix checkout")
+        XCTAssertEqual(fixture.agent?.effectiveLabel, "Codex")
+        XCTAssertNil(fixture.agent?.sessionKey)
     }
 
     func testAReportEstablishesARowOnlyForADetectedAgent() throws {

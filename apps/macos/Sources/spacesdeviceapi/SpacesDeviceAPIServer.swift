@@ -2330,7 +2330,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             isHidden: workspace.isHidden, isDefault: workspace.isDefault, notes: workspace.notes,
             hasTrackedRuntimeIndicators: workspace.hasTrackedRuntimeIndicators, assignedPorts: workspace.assignedPorts,
             environment: workspace.environment, setupState: workspace.setupState, config: workspace.config, processRows: workspace.processRows,
-            codingAgentRows: workspace.codingAgentRows.map(overviewCodingAgentRowStateProjection),
+            codingAgentRows: workspace.codingAgentRows.map(overviewCodingAgentRowStateProjection), pinnedThreads: workspace.pinnedThreads,
             terminalRows: workspace.terminalRows.map(overviewTerminalRowStateProjection))
     }
 
@@ -2338,7 +2338,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: row.id, workspaceID: row.workspaceID, name: row.name, command: row.command, agentID: row.agentID, sessionID: row.sessionID,
             runState: row.runState, activityState: row.activityState, updatedAt: row.updatedAt, brief: row.brief, briefUpdatedAt: row.briefUpdatedAt,
-            canStop: row.canStop, liveTitle: nil)
+            canStop: row.canStop, liveTitle: nil, pinID: row.pinID, pinUnavailableReason: row.pinUnavailableReason)
     }
 
     private static func overviewTerminalRowStateProjection(_ row: SpacesDeviceWorkspaceTerminalRow) -> SpacesDeviceWorkspaceTerminalRow {
@@ -3540,6 +3540,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
         case .startWorkspaceCommandSession(let payload): return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
         case .resumeLostShell(let payload): return try handleResumeLostShellRequest(payload, context: context)
+        case .resumePinnedThread(let payload): return try handleResumePinnedThreadRequest(payload, context: context)
         case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload, context: context)
         case .stopWorkspaceTerminalIfBareShell(let payload): return try handleStopWorkspaceTerminalIfBareShellRequest(payload, context: context)
         case .renameTerminalSession(let payload): return try handleRenameTerminalSessionRequest(payload, context: context)
@@ -3548,6 +3549,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
+        case .pinAgentSession(let payload): return try handlePinAgentSessionRequest(payload, context: context)
+        case .unpinThread(let payload): return try handleUnpinThreadRequest(payload, context: context)
+        case .renamePinnedThread(let payload): return try handleRenamePinnedThreadRequest(payload, context: context)
         case .dismissAlerts(let payload): return try handleDismissAlertsRequest(payload, context: context)
         case .registerPushNotifications(let payload): return try handleRegisterPushNotificationsRequest(payload, clientApp: request.clientApp)
         case .unregisterPushNotifications: return try handleUnregisterPushNotificationsRequest(clientApp: request.clientApp)
@@ -3566,8 +3570,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .terminalTranscript: return try handleTerminalTranscriptLaneRequest(request)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
-        case .subscribe, .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature,
-            .subscribeWorkspaceFileSignature, .subscribeWorkspaceFileListSignature:
+        case .subscribe, .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
+            .subscribeWorkspaceFileListSignature:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
         case .agentHooksStatus, .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer: return try handleAgentHookRequest(request)
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
@@ -3695,7 +3699,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         switch request.command {
         case .startWorkspaceCommandSession(let payload): return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
         case .resumeLostShell(let payload): return try handleResumeLostShellRequest(payload, context: context)
-        default: preconditionFailure("Only `.startWorkspaceCommandSession` and `.resumeLostShell` run on the workspace-terminal-launch queue.")
+        case .resumePinnedThread(let payload): return try handleResumePinnedThreadRequest(payload, context: context)
+        default:
+            preconditionFailure(
+                "Only `.startWorkspaceCommandSession`, `.resumeLostShell` and `.resumePinnedThread` run on the workspace-terminal-launch queue.")
         }
     }
 
@@ -6753,6 +6760,40 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             context: context, message: title == nil ? "Cleared coding agent name." : "Renamed coding agent.", workspaceID: workspaceID)
     }
 
+    private func handlePinAgentSessionRequest(_ request: SpacesDevicePinAgentSessionRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let agentID = normalizedString(request.agentID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.", errorCode: .invalidArgument)
+        }
+        try context.orchestrator().pinAgentSession(workspaceID: request.workspaceID, agentID: agentID, name: request.name)
+        return try refreshedMutationResponse(context: context, message: "Pinned coding agent.", workspaceID: request.workspaceID)
+    }
+
+    private func handleUnpinThreadRequest(_ request: SpacesDevicePinnedThreadRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        try context.orchestrator().unpinThread(workspaceID: request.workspaceID, pinID: request.pinID)
+        return try refreshedMutationResponse(context: context, message: "Unpinned thread.", workspaceID: request.workspaceID)
+    }
+
+    private func handleRenamePinnedThreadRequest(_ request: SpacesDeviceRenamePinnedThreadRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        try context.orchestrator().renamePinnedThread(workspaceID: request.workspaceID, pinID: request.pinID, name: request.name)
+        return try refreshedMutationResponse(context: context, message: "Renamed pinned thread.", workspaceID: request.workspaceID)
+    }
+
+    /// Resumes a pinned thread in a new terminal, answering like a started command session so the client
+    /// can open the pane at once. A pin that is already running answers with its attached terminal and no
+    /// launched session, since nothing was launched.
+    private func handleResumePinnedThreadRequest(_ request: SpacesDevicePinnedThreadRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let resumption = try context.orchestrator().resumePinnedThread(workspaceID: request.workspaceID, pinID: request.pinID)
+        return try refreshedMutationResponse(
+            context: context, message: "Resumed pinned thread.", workspaceID: request.workspaceID, sessionID: resumption.sessionID,
+            launchedTerminalSession: try resumption.launchedSession.map { try launchedTerminalSessionSummary($0, workspaceID: request.workspaceID) })
+    }
+
     /// The alert mutations decide against a freshly built overview, hidden workspaces included, so what a
     /// client last saw never decides what is dismissed or cleared.
     private func handleDismissAlertsRequest(_ request: SpacesDeviceDismissAlertsRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
@@ -7451,8 +7492,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 // The producer broadcasts every tick, so the relay needs no empty-line keepalive.
                 return .relay(
                     LinuxSubscription(
-                        sessionID: "device-resources", installationID: request.clientApp?.installationID ?? "",
-                        subscriptionSocketPath: socketPath, controlSocketPath: "", clientID: nil, holdsDeviceResourcesSubscriber: true))
+                        sessionID: "device-resources", installationID: request.clientApp?.installationID ?? "", subscriptionSocketPath: socketPath,
+                        controlSocketPath: "", clientID: nil, holdsDeviceResourcesSubscriber: true))
             }
             if let workspaceID = request.command.workspaceFileListSignatureWorkspaceID {
                 let socketPath: String
@@ -7908,8 +7949,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 relaySource.setCancelHandler { close(relaySocketFD) }
                 streamRelays[ObjectIdentifier(connection)] = StreamRelay(
                     sessionID: "device-resources", installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue,
-                    relaySource: relaySource, heartbeatTimer: nil, connection: connection,
-                    sendSequencer: StreamSendSequencer(queueKey: queueKey), holdsDeviceResourcesSubscriber: true)
+                    relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey),
+                    holdsDeviceResourcesSubscriber: true)
                 relaySource.resume()
             } catch {
                 removeDeviceResourcesSubscriber()

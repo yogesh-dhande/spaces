@@ -272,10 +272,12 @@ struct SpacesMobileBrowserSessionRow: Identifiable, Sendable, Equatable {
     }
 }
 
-struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
-    enum Source: Sendable {
+struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable, Equatable {
+    enum Source: Sendable, Equatable {
         case process(SpacesDeviceWorkspaceProcessRow)
         case codingAgent(SpacesDeviceWorkspaceCodingAgentRow)
+        /// A pin with no running agent attached. A running pin is its attached `.codingAgent` row.
+        case pinnedThread(SpacesDeviceWorkspacePinnedThread)
         case terminal(SpacesDeviceWorkspaceTerminalRow)
         case browserSession(SpacesMobileBrowserSessionRow)
     }
@@ -286,6 +288,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         switch source {
         case .process(let row): "process:\(row.id)"
         case .codingAgent(let row): "agent:\(row.id)"
+        case .pinnedThread(let pin): "pin:\(pin.id)"
         case .terminal(let row): "terminal:\(row.id)"
         case .browserSession(let row): row.id
         }
@@ -295,6 +298,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         switch source {
         case .process(let row): row.workspaceID
         case .codingAgent(let row): row.workspaceID
+        case .pinnedThread(let pin): pin.workspaceID
         case .terminal(let row): row.workspaceID
         case .browserSession(let row): row.workspaceID
         }
@@ -303,7 +307,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     var type: SpacesMobileWorkspaceRowType {
         switch source {
         case .process: .processes
-        case .codingAgent: .codingAgents
+        case .codingAgent, .pinnedThread: .codingAgents
         case .terminal: .workspaceTerminals
         case .browserSession: .browserSessions
         }
@@ -320,9 +324,31 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         switch source {
         case .process(let row): row.name
         case .codingAgent(let row): row.name
+        case .pinnedThread(let pin): pin.name
         case .terminal(let row): row.title
         case .browserSession(let row): row.title
         }
+    }
+
+    /// The pin this row belongs to: a not-running pin itself, or the running row attached to one.
+    var pinID: String? {
+        switch source {
+        case .codingAgent(let row): row.pinID
+        case .pinnedThread(let pin): pin.id
+        case .process, .terminal, .browserSession: nil
+        }
+    }
+
+    /// Why Pin is disabled for this row, nil when it is available. Only an unpinned agent row can be pinned.
+    var pinUnavailableReason: SpacesDeviceAgentPinUnavailableReason? {
+        guard case .codingAgent(let row) = source, row.pinID == nil else { return nil }
+        return row.pinUnavailableReason
+    }
+
+    /// Whether the row is an agent row that no pin holds yet, so Pin is offered (possibly disabled).
+    var isPinnable: Bool {
+        guard case .codingAgent(let row) = source else { return false }
+        return row.pinID == nil && row.agentID != nil
     }
 
     /// The row's secondary text, matching the Mac sidebar: a process row shows what it runs, a coding
@@ -331,6 +357,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     var detail: String {
         switch source {
         case .process, .codingAgent: command
+        case .pinnedThread: ""
         case .terminal(let row): row.liveTitle ?? ""
         case .browserSession(let row): row.detail
         }
@@ -343,7 +370,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         switch source {
         case .process(let row): row.command
         case .codingAgent(let row): row.command
-        case .terminal, .browserSession: ""
+        case .pinnedThread, .terminal, .browserSession: ""
         }
     }
 
@@ -351,6 +378,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         switch source {
         case .process(let row): row.sessionID
         case .codingAgent(let row): row.sessionID
+        case .pinnedThread: nil
         case .terminal(let row): row.sessionID
         case .browserSession: nil
         }
@@ -362,19 +390,20 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         switch source {
         case .process(let row): row.runState
         case .codingAgent(let row): row.runState
+        case .pinnedThread: .notStarted
         case .terminal(let row): row.runState
         case .browserSession: .notStarted
         }
     }
 
-    /// Only a configured process can be started from a row: a coding agent exists only as a live
-    /// session the user started by running its command in a terminal.
+    /// A configured process can be started from a row, and so can a not-running pin (resuming it). Any
+    /// other coding agent exists only as a live session the user started by running its command in a
+    /// terminal.
     var canRun: Bool {
         switch source {
         case .process(let row): row.canRun
-        case .codingAgent: false
-        case .terminal: false
-        case .browserSession: false
+        case .pinnedThread: true
+        case .codingAgent, .terminal, .browserSession: false
         }
     }
 
@@ -383,16 +412,14 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.canStop
         case .codingAgent(let row): row.canStop
         case .terminal(let row): row.canStop
-        case .browserSession: false
+        case .pinnedThread, .browserSession: false
         }
     }
 
     var canRestart: Bool {
         switch source {
         case .process(let row): row.canRestart
-        case .codingAgent: false
-        case .terminal: false
-        case .browserSession: false
+        case .codingAgent, .pinnedThread, .terminal, .browserSession: false
         }
     }
 
@@ -401,16 +428,14 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.processID != nil && row.sessionID != nil
         case .codingAgent(let row): row.agentID != nil && row.sessionID != nil
         case .terminal(let row): row.canStop
-        case .browserSession: false
+        case .pinnedThread, .browserSession: false
         }
     }
 
     var canRestartFromTerminalDetail: Bool {
         switch source {
         case .process(let row): row.processID != nil && row.templateID != nil && row.sessionID != nil
-        case .codingAgent: false
-        case .terminal: false
-        case .browserSession: false
+        case .codingAgent, .pinnedThread, .terminal, .browserSession: false
         }
     }
 
@@ -419,14 +444,29 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     /// The markdown brief the row's coding agent keeps for the user, or nil when it keeps none. Only a
     /// coding agent writes one, so every other row family has none.
     var brief: String? {
-        guard case .codingAgent(let row) = source else { return nil }
-        return row.brief
+        switch source {
+        case .codingAgent(let row): row.brief
+        case .pinnedThread(let pin): pin.brief
+        case .process, .terminal, .browserSession: nil
+        }
     }
 
     /// When the agent last wrote or cleared its brief (ISO-8601), nil when it never did.
     var briefUpdatedAt: String? {
-        guard case .codingAgent(let row) = source else { return nil }
-        return row.briefUpdatedAt
+        switch source {
+        case .codingAgent(let row): row.briefUpdatedAt
+        case .pinnedThread(let pin): pin.briefUpdatedAt
+        case .process, .terminal, .browserSession: nil
+        }
+    }
+}
+
+extension SpacesDeviceWorkspaceAgentEntry {
+    var runtimeRow: SpacesMobileWorkspaceRuntimeRow {
+        switch self {
+        case .agent(let row): SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(row))
+        case .pinnedThread(let pin): SpacesMobileWorkspaceRuntimeRow(source: .pinnedThread(pin))
+        }
     }
 }
 
@@ -1054,7 +1094,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
         daemonUpdatePollInterval: Duration = .seconds(3), daemonSelfUpdatePollInterval: Duration = .seconds(2),
-        daemonUpdateTimeout: Duration = .seconds(30), refreshFailureAlertDelay: Duration = .seconds(5), workspaceDeletionReconciliationInterval: Duration = .seconds(2),
+        daemonUpdateTimeout: Duration = .seconds(30), refreshFailureAlertDelay: Duration = .seconds(5),
+        workspaceDeletionReconciliationInterval: Duration = .seconds(2),
         now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }, wallClock: @escaping @Sendable () -> Date = { Date() },
         visitSchedule: @escaping SpacesMobileTerminalVisitTracker.Schedule = SpacesMobileTerminalVisitTracker.sleepingSchedule,
         overviewStreamClientsForTesting: [String: SpacesDeviceAPIClient] = [:], pushCoordinator: PushNotificationCoordinator = .disabled(),
@@ -1448,7 +1489,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         case .process(let process): return (.process, process.id)
         case .codingAgent(let agent): return (.agent, agent.id)
         case .terminal(let terminal): return (.terminal, terminal.id)
-        case .browserSession: return nil
+        case .pinnedThread, .browserSession: return nil
         }
     }
 
@@ -3077,7 +3118,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Asks the active device to update itself to the version it reports available. A refusal is shown
     /// through the ordinary error alert, since the user is watching the control they just pressed.
     func startDaemonSelfUpdate() async {
-        guard daemonSelfUpdateAttempts[daemonSelfUpdateKey] == nil, case .available(let from, let target) = daemonSelfUpdatePresentation else { return }
+        guard daemonSelfUpdateAttempts[daemonSelfUpdateKey] == nil, case .available(let from, let target) = daemonSelfUpdatePresentation else {
+            return
+        }
         await requestDaemonSelfUpdate(from: from, target: target)
     }
 
@@ -3115,11 +3158,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // serialize whole round trips, and this request must not interleave with an overview refresh.
         let channel = bridgeClient.makeCommandChannel()
         defer { Task { await channel.close() } }
-        do {
-            try await bridgeClient.startDaemonSelfUpdate(commandChannel: channel)
-        } catch is CancellationError {
-            return
-        } catch {
+        do { try await bridgeClient.startDaemonSelfUpdate(commandChannel: channel) } catch is CancellationError { return } catch {
             guard identity == overviewIdentity else { return }
             daemonSelfUpdateAttempts[key] = previous
             errorMessage = error.localizedDescription
@@ -3156,9 +3195,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 guard isCurrent() else { return }
                 isDaemonSelfUpdateReachable = true
                 applyCompatibility(status)
-            } catch is CancellationError {
-                return
-            } catch {
+            } catch is CancellationError { return } catch {
                 guard isCurrent() else { return }
                 isDaemonSelfUpdateReachable = false
             }
@@ -3183,9 +3220,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func reconcileDaemonSelfUpdateAttempt() {
         let key = daemonSelfUpdateKey
         daemonSelfUpdateNow = wallClock()
-        if let status = daemonStatus, let attempt = daemonSelfUpdateAttempts[key] {
-            daemonSelfUpdateAttempts[key] = attempt.following(status)
-        }
+        if let status = daemonStatus, let attempt = daemonSelfUpdateAttempts[key] { daemonSelfUpdateAttempts[key] = attempt.following(status) }
         let presentation = daemonSelfUpdatePresentation
         guard var attempt = daemonSelfUpdateAttempts[key] else {
             guard let target = presentation.inFlightTargetVersion, let status = daemonStatus else { return }
@@ -4290,6 +4325,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
                     workspaceID: process.workspaceID, processKey: process.name, processTemplateID: process.templateID ?? process.id,
                     commandChannel: channel)
             }
+        case .pinnedThread(let pin):
+            // No fallback row id: a resumed pin's row is the attached agent row, which has a different id,
+            // so a timeout reconcile keyed on the pin's would never find it.
+            return await performMutationReturningSession(deviceID: deviceID, timeoutRecovery: timeoutRecovery) { channel, client in
+                try await client.resumePinnedThread(workspaceID: pin.workspaceID, pinID: pin.id, commandChannel: channel)
+            }
         case .codingAgent, .terminal, .browserSession: return nil
         }
     }
@@ -4331,7 +4372,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 guard let sessionID = terminal.sessionID else { return }
                 response = try await connection.client.stopWorkspaceTerminal(
                     workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: connection.channel)
-            case .browserSession: return
+            case .pinnedThread, .browserSession: return
             }
             await applyMutationResponse(response, token: connection.token)
         } catch {
@@ -4350,7 +4391,47 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 try await client.restartWorkspaceProcess(
                     workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: channel)
             }
-        case .codingAgent, .terminal, .browserSession: return nil
+        case .codingAgent, .pinnedThread, .terminal, .browserSession: return nil
+        }
+    }
+
+    // MARK: - Pinned threads
+
+    /// Pin actions need a daemon that accepts them, which Demo Mode's backend does not.
+    func canPin(row: SpacesMobileWorkspaceRuntimeRow) -> Bool { !isDemoModeEnabled && row.isPinnable }
+
+    func canUnpin(row: SpacesMobileWorkspaceRuntimeRow) -> Bool { !isDemoModeEnabled && row.pinID != nil }
+
+    /// Pins `row`'s conversation under `name`. An empty name cancels, matching the Mac's name prompt.
+    func pin(row: SpacesMobileWorkspaceRuntimeRow, name: String, deviceID: String) async {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canPin(row: row), row.pinUnavailableReason == nil, !name.isEmpty, case .codingAgent(let agent) = row.source, let agentID = agent.agentID
+        else { return }
+        await performDeviceMutation(deviceID: deviceID) { channel, client in
+            try await client.pinAgentSession(workspaceID: agent.workspaceID, agentID: agentID, name: name, commandChannel: channel)
+        }
+    }
+
+    /// Removes `row`'s pin: a running agent keeps its row under the pin's name, a not-running pin disappears.
+    func unpin(row: SpacesMobileWorkspaceRuntimeRow, deviceID: String) async {
+        guard canUnpin(row: row), let pinID = row.pinID else { return }
+        await performDeviceMutation(deviceID: deviceID) { channel, client in
+            try await client.unpinThread(workspaceID: row.workspaceID, pinID: pinID, commandChannel: channel)
+        }
+    }
+
+    private func performDeviceMutation(
+        deviceID: String, _ operation: (SpacesDeviceAPICommandChannel, SpacesDeviceAPIClient) async throws -> SpacesDeviceAPIResponse
+    ) async {
+        guard !isMutating, let connection = mutationConnection(forDeviceID: deviceID) else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            let response = try await operation(connection.channel, connection.client)
+            await applyMutationResponse(response, token: connection.token)
+        } catch {
+            guard isCurrent(connection.token) else { return }
+            handleBridgeError(error, deviceID: deviceID)
         }
     }
 
@@ -4763,6 +4844,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private enum RuntimeRowRename {
         case terminalSession(sessionID: String)
         case agentSession(agentID: String)
+        /// A pinned row, running or not: its name is the pin's, so the pin is what gets renamed.
+        case pinnedThread(pinID: String)
         case workspaceConfig(entry: ConfigEntry)
 
         enum ConfigEntry {
@@ -4791,8 +4874,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard title != row.title, let target = renameTarget(for: row) else { return }
         if title.isEmpty, case .workspaceConfig = target { return }
+        // A pin must keep a name, so an empty submission is discarded rather than clearing it.
+        if title.isEmpty, case .pinnedThread = target { return }
         await performWorkspaceMutation {
             switch target {
+            case .pinnedThread(let pinID):
+                return try await bridgeClient.renamePinnedThread(
+                    workspaceID: row.workspaceID, pinID: pinID, name: title, commandChannel: commandChannel)
             case .terminalSession(let sessionID):
                 return try await bridgeClient.renameTerminalSession(
                     workspaceID: row.workspaceID, sessionID: sessionID, title: title, commandChannel: commandChannel)
@@ -4820,7 +4908,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 config.processes.contains(where: { $0.id == templateID })
             else { return nil }
             return .workspaceConfig(entry: .process(id: templateID))
+        case .pinnedThread(let pin): return .pinnedThread(pinID: pin.id)
         case .codingAgent(let agent):
+            if let pinID = agent.pinID { return .pinnedThread(pinID: pinID) }
             guard let agentID = agent.agentID else { return nil }
             return .agentSession(agentID: agentID)
         case .browserSession(let browser):
@@ -4884,7 +4974,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             resolvedBrowserSessions: workspace.config.resolvedBrowserSessions, assignedPorts: workspace.assignedPorts)
         return browserRoutes.enumerated().map { index, route in
             .init(source: .browserSession(SpacesMobileBrowserSessionRow(workspaceID: workspace.id, index: index, route: route)))
-        } + workspace.processRows.map { .init(source: .process($0)) } + workspace.codingAgentRows.map { .init(source: .codingAgent($0)) }
+        } + workspace.processRows.map { .init(source: .process($0)) } + workspace.agentEntries.map(\.runtimeRow)
             + workspace.terminalRows.map { .init(source: .terminal($0)) }
     }
 
@@ -5040,6 +5130,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // Reading published state here would then report a successful Run/Restart/Terminal as a
             // failure, self-healing on the next overview delivery, but only after already showing the
             // wrong answer (#450).
+            // A launched terminal wins over overview lookup: a resumed agent whose conversation is gone
+            // exits at once and can already be missing from `overview.sessions`, but the user still needs
+            // its pane to read the agent's error. A pin that was already running launches nothing and
+            // resolves through the overview.
+            if let launched = response.launchedTerminalSession { return launched }
             if let sessionID = response.sessionID { return response.overview?.sessions.first(where: { $0.id == sessionID }) }
             if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID, in: response.overview) }
             return nil
