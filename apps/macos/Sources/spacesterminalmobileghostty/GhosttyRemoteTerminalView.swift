@@ -122,6 +122,10 @@ import Foundation
         /// keyboard changes without the session's own grid changing at all. The row offset moves with the
         /// cursor on nearly every frame, so this fires on more frames than a size-only report would.
         public let onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)?
+        /// Fires when the accessory toolbar's keyboard toggle shows or hides the software keyboard, before
+        /// UIKit starts the keyboard transition. This is the user's action; the keyboard notifications
+        /// arrive after the layout pass that has already re-cropped the grid.
+        public let onSoftwareKeyboardToggled: (@MainActor (Bool) -> Void)?
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
@@ -130,6 +134,7 @@ import Foundation
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)? = nil,
+            onSoftwareKeyboardToggled: (@MainActor (Bool) -> Void)? = nil,
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)? = nil,
@@ -153,6 +158,7 @@ import Foundation
             self.onRenderedTextChanged = onRenderedTextChanged
             self.onViewportSizeChanged = onViewportSizeChanged
             self.onRenderedViewportChanged = onRenderedViewportChanged
+            self.onSoftwareKeyboardToggled = onSoftwareKeyboardToggled
             self.onSendText = onSendText
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
@@ -185,6 +191,10 @@ import Foundation
             // the `keyboard_shift_applied` measurement on the other end times.
             hostView.onRenderedViewportChanged = onRenderedViewportChanged.map { callback in
                 { window in MainActor.assumeIsolated { callback(window) } }
+            }
+            // Synchronous so the toggle's anchor is stamped before the keyboard transition starts.
+            hostView.onSoftwareKeyboardToggled = onSoftwareKeyboardToggled.map { callback in
+                { visible in MainActor.assumeIsolated { callback(visible) } }
             }
             hostView.onSendText = { text, asPaste in _ = Task { @MainActor in onSendText(text, asPaste) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
@@ -439,6 +449,9 @@ import Foundation
         /// keyboard changes only the former (see `reportedViewportBounds()`). The row offset moves with
         /// the cursor on nearly every frame, so this fires on more frames than a size-only report would.
         public var onRenderedViewportChanged: ((GhosttyTerminalSnapshotViewport.Window) -> Void)?
+        /// Reports a real show/hide transition requested through `setSoftwareKeyboardVisible`, ahead of
+        /// the keyboard's own layout pass.
+        public var onSoftwareKeyboardToggled: ((Bool) -> Void)?
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32, TerminalScrollPointerPosition?) -> Void)?
@@ -737,6 +750,7 @@ import Foundation
             terminalAccessoryView.isKeyboardVisible = visible
             guard suppressesSoftwareKeyboard != shouldSuppress else { return }
             suppressesSoftwareKeyboard = shouldSuppress
+            onSoftwareKeyboardToggled?(visible)
             if isFirstResponder { reloadInputViews() } else { becomeFirstResponder() }
             // The keyboard's own arrival or departure drives the layout guide, and every layout pass
             // re-measures the rendered window; this only makes sure a suppression that changes nothing

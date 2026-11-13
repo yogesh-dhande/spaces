@@ -1087,6 +1087,24 @@
             XCTAssertTrue(hostView.inputAssistantIsSuppressedForTesting)
         }
 
+        /// The baseline lane anchors `keyboard_toggle` on this callback, so it must fire once per real
+        /// show/hide transition and stay silent when the requested state is already in effect.
+        func testRemoteTerminalHostViewReportsSoftwareKeyboardToggleOncePerTransition() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            hostView.setAcceptsTerminalInput(true)
+            var toggles: [Bool] = []
+            hostView.onSoftwareKeyboardToggled = { toggles.append($0) }
+
+            hostView.setSoftwareKeyboardVisible(true)
+            XCTAssertEqual(toggles, [])
+            hostView.setSoftwareKeyboardVisible(false)
+            hostView.setSoftwareKeyboardVisible(false)
+            XCTAssertEqual(toggles, [false])
+            hostView.setSoftwareKeyboardVisible(true)
+            hostView.setSoftwareKeyboardVisible(true)
+            XCTAssertEqual(toggles, [false, true])
+        }
+
         func testRemoteTerminalAccessoryToolbarKeepsTrailingControlsPinned() throws {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             XCTAssertNil(hostView.inputAccessoryView)
