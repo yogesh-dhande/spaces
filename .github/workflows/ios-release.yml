@@ -281,10 +281,20 @@ jobs:
             -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
             -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
 
+      # Tarred because the archive bundles a Ghostty theme file whose name contains a colon
+      # (`Analog Heartbeat: Phosphor`), which actions/upload-artifact refuses in a path.
+      - name: Pack xcarchive for upload
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [ -d "$RUNNER_TEMP/SpacesMobile.xcarchive" ]; then
+            tar -czf "$RUNNER_TEMP/SpacesMobile.xcarchive.tar.gz" -C "$RUNNER_TEMP" SpacesMobile.xcarchive
+          fi
+
       - name: Upload xcarchive for debugging
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: SpacesMobile-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}.xcarchive
-          path: ${{ runner.temp }}/SpacesMobile.xcarchive
+          path: ${{ runner.temp }}/SpacesMobile.xcarchive.tar.gz
           if-no-files-found: warn
