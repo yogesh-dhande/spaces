@@ -26,12 +26,6 @@ struct TerminalDetailView: View {
     let onBack: () -> Void
 
     @State private var hasMountedTerminalSurface = false
-    /// Whether the on-screen keyboard is currently up, tracked here (rather than read fresh from each
-    /// notification) so `keyboardWillShow`/`keyboardWillHide` only forward an actual transition to the
-    /// model: iOS can post either notification more than once for the same visible/hidden state (e.g.
-    /// across an input-accessory-view swap), and only the transition itself is what
-    /// `DevicePerformanceLog`'s `keyboard_toggle` baseline event means to capture.
-    @State private var isKeyboardVisibleForPerformanceLog = false
     @State private var isBackNavigationInProgress = false
     @State private var isShowingComposer = false
     /// Bumped once for every dismissal of a sheet or full-screen cover presented over the terminal
@@ -165,6 +159,7 @@ struct TerminalDetailView: View {
                                     model.recordRenderedText(text)
                                 } : nil, onViewportSizeChanged: { columns, rows in model.updateViewportSize(columns: columns, rows: rows) },
                             onRenderedViewportChanged: { window in model.noteRenderedViewportChanged(window: window) },
+                            onSoftwareKeyboardToggled: { visible in model.noteKeyboardToggled(visible: visible) },
                             onSendText: { text, asPaste in sendTerminalText(text, asPaste: asPaste) }, onSendKey: { key in sendTerminalKey(key) },
                             onSendScroll: { horizontal, vertical, scrollMods, pointerPosition in
                                 sendTerminalScroll(
@@ -230,14 +225,6 @@ struct TerminalDetailView: View {
             case .inactive: break
             @unknown default: break
             }
-        }.onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            guard !isKeyboardVisibleForPerformanceLog else { return }
-            isKeyboardVisibleForPerformanceLog = true
-            model.noteKeyboardToggled(visible: true)
-        }.onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            guard isKeyboardVisibleForPerformanceLog else { return }
-            isKeyboardVisibleForPerformanceLog = false
-            model.noteKeyboardToggled(visible: false)
         }.onChange(of: colorScheme) { newColorScheme in Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) } }.sheet(
             item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } }),
             onDismiss: { noteTerminalSheetDismissed() }

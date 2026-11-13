@@ -309,9 +309,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// production run without `SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH`/the DEBUG default configured
     /// never spins up a timer nobody reads.
     private var batterySampleTimerTask: Task<Void, Never>?
-    /// Uptime anchor for `keyboard_shift_applied`, armed by `noteKeyboardToggled` and closed out by the
-    /// first rendered window the toggle produces (`noteRenderedViewportChanged`). `nil` whenever no
-    /// keyboard transition is outstanding, which is most of the time.
+    /// Uptime anchor for `keyboard_shift_applied`, armed by `noteKeyboardToggled` (the accessory toolbar's
+    /// keyboard toggle) and closed out by the first rendered window the toggle produces
+    /// (`noteRenderedViewportChanged`). `nil` whenever no keyboard transition is outstanding, which is
+    /// most of the time.
     private var pendingKeyboardToggle: (beginUptimeNanoseconds: UInt64, visible: Bool)?
     /// Only a test overrides this (`connectionBannerGraceSecondsForTesting`), so a suite can drive the
     /// grace period to its boundary instead of waiting out the real one.
@@ -1142,10 +1143,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    /// Called when `TerminalDetailView` observes the keyboard show/hide notification. Arms
-    /// `keyboard_shift_applied`'s anchor: the keyboard never resizes the session, so what follows a toggle
-    /// is the terminal surface re-cropping the grid it already holds into the area the keyboard leaves,
-    /// and the first rendered window that produces closes the measurement out.
+    /// Called when the user taps the accessory toolbar's keyboard toggle. Arms `keyboard_shift_applied`'s
+    /// anchor: the keyboard never resizes the session, so what follows a toggle is the terminal surface
+    /// re-cropping the grid it already holds into the area the keyboard leaves, and the first rendered
+    /// window that produces closes the measurement out.
+    ///
+    /// The anchor is the toggle, not `keyboardWillShow`/`keyboardWillHide`: the re-crop runs inside UIKit's
+    /// keyboard layout pass, ahead of those notifications, so a notification anchor would arm after the
+    /// shift and close on the next transition's shift.
     func noteKeyboardToggled(visible: Bool) {
         var attributes = DevicePerformanceLog.batteryAttributes()
         attributes["visible"] = visible ? "1" : "0"
@@ -1159,7 +1164,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Two jobs. It is where the jump-to-bottom button learns what is actually on screen. And it closes out
     /// a pending keyboard toggle with `keyboard_shift_applied`, whose elapsed time is the whole cost of a
     /// keyboard transition for the terminal: no resize goes out, so there is no round trip, no full frame,
-    /// and no reflow for other clients to wait on.
+    /// and no reflow for other clients to wait on. The toggle is anchored at the user's tap rather than a
+    /// keyboard notification because the re-crop precedes the notifications (see `noteKeyboardToggled`).
     func noteRenderedViewportChanged(window: GhosttyTerminalSnapshotViewport.Window) {
         renderedViewportWindow = window
         guard let toggle = pendingKeyboardToggle else { return }

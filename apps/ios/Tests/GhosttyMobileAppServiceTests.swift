@@ -1087,6 +1087,24 @@
             XCTAssertTrue(hostView.inputAssistantIsSuppressedForTesting)
         }
 
+        /// The baseline lane anchors `keyboard_toggle` on this callback, so it must fire once per real
+        /// show/hide transition and stay silent when the requested state is already in effect.
+        func testRemoteTerminalHostViewReportsSoftwareKeyboardToggleOncePerTransition() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            hostView.setAcceptsTerminalInput(true)
+            var toggles: [Bool] = []
+            hostView.onSoftwareKeyboardToggled = { toggles.append($0) }
+
+            hostView.setSoftwareKeyboardVisible(true)
+            XCTAssertEqual(toggles, [])
+            hostView.setSoftwareKeyboardVisible(false)
+            hostView.setSoftwareKeyboardVisible(false)
+            XCTAssertEqual(toggles, [false])
+            hostView.setSoftwareKeyboardVisible(true)
+            hostView.setSoftwareKeyboardVisible(true)
+            XCTAssertEqual(toggles, [false, true])
+        }
+
         func testRemoteTerminalAccessoryToolbarKeepsTrailingControlsPinned() throws {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             XCTAssertNil(hostView.inputAccessoryView)
@@ -1669,6 +1687,138 @@
             XCTAssertTrue(reportedViewports.isEmpty, "neither half of a keyboard cycle reports a viewport")
             XCTAssertEqual(try XCTUnwrap(renderedViewports.last).rowOffset, 0, "with every row on screen there is nothing left to shift")
 
+            window.isHidden = true
+        }
+
+        /// Drives the real UIKit keyboard (no `setKeyboardOccludedHeightForTesting` seam): shows the software
+        /// keyboard, hides it the way the accessory toolbar's keyboard toggle does, and expects the pane to
+        /// render the whole grid again although the session sends no further frame. Only UIKit's own layout
+        /// pass, driven by the keyboard layout guide, can refresh the crop then.
+        func testHidingTheRealSoftwareKeyboardGivesTheFullPaneHeightBackWithoutFurtherFrames() throws {
+            try runRealKeyboardHide(alternateScreen: false)
+        }
+
+        /// The same hide on the alternate screen, where the keyboard is part of the reported grid.
+        func testHidingTheRealSoftwareKeyboardOnTheAlternateScreenGivesTheFullPaneHeightBack() throws {
+            try runRealKeyboardHide(alternateScreen: true)
+        }
+
+        /// UIKit's private keyboard state, which is process-global: a test that changes it restores it with
+        /// `defer`. The previous state has to be read before the view becomes first responder, because the
+        /// simulator rewrites it once a keyboard is requested. Test target only; none of this exists in app code.
+        private struct HardwareKeyboardState {
+            let attached: Bool
+            let inHardwareMode: Bool
+
+            private typealias SetBool = @convention(c) (AnyObject, Selector, Bool) -> Void
+            private typealias SetAttached = @convention(c) (Bool, Int32) -> Void
+
+            private static func impl() throws -> NSObject {
+                try XCTUnwrap(
+                    (NSClassFromString("UIKeyboardImpl") as? NSObject.Type)?.perform(NSSelectorFromString("sharedInstance"))?.takeUnretainedValue() as? NSObject)
+            }
+
+            private static func setBool(_ name: String, _ value: Bool, on impl: NSObject) {
+                let selector = NSSelectorFromString(name)
+                unsafeBitCast(impl.method(for: selector), to: SetBool.self)(impl, selector, value)
+            }
+
+            private static func setGraphicsServicesAttached(_ value: Bool) throws {
+                let handle = try XCTUnwrap(
+                    dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices", RTLD_NOW),
+                    "GraphicsServices is not loadable")
+                let symbol = try XCTUnwrap(dlsym(handle, "GSEventSetHardwareKeyboardAttached"), "GSEventSetHardwareKeyboardAttached is missing")
+                unsafeBitCast(symbol, to: SetAttached.self)(value, 0)
+            }
+
+            static func current() throws -> HardwareKeyboardState {
+                let impl = try impl()
+                return HardwareKeyboardState(
+                    attached: (impl.value(forKey: "hardwareKeyboardAttached") as? Bool) ?? true,
+                    inHardwareMode: (impl.value(forKey: "isInHardwareKeyboardMode") as? Bool) ?? true)
+            }
+
+            /// Makes UIKit present the software keyboard. A headless simulator (CI) reports a hardware keyboard
+            /// as attached, which reduces the keyboard layout guide to the 46pt accessory toolbar. Call it
+            /// after the view is first responder: before that the simulator re-asserts the hardware keyboard.
+            static func forceSoftwareKeyboard() throws {
+                let impl = try impl()
+                try setGraphicsServicesAttached(false)
+                // `setIsAttachedHardwareKeyboard:` accepts NO but crashes on YES, so it is never used to restore.
+                setBool("setHardWareKeyboardAttached:", false, on: impl)
+                setBool("setIsAttachedHardwareKeyboard:", false, on: impl)
+                setBool("setInHardwareKeyboardMode:", false, on: impl)
+            }
+
+            func restore() {
+                guard let impl = try? Self.impl() else { return }
+                try? Self.setGraphicsServicesAttached(attached)
+                Self.setBool("setHardWareKeyboardAttached:", attached, on: impl)
+                Self.setBool("setInHardwareKeyboardMode:", inHardwareMode, on: impl)
+            }
+        }
+
+        private func runRealKeyboardHide(alternateScreen: Bool = false) throws {
+            let priorKeyboardState = try HardwareKeyboardState.current()
+            defer { priorKeyboardState.restore() }
+            let screenBounds = UIScreen.main.bounds
+            let window = try Self.makeSceneWindow(frame: screenBounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            let hostView = GhosttyRemoteTerminalHostView(frame: screenBounds)
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            viewController.view.addSubview(hostView)
+            window.makeKeyAndVisible()
+            viewController.view.frame = window.bounds
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.setAcceptsTerminalInput(true)
+            XCTAssertTrue(hostView.becomeFirstResponder())
+            try HardwareKeyboardState.forceSoftwareKeyboard()
+            let reportedRows = hostView.reportedViewportSizeForTesting().rows
+
+            var spinnerTick = 0
+            func sendSpinnerFrame() {
+                spinnerTick += 1
+                let columns = 80
+                let lines = (0..<(reportedRows - 1)).map { "ROW \(String(format: "%02d", $0)) claude-session-output" }
+                var frame = self.snapshot(columns: columns, rows: reportedRows, text: (lines + ["spinner \(spinnerTick)"]).joined(separator: "\n"))
+                if alternateScreen { frame = self.alternateScreen(frame) }
+                hostView.update(
+                    snapshot: frame, renderStateKey: "viewer|runtime=80x\(reportedRows)|snapshot=80x\(reportedRows)|tick=\(spinnerTick)",
+                    fallbackText: "Waiting for terminal state...")
+            }
+            func spin(for duration: TimeInterval) {
+                let deadline = Date().addingTimeInterval(duration)
+                while Date() < deadline {
+                    sendSpinnerFrame()
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                }
+            }
+
+            sendSpinnerFrame()
+            spin(for: 0.3)
+            // Keyboard up: wait for the real keyboard to occlude the pane.
+            let keyboardDeadline = Date().addingTimeInterval(8)
+            while hostView.visibleRenderBoundsForTesting().height > screenBounds.height - 200, Date() < keyboardDeadline {
+                spin(for: 0.1)
+            }
+            spin(for: 1.0)
+            let keyboardUpRows = hostView.renderedViewportSizeForTesting().rows
+            XCTAssertLessThan(
+                keyboardUpRows, reportedRows, "precondition: the real software keyboard never showed, so the hide below proves nothing (hardware keyboard attached?)")
+
+            // The accessory toolbar's keyboard toggle calls exactly this.
+            hostView.setSoftwareKeyboardVisible(false)
+            RunLoop.main.run(until: Date().addingTimeInterval(2.5))
+
+            XCTAssertEqual(
+                hostView.renderedViewportSizeForTesting().rows, reportedRows,
+                "after the keyboard is hidden the pane renders \(hostView.renderedViewportSizeForTesting().rows) of \(reportedRows) rows")
+            XCTAssertEqual(
+                try XCTUnwrap(hostView.capturedSnapshotForTesting()).rows, reportedRows,
+                "the rendered frame is still cropped to the keyboard-up height")
             window.isHidden = true
         }
 

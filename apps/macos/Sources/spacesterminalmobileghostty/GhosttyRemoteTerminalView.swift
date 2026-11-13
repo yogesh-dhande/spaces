@@ -122,6 +122,10 @@ import Foundation
         /// keyboard changes without the session's own grid changing at all. The row offset moves with the
         /// cursor on nearly every frame, so this fires on more frames than a size-only report would.
         public let onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)?
+        /// Fires when the accessory toolbar's keyboard toggle shows or hides the software keyboard, before
+        /// UIKit starts the keyboard transition. This is the user's action; the keyboard notifications
+        /// arrive after the layout pass that has already re-cropped the grid.
+        public let onSoftwareKeyboardToggled: (@MainActor (Bool) -> Void)?
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
@@ -130,6 +134,7 @@ import Foundation
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)? = nil,
+            onSoftwareKeyboardToggled: (@MainActor (Bool) -> Void)? = nil,
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)? = nil,
@@ -153,6 +158,7 @@ import Foundation
             self.onRenderedTextChanged = onRenderedTextChanged
             self.onViewportSizeChanged = onViewportSizeChanged
             self.onRenderedViewportChanged = onRenderedViewportChanged
+            self.onSoftwareKeyboardToggled = onSoftwareKeyboardToggled
             self.onSendText = onSendText
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
@@ -185,6 +191,10 @@ import Foundation
             // the `keyboard_shift_applied` measurement on the other end times.
             hostView.onRenderedViewportChanged = onRenderedViewportChanged.map { callback in
                 { window in MainActor.assumeIsolated { callback(window) } }
+            }
+            // Synchronous so the toggle's anchor is stamped before the keyboard transition starts.
+            hostView.onSoftwareKeyboardToggled = onSoftwareKeyboardToggled.map { callback in
+                { visible in MainActor.assumeIsolated { callback(visible) } }
             }
             hostView.onSendText = { text, asPaste in _ = Task { @MainActor in onSendText(text, asPaste) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
@@ -439,6 +449,9 @@ import Foundation
         /// keyboard changes only the former (see `reportedViewportBounds()`). The row offset moves with
         /// the cursor on nearly every frame, so this fires on more frames than a size-only report would.
         public var onRenderedViewportChanged: ((GhosttyTerminalSnapshotViewport.Window) -> Void)?
+        /// Reports a real show/hide transition requested through `setSoftwareKeyboardVisible`, ahead of
+        /// the keyboard's own layout pass.
+        public var onSoftwareKeyboardToggled: ((Bool) -> Void)?
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32, TerminalScrollPointerPosition?) -> Void)?
@@ -535,6 +548,27 @@ import Foundation
             scrollPanRecognizer.delegate = self
             addGestureRecognizer(scrollPanRecognizer)
             installSelectionInteraction()
+            installKeyboardGuideLayoutTrigger()
+        }
+
+        /// Pins a zero-size, invisible subview to the keyboard layout guide. Nothing else in this view's
+        /// layout depends on the guide, so without a constraint on it UIKit never schedules a layout pass
+        /// when the guide moves; the guide that `keyboardOccludingFrame()` reads then settles after the
+        /// last pass, and the crop and the reported grid stay at the old keyboard height until some frame
+        /// happens to arrive. The constraint makes every guide change mark this view as needing layout.
+        private func installKeyboardGuideLayoutTrigger() {
+            let trigger = UIView()
+            trigger.translatesAutoresizingMaskIntoConstraints = false
+            trigger.isHidden = true
+            trigger.isUserInteractionEnabled = false
+            trigger.isAccessibilityElement = false
+            addSubview(trigger)
+            NSLayoutConstraint.activate([
+                trigger.widthAnchor.constraint(equalToConstant: 0),
+                trigger.heightAnchor.constraint(equalToConstant: 0),
+                trigger.leadingAnchor.constraint(equalTo: leadingAnchor),
+                trigger.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
+            ])
         }
 
         /// The accessory Shift key is armed: Shift keeps its meaning of "this is for the terminal, not the
@@ -716,6 +750,7 @@ import Foundation
             terminalAccessoryView.isKeyboardVisible = visible
             guard suppressesSoftwareKeyboard != shouldSuppress else { return }
             suppressesSoftwareKeyboard = shouldSuppress
+            onSoftwareKeyboardToggled?(visible)
             if isFirstResponder { reloadInputViews() } else { becomeFirstResponder() }
             // The keyboard's own arrival or departure drives the layout guide, and every layout pass
             // re-measures the rendered window; this only makes sure a suppression that changes nothing
@@ -755,13 +790,15 @@ import Foundation
 
         public override func layoutSubviews() {
             super.layoutSubviews()
-            // A keyboard layout guide reports intermediate frames throughout its animation, and every one
-            // of them reaches here. On the primary screen none of them changes the reported grid (see
-            // `reportedViewportBounds()`), so the report below is a no-op for the whole transition. On the
-            // alternate screen each one does, and the burst is collapsed downstream: the viewer model
-            // restarts its ownership-sync debounce on every report, so one resize follows the animation.
-            // The render that follows is what tracks the keyboard, re-cropping the grid into whatever
-            // area is left so a newly exposed area is never left unpainted.
+            // The keyboard layout guide drives this pass: `installKeyboardGuideLayoutTrigger()` makes each
+            // guide change, intermediate animation frames and the final settled frame included, schedule a
+            // layout. Without that, the pass `setSoftwareKeyboardVisible` requests runs while the guide
+            // still shows the old keyboard and nothing re-measures once it settles. On the primary screen
+            // the intermediate frames do not change the reported grid (see `reportedViewportBounds()`), so
+            // the report below is a no-op for the transition. On the alternate screen each one does, and
+            // the burst is collapsed downstream: the viewer model restarts its ownership-sync debounce on
+            // every report, so one resize follows the animation. The render that follows re-crops the grid
+            // into whatever area is left so a newly exposed area is never left unpainted.
             reportViewportSizeIfNeeded()
             renderLatestSnapshot()
         }
@@ -1980,8 +2017,12 @@ import Foundation
         private func keyboardAndAccessoryOccludingFrames() -> [CGRect] {
             guard bounds.width > 0, bounds.height > 0 else { return [] }
             var frames: [CGRect] = []
-            if let keyboardFrame = keyboardOccludingFrame() { frames.append(keyboardFrame) }
-            if let accessoryFrame = accessoryOccludingFrame() { frames.append(accessoryFrame) }
+            let keyboardFrame = keyboardOccludingFrame()
+            if let keyboardFrame { frames.append(keyboardFrame) }
+            // The guide's frame already contains the toolbar. The toolbar's own frame lives in the
+            // keyboard's window and trails the guide, so reading it alongside the guide would crop to the
+            // old keyboard position after a hide with nothing to schedule another pass.
+            if keyboardFrame == nil, let accessoryFrame = accessoryOccludingFrame() { frames.append(accessoryFrame) }
             if frames.isEmpty, let fallbackAccessoryFrame = fallbackAccessoryOccludingFrame() { frames.append(fallbackAccessoryFrame) }
             return frames
         }
