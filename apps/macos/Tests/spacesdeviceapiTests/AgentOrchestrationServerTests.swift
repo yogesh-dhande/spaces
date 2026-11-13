@@ -613,6 +613,156 @@
             }
         }
 
+        /// Pin, rename, and unpin end to end: the pin names the row and is listed on the workspace, a pin
+        /// rename renames the row with it, and unpinning a running pin leaves the row under its name.
+        func testPinRenameAndUnpinRoundTripThroughTheDeviceAPI() throws {
+            try withTemporaryProfile { _ in
+                let launches = TerminalLaunchRecorder()
+                let launcher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher = { Self.launchLive($0, recorder: launches) }
+                let agent = try seedLiveResumableAgent(launcher: launcher)
+                let (server, client, clientApp, token) = try startServerAndClient(builtInTerminalSessionLauncher: launcher)
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+                func send(_ command: SpacesDeviceAPICommand) throws -> SpacesDeviceAPIResponse {
+                    try client.send(SpacesDeviceAPIRequest(command: command, authToken: token, clientApp: clientApp))
+                }
+                func workspace(_ response: SpacesDeviceAPIResponse) throws -> SpacesDeviceWorkspaceSummary {
+                    try XCTUnwrap(response.overview?.workspaces.first { $0.id == "workspace-1" })
+                }
+
+                let ready = try workspace(try send(.overview))
+                XCTAssertNil(ready.codingAgentRows.first?.pinUnavailableReason, "a keyed agent with a launch command is pinnable")
+
+                let pinned = try send(.pinAgentSession(.init(workspaceID: "workspace-1", agentID: agent.id, name: "  Fix checkout ")))
+                XCTAssertTrue(pinned.ok, pinned.message)
+                let pinnedWorkspace = try workspace(pinned)
+                let pin = try XCTUnwrap(pinnedWorkspace.pinnedThreads.first)
+                XCTAssertEqual(pin.name, "Fix checkout")
+                XCTAssertEqual(pin.agentRowID, "agent:\(agent.id)")
+                XCTAssertEqual(pinnedWorkspace.codingAgentRows.map(\.name), ["Fix checkout"])
+                XCTAssertEqual(pinnedWorkspace.codingAgentRows.first?.pinID, pin.id)
+                XCTAssertEqual(pinnedWorkspace.codingAgentRows.first?.pinUnavailableReason, .conversationPinned)
+
+                let renamed = try send(.renamePinnedThread(.init(workspaceID: "workspace-1", pinID: pin.id, name: "Fix checkout 500")))
+                XCTAssertTrue(renamed.ok, renamed.message)
+                XCTAssertEqual(try workspace(renamed).pinnedThreads.map(\.name), ["Fix checkout 500"])
+                XCTAssertEqual(try workspace(renamed).codingAgentRows.map(\.name), ["Fix checkout 500"])
+
+                let emptyRename = try send(.renamePinnedThread(.init(workspaceID: "workspace-1", pinID: pin.id, name: "  ")))
+                XCTAssertFalse(emptyRename.ok)
+                XCTAssertEqual(emptyRename.errorCode, .invalidArgument)
+
+                let unpinned = try send(.unpinThread(.init(workspaceID: "workspace-1", pinID: pin.id)))
+                XCTAssertTrue(unpinned.ok, unpinned.message)
+                XCTAssertTrue(try workspace(unpinned).pinnedThreads.isEmpty)
+                XCTAssertEqual(try workspace(unpinned).codingAgentRows.map(\.name), ["Fix checkout 500"])
+                XCTAssertNil(try workspace(unpinned).codingAgentRows.first?.pinID)
+            }
+        }
+
+        /// Pinning a row that has no resumable conversation fails loudly and writes nothing.
+        func testPinningARowWithoutAConversationIsRefused() throws {
+            try withTemporaryProfile { _ in
+                let agent = try seedAgentSession(terminalSessionID: "agent-session", label: "Claude", status: .idle, brief: nil, signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .pinAgentSession(.init(workspaceID: "workspace-1", agentID: agent.id, name: "Fix checkout")), authToken: token,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertTrue(response.message.contains(SpacesDeviceAgentPinUnavailableReason.noConversation.message), response.message)
+            }
+        }
+
+        /// Resume launches the pin's conversation in a new terminal and answers like a started command
+        /// session; asking again while that terminal runs launches nothing and names the same terminal.
+        func testResumingAPinLaunchesOnceAndThenAnswersWithTheRunningTerminal() throws {
+            try withTemporaryProfile { _ in
+                let launches = TerminalLaunchRecorder()
+                let launcher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher = { Self.launchLive($0, recorder: launches) }
+                let agent = try seedLiveResumableAgent(launcher: launcher)
+                let (server, client, clientApp, token) = try startServerAndClient(builtInTerminalSessionLauncher: launcher)
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+                func send(_ command: SpacesDeviceAPICommand) throws -> SpacesDeviceAPIResponse {
+                    try client.send(SpacesDeviceAPIRequest(command: command, authToken: token, clientApp: clientApp))
+                }
+                let pinned = try send(.pinAgentSession(.init(workspaceID: "workspace-1", agentID: agent.id, name: "Fix checkout")))
+                let pinID = try XCTUnwrap(pinned.overview?.workspaces.first?.pinnedThreads.first?.id)
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                try store.deleteAgentWindow(id: agent.id)
+                let launchesBeforeResume = launches.configurations().count
+
+                let resumed = try send(.resumePinnedThread(.init(workspaceID: "workspace-1", pinID: pinID)))
+
+                XCTAssertTrue(resumed.ok, resumed.message)
+                XCTAssertEqual(launches.configurations().count, launchesBeforeResume + 1)
+                let launch = try XCTUnwrap(launches.configurations().last)
+                XCTAssertTrue(launch.command?.contains("claude --resume conv-1") == true, launch.command ?? "nil")
+                XCTAssertEqual(resumed.sessionID, launch.sessionID)
+                XCTAssertEqual(resumed.launchedTerminalSession?.id, launch.sessionID)
+                let workspace = try XCTUnwrap(resumed.overview?.workspaces.first)
+                XCTAssertEqual(workspace.codingAgentRows.map(\.name), ["Fix checkout"])
+                XCTAssertEqual(workspace.codingAgentRows.first?.pinID, pinID)
+                XCTAssertEqual(workspace.pinnedThreads.first?.agentRowID, workspace.codingAgentRows.first?.id)
+
+                let again = try send(.resumePinnedThread(.init(workspaceID: "workspace-1", pinID: pinID)))
+
+                XCTAssertTrue(again.ok, again.message)
+                XCTAssertEqual(again.sessionID, launch.sessionID)
+                XCTAssertNil(again.launchedTerminalSession)
+                XCTAssertEqual(launches.configurations().count, launchesBeforeResume + 1)
+            }
+        }
+
+        /// A live agent row holding conversation `conv-1`, started the way a restore starts one: through the
+        /// agent launch path, so its terminal session and row carry the command a pin resumes from.
+        private func seedLiveResumableAgent(launcher: @escaping WorkspaceOrchestrator.BuiltInTerminalSessionLauncher) throws -> AgentWindowRecord {
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+            try FileManager.default.createDirectory(atPath: dir + "/ws", withIntermediateDirectories: true)
+            try store.upsert(
+                project: ProjectRecord(
+                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, kind: .standard, setupScript: nil,
+                    stopScript: nil, ports: [], processes: [], browserSessions: []))
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: false,
+                    lastLaunchedAt: nil))
+            let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalSessionLauncher: launcher)
+            let session = try orchestrator.createWorkspaceAgentSession(
+                workspaceID: "workspace-1", command: "claude", title: nil, recordedLaunchCommand: "claude", resumedAgentSessionKey: "conv-1")
+            return try XCTUnwrap(try store.agentWindow(workspaceID: "workspace-1", terminalTrackingID: session.id))
+        }
+
+        /// Launches like the terminal service does for the parts a pin reads: the persisted launch
+        /// configuration, and a runtime state and control socket that make the session read as live.
+        private static func launchLive(_ configuration: TerminalSessionLaunchConfiguration, recorder: TerminalLaunchRecorder)
+            -> TerminalServiceSessionSummary
+        {
+            if let paths = try? TerminalSessionPaths.forSession(id: configuration.sessionID) {
+                try? paths.ensureDirectories()
+                try? TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    TerminalSessionRuntimeState(
+                        sessionID: configuration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                        updatedAt: "2026-06-06T00:00:00Z"), paths: paths)
+                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            }
+            return recorder.launch(configuration)
+        }
+
         /// Stop is the only lifecycle control a coding agent has, and it addresses the row by its agent
         /// session id: a hook-registered live agent stops, and its row leaves the overview.
         func testStoppingAHookRegisteredAgentRemovesItsRow() throws {

@@ -72,6 +72,10 @@ import spacesterminalcore
         .restartWorkspaceProcess(SpacesDeviceWorkspaceProcessMutationRequest(workspaceID: "workspace-1", processID: "process-1")),
         .stopCodingAgent(SpacesDeviceCodingAgentMutationRequest(workspaceID: "workspace-1", agentID: "agent-1")),
         .renameAgentSession(SpacesDeviceAgentSessionRenameRequest(workspaceID: "workspace-1", agentID: "agent-1", title: "New Title")),
+        .pinAgentSession(SpacesDevicePinAgentSessionRequest(workspaceID: "workspace-1", agentID: "agent-1", name: "Fix checkout")),
+        .unpinThread(SpacesDevicePinnedThreadRequest(workspaceID: "workspace-1", pinID: "pin-1")),
+        .renamePinnedThread(SpacesDeviceRenamePinnedThreadRequest(workspaceID: "workspace-1", pinID: "pin-1", name: "Fix checkout")),
+        .resumePinnedThread(SpacesDevicePinnedThreadRequest(workspaceID: "workspace-1", pinID: "pin-1")),
         .dismissAlerts(SpacesDeviceDismissAlertsRequest(keys: ["process:process-1:2026-07-14T09:00:00Z"])),
         .registerPushNotifications(
             SpacesDeviceRegisterPushNotificationsRequest(capability: "capability-1", notifyBlocked: true, notifyFinished: false)),
@@ -89,7 +93,8 @@ import spacesterminalcore
         .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: "session-1", clientID: "client-1")),
         .resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest(sessionID: "session-1", terminalLink: "link")),
         .readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest(sessionID: "session-1", terminalLinkID: "link-1", offset: 0, limit: 1024)),
-        .subscribeDeviceOverview, .subscribeDeviceResources, .agentHooksStatus, .installAgentHooks(SpacesDeviceInstallAgentHooksRequest(kinds: [.claudeCode])),
+        .subscribeDeviceOverview, .subscribeDeviceResources, .agentHooksStatus,
+        .installAgentHooks(SpacesDeviceInstallAgentHooksRequest(kinds: [.claudeCode])),
         .trustAgentHooks(SpacesDeviceTrustAgentHooksRequest(kind: .codex)), .stopCodexSharedServer,
         .spawnAgentSession(SpacesDeviceSpawnAgentSessionRequest(workspaceID: "workspace-1", command: "claude")),
         .listAgentSessions(SpacesDeviceListAgentSessionsRequest(workspaceID: "workspace-1")),
@@ -163,7 +168,7 @@ import spacesterminalcore
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 92)
+        #expect(keys.count == 96)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -245,6 +250,10 @@ import spacesterminalcore
         case .restartWorkspaceProcess: "restartWorkspaceProcess"
         case .stopCodingAgent: "stopCodingAgent"
         case .renameAgentSession: "renameAgentSession"
+        case .pinAgentSession: "pinAgentSession"
+        case .unpinThread: "unpinThread"
+        case .renamePinnedThread: "renamePinnedThread"
+        case .resumePinnedThread: "resumePinnedThread"
         case .dismissAlerts: "dismissAlerts"
         case .registerPushNotifications: "registerPushNotifications"
         case .unregisterPushNotifications: "unregisterPushNotifications"

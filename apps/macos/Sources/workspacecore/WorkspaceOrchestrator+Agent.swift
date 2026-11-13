@@ -388,6 +388,7 @@ extension WorkspaceOrchestrator {
         ).compactMap(sanitizedFocusName).map(normalizedFocusName)
         var blockedNames = usedNames
         blockedNames.formUnion(existingAgentNames)
+        blockedNames.formUnion(try notRunningPinnedThreadNames(workspaceID: workspaceID).map(normalizedFocusName))
         if !blockedNames.contains(normalizedFocusName(baseLabel)) { return baseLabel }
         var suffix = 2
         while blockedNames.contains(normalizedFocusName("\(baseLabel)-\(suffix)")) { suffix += 1 }
@@ -661,9 +662,11 @@ extension WorkspaceOrchestrator {
         // row by the time this runs, so `existing` carries the command the reused terminal is running now.
         let isReusedAfterExit = status == .exited
         let resolvedStatus: AgentWindowStatus = isReusedAfterExit ? .idle : status
-        if let existing = try matchingAgentWindow(
+        if let matchedAgent = try matchingAgentWindow(
             workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey.matchableKey)
         {
+            let existing = try detachingPinnedThreadIfConversationChanges(
+                matchedAgent, newKey: sessionKey.applied(to: isReusedAfterExit ? nil : matchedAgent.sessionKey))
             // The default heals a row stored without a label before materialization existed, so every
             // signal leaves the row addressable by the one name its surfaces display.
             let resolvedLabel = try uniqueAgentFocusLabel(
@@ -754,6 +757,7 @@ extension WorkspaceOrchestrator {
             guard let existing = try store.agentWindow(id: id), existing.status != .exited else { return false }
             let newKey = sessionKey.applied(to: existing.sessionKey)
             guard newKey != existing.sessionKey else { return false }
+            try detachPinnedThread(fromAgent: existing)
             try store.setAgentSessionKey(id: id, sessionKey: newKey)
             appendAgentSessionEvent(
                 agentSessionID: id, eventType: "session_key", source: eventSource,
@@ -791,7 +795,8 @@ extension WorkspaceOrchestrator {
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
-        if let existing {
+        if let matchedAgent = existing {
+            let existing = try detachingPinnedThreadIfConversationChanges(matchedAgent, newKey: sessionKey.applied(to: matchedAgent.sessionKey))
             // Same healing default as `registerAgentWindow`'s existing-row branch: a pre-materialization
             // row gains its stored name on the next signal.
             let resolvedLabel = try uniqueAgentFocusLabel(
@@ -868,6 +873,9 @@ extension WorkspaceOrchestrator {
     func recordAgentExitStatus(_ existing: AgentWindowRecord) throws -> AgentWindowRecord? {
         let now = nowISO8601()
         guard try store.markAgentWindowExitStatus(existing, updatedAt: now) else { return nil }
+        // A pinned agent that exits leaves its pin not running; the kept `.exited` row returns to its
+        // default name and the record handed on carries it.
+        let existing = try detachPinnedThread(fromAgent: existing)
         let terminalTarget: TerminalTargetRecord? =
             if existing.terminalTarget != nil || existing.terminalTrackingID != nil {
                 TerminalTargetRecord(runtimeTargetID: existing.runtimeTargetID, trackingID: existing.terminalTrackingID)
@@ -1247,6 +1255,12 @@ extension WorkspaceOrchestrator {
         try store.withTransaction {
             guard let existing = try store.agentWindow(id: agentID), existing.workspaceID == workspaceID else {
                 throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
+            }
+            // A pinned row's name is the pin's, so the pin renames it. An empty title is refused there
+            // rather than cleared: the pin has no reported name to fall back to.
+            if let pin = try store.pinnedThread(attachedToAgentID: existing.id) {
+                try renamePinnedThread(workspaceID: workspaceID, pinID: pin.id, name: title)
+                return
             }
             let agents = try store.agentWindows(workspaceID: workspaceID)
             let userLabel: String?

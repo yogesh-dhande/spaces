@@ -131,6 +131,7 @@ import workspacecore
         case .process: return target.processID.flatMap { id in detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name }
         case .window: return target.windowListIndex.flatMap { detail.terminalRows.indices.contains($0) ? detail.terminalRows[$0].title : nil }
         case .agent: return target.agentWindow?.label
+        case .pinnedThread: return detail.pinnedThreads.first(where: { $0.id == target.pinnedThreadID })?.name
         case .missingConfiguredProcess: return target.processKey
         }
     }
@@ -817,8 +818,7 @@ import workspacecore
             mode: mode, devices: devices, openTerminalSessionIDsByWorkspace: openTerminalSessionIDsByWorkspace,
             openBrowserSessionsByWorkspace: browserCycleState.openBrowserSessionsByWorkspace,
             trackedBrowserWindowIDsByWorkspace: browserCycleState.trackedWindowIDsByWorkspace,
-            recentCursors: windowCycleState.recentCursors(for: .mode(mode)),
-            retaining: retainedCursors)
+            recentCursors: windowCycleState.recentCursors(for: .mode(mode)), retaining: retainedCursors)
         // A focused built-in terminal decides the current target before any browser state is read, so
         // the browser fields are dropped together when there is one.
         //
@@ -841,7 +841,8 @@ import workspacecore
             case .process, .window, .agent:
                 guard let sessionID = cycleTargetSessionID(for: target, detail: detail), !sessionID.isEmpty else { return false }
                 return openTerminalSessionIDs.contains(sessionID)
-            case .missingConfiguredProcess: return false
+            // Neither has a terminal to land in until it is started or resumed.
+            case .missingConfiguredProcess, .pinnedThread: return false
             }
         }
     }
@@ -855,6 +856,7 @@ import workspacecore
         case .process: return "process:\(target.processID ?? "")"
         case .window: return "terminal:\(cycleTargetSessionID(for: target, detail: detail) ?? String(target.windowListIndex ?? -1))"
         case .agent: return "agent:\(target.agentWindow?.id ?? "")"
+        case .pinnedThread: return "pin:\(target.pinnedThreadID ?? "")"
         case .missingConfiguredProcess: return "missing:\(target.processKey ?? "")"
         }
     }
@@ -871,7 +873,7 @@ import workspacecore
             guard let index = target.windowListIndex, detail.terminalRows.indices.contains(index) else { return nil }
             return detail.terminalRows[index].sessionID
         case .agent: return detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == target.agentWindow?.id })?.sessionID
-        case .browser, .missingConfiguredProcess: return nil
+        case .browser, .missingConfiguredProcess, .pinnedThread: return nil
         }
     }
 
@@ -908,7 +910,8 @@ import workspacecore
                 workspaceID: request.workspaceID, sessionID: request.sessionID, preserveWindowCycleSession: preserveWindowCycleSession)
         case .runProcess(_, let processKey, _):
             rememberWindowNavigationProcess(workspaceID: workspaceID, processKey: processKey, preserveWindowCycleSession: preserveWindowCycleSession)
-        case .noWorkspace, .noMatch: return
+        // The resumed terminal records its own visit once its pane takes focus.
+        case .resumePinnedThread, .noWorkspace, .noMatch: return
         }
     }
 
@@ -919,7 +922,7 @@ import workspacecore
         switch target.kind {
         case .browser: guard target.targetURL?.isEmpty == false else { return false }
         case .process, .window, .agent: guard Self.cycleTargetSessionID(for: target, detail: detail)?.isEmpty == false else { return false }
-        case .missingConfiguredProcess: return false
+        case .missingConfiguredProcess, .pinnedThread: return false
         }
         rememberWindowNavigationCursor(
             Self.cycleCursorKey(for: target, detail: detail), workspaceID: workspaceID, preserveWindowCycleSession: preserveWindowCycleSession)
@@ -1015,7 +1018,7 @@ import workspacecore
 
     nonisolated private static func workspaceID(for resolution: AppKitController.DeviceWindowShortcutResolution) -> String? {
         switch resolution {
-        case .openURL(let workspaceID, _), .runProcess(let workspaceID, _, _): return workspaceID
+        case .openURL(let workspaceID, _), .runProcess(let workspaceID, _, _), .resumePinnedThread(let workspaceID, _): return workspaceID
         case .openTerminal(let request): return request.workspaceID
         case .noWorkspace, .noMatch: return nil
         }
@@ -1035,6 +1038,7 @@ import workspacecore
             let title = target.windowListIndex.flatMap { detail.terminalRows.indices.contains($0) ? detail.terminalRows[$0].title : nil }
             return "terminal:\(title ?? "")"
         case .agent: return "agent:\(target.agentWindow?.effectiveLabel ?? target.agentWindow?.id ?? "")"
+        case .pinnedThread: return "pin:\(target.pinnedThreadID ?? "")"
         case .missingConfiguredProcess: return "process:\(target.processKey ?? "")"
         }
     }
@@ -1204,6 +1208,7 @@ import workspacecore
                 AppKitController.normalizedRunRowName($0.name ?? "") == AppKitController.normalizedRunRowName(processKey)
             }?.id
             return .runProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: templateID)
+        case .pinnedThread(let workspaceID, let pinID): return .resumePinnedThread(workspaceID: workspaceID, pinID: pinID)
         case .agentWindow(let record):
             guard let detail = AppKitController.workspaceDetail(record.workspaceID, in: overview),
                 let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == record.id }), let sessionID = row.sessionID
@@ -1236,6 +1241,7 @@ import workspacecore
                     && AppKitController.normalizedRunRowName($0.processKey ?? "") == AppKitController.normalizedRunRowName(processKey)
             }
         case .agentWindow(let record): target = targets.first { $0.kind == .agent && $0.agentWindow?.id == record.id }
+        case .pinnedThread(_, let pinID): target = targets.first { $0.kind == .pinnedThread && $0.pinnedThreadID == pinID }
         // A bell alert's session isn't one of the workspace's numbered run-shortcut targets, so it
         // has no run-shortcut target to resolve.
         case .terminalSession: target = nil
@@ -1408,6 +1414,20 @@ import workspacecore
                 resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
                 preserveWindowCycleSession: preserveWindowCycleSession)
             return true
+        case .resumePinnedThread(let workspaceID, let pinID):
+            guard
+                await runTerminalSessionMutationAndOpenPane(
+                    workspaceID: workspaceID,
+                    operation: { device in
+                        try SpacesDeviceClient.resumePinnedThread(
+                            workspaceID: workspaceID, pinID: pinID,
+                            context: DeviceRequestContext(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
+                    })
+            else { return false }
+            rememberWindowNavigationFocus(
+                resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
+                preserveWindowCycleSession: preserveWindowCycleSession)
+            return true
         case .noWorkspace, .noMatch: return false
         }
     }
@@ -1572,6 +1592,7 @@ import workspacecore
         case .openURL: return "browser"
         case .openTerminal: return "terminal"
         case .runProcess: return "process"
+        case .resumePinnedThread: return "pinned_thread"
         case .noWorkspace, .noMatch: return "none"
         }
     }

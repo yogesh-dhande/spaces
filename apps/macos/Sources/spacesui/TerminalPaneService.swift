@@ -599,7 +599,7 @@ import workspacecore
                 // workspace; only the selection moving with it is conditional.
                 let presentedWorkspaceID = host.terminalOpenMayPresentWorkspace(workspaceID: workspaceID, route: route) ? workspaceID : nil
                 host.applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: presentedWorkspaceID)
-                guard let request = host.terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID) else {
+                guard let request = host.terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID, deviceID: device.id) else {
                     completion(nil)
                     return
                 }

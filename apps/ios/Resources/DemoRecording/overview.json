@@ -326,6 +326,7 @@
       ],
       "workspaces" : [
         {
+          "pinnedThreads" : [],
           "codingAgentRows" : [
 
           ],
@@ -359,6 +360,7 @@
         {
           "baseBranch" : "main",
           "branch" : "main",
+          "pinnedThreads" : [],
           "codingAgentRows" : [
 
           ],
@@ -432,6 +434,7 @@
         {
           "baseBranch" : "main",
           "branch" : "main",
+          "pinnedThreads" : [],
           "codingAgentRows" : [
             {
               "activityState" : "waiting",
@@ -522,6 +525,7 @@
         {
           "baseBranch" : "main",
           "branch" : "main",
+          "pinnedThreads" : [],
           "codingAgentRows" : [
 
           ],

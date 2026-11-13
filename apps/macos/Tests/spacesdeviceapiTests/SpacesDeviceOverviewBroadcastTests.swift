@@ -163,6 +163,43 @@ private func encoded(_ payload: SpacesDeviceOverviewPayload) throws -> Data { tr
         #expect(decision == .deferUntil(lastBroadcastAt.addingTimeInterval(Self.interval)))
     }
 
+    /// Pinning, unpinning, renaming, and a pin going not-running all change what a client lists, so each
+    /// goes out at once rather than waiting out the metadata coalescing window.
+    @Test func aPinChangeCountsAsState() throws {
+        func payload(pins: [SpacesDeviceWorkspacePinnedThread], rowPinID: String?) -> SpacesDeviceOverviewPayload {
+            let row = SpacesDeviceWorkspaceCodingAgentRow(
+                id: "agent:1", workspaceID: "workspace-1", name: "Coding Agent", command: "claude", agentID: "agent-1", sessionID: "session-2",
+                runState: .running, activityState: .idle, brief: nil, briefUpdatedAt: nil, canStop: true, pinID: rowPinID,
+                pinUnavailableReason: rowPinID == nil ? nil : .conversationPinned)
+            return SpacesDeviceOverviewPayload(
+                workspaces: [
+                    SpacesDeviceWorkspaceSummary(
+                        id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/repo",
+                        isRunning: true, isHidden: false, isDefault: false, hasTrackedRuntimeIndicators: true, codingAgentRows: [row],
+                        pinnedThreads: pins)
+                ], sessions: [])
+        }
+        let unpinned = payload(pins: [], rowPinID: nil)
+        let pinned = payload(
+            pins: [SpacesDeviceWorkspacePinnedThread(id: "pin-1", workspaceID: "workspace-1", name: "Fix checkout", agentRowID: "agent:1")],
+            rowPinID: "pin-1")
+        let renamed = payload(
+            pins: [SpacesDeviceWorkspacePinnedThread(id: "pin-1", workspaceID: "workspace-1", name: "Fix checkout 500", agentRowID: "agent:1")],
+            rowPinID: "pin-1")
+        let notRunning = payload(
+            pins: [SpacesDeviceWorkspacePinnedThread(id: "pin-1", workspaceID: "workspace-1", name: "Fix checkout 500", agentRowID: nil)],
+            rowPinID: nil)
+        let now = Date()
+        for (previous, next) in [(unpinned, pinned), (pinned, renamed), (renamed, notRunning), (pinned, unpinned)] {
+            let decision = SpacesDeviceAPIServer.overviewBroadcastDecision(
+                previousBytes: try encoded(previous), newBytes: try encoded(next),
+                previousProjection: SpacesDeviceAPIServer.overviewStateProjection(previous),
+                newProjection: SpacesDeviceAPIServer.overviewStateProjection(next), lastBroadcastAt: now.addingTimeInterval(-0.1), now: now,
+                metadataCoalesceInterval: Self.interval)
+            #expect(decision == .sendNow)
+        }
+    }
+
     @Test func aSessionLiveTitleAndCwdChangeIsMetadataOnly() throws {
         let previous = makePayload(sessions: [makeSession(liveTitle: "vim", workingDirectory: "/repo")])
         let next = makePayload(sessions: [makeSession(liveTitle: "vim main.swift", workingDirectory: "/repo/src")])
