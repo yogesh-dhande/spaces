@@ -127,6 +127,11 @@ struct RowBriefGlyph: View {
     }
 }
 
+/// Small muted marker on every pinned row, running or not, so a pin reads as one at a glance.
+struct RowPinGlyph: View {
+    var body: some View { Image(systemName: "pin.fill").font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).accessibilityLabel("Pinned") }
+}
+
 /// Accent play glyph for rows whose primary action launches the row.
 struct RowPlayIndicator: View {
     var body: some View { Image(systemName: "play.fill").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent) }
@@ -147,6 +152,7 @@ extension SpacesMobileWorkspaceRuntimeRow {
         switch source {
         case .codingAgent(let agent): return StatusDot.Kind(runState: agent.runState, activityState: agent.activityState)
         case .browserSession: return nil
+        case .pinnedThread: return .idle
         case .terminal: return StatusDot.Kind(runState: runState)
         case .process:
             let kind = StatusDot.Kind(runState: runState)

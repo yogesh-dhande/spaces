@@ -319,12 +319,18 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
     /// a brief write never moves.
     public let briefUpdatedAt: String?
     public let canStop: Bool
+    /// The pinned thread this row is the running agent of, nil for an unpinned row.
+    public let pinID: String?
+    /// Why this row cannot be pinned, nil when it can. A pinned row reports `conversationPinned`.
+    public let pinUnavailableReason: SpacesDeviceAgentPinUnavailableReason?
 
     public init(
         id: String, workspaceID: String, name: String, command: String, agentID: String?, sessionID: String?, runState: SpacesDeviceRunState,
         activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil, brief: String?, briefUpdatedAt: String?, canStop: Bool,
-        liveTitle: String? = nil
+        liveTitle: String? = nil, pinID: String? = nil, pinUnavailableReason: SpacesDeviceAgentPinUnavailableReason? = nil
     ) {
+        self.pinID = pinID
+        self.pinUnavailableReason = pinUnavailableReason
         self.id = id
         self.workspaceID = workspaceID
         self.name = name
@@ -426,6 +432,8 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let config: SpacesDeviceWorkspaceConfig
     public let processRows: [SpacesDeviceWorkspaceProcessRow]
     public let codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]
+    /// Every pinned thread of the workspace in pin order (oldest first), running or not.
+    public let pinnedThreads: [SpacesDeviceWorkspacePinnedThread]
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
 
     public init(
@@ -433,8 +441,10 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         isRunning: Bool, isHidden: Bool, isDefault: Bool, notes: String? = nil, hasTrackedRuntimeIndicators: Bool,
         assignedPorts: [SpacesDeviceAssignedPort] = [], environment: [String: String] = [:], setupState: SpacesDeviceWorkspaceSetupState? = nil,
         config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(), processRows: [SpacesDeviceWorkspaceProcessRow] = [],
-        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
+        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], pinnedThreads: [SpacesDeviceWorkspacePinnedThread] = [],
+        terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
     ) {
+        self.pinnedThreads = pinnedThreads
         self.id = id
         self.projectID = projectID
         self.projectName = projectName
@@ -475,6 +485,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case config
         case processRows
         case codingAgentRows
+        case pinnedThreads
         case terminalRows
     }
 
@@ -501,6 +512,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         config = try container.decodeIfPresent(SpacesDeviceWorkspaceConfig.self, forKey: .config) ?? SpacesDeviceWorkspaceConfig()
         processRows = try container.decodeIfPresent([SpacesDeviceWorkspaceProcessRow].self, forKey: .processRows) ?? []
         codingAgentRows = try container.decodeIfPresent([SpacesDeviceWorkspaceCodingAgentRow].self, forKey: .codingAgentRows) ?? []
+        pinnedThreads = try container.decode([SpacesDeviceWorkspacePinnedThread].self, forKey: .pinnedThreads)
         terminalRows = try container.decodeIfPresent([SpacesDeviceWorkspaceTerminalRow].self, forKey: .terminalRows) ?? []
     }
 
@@ -2362,6 +2374,46 @@ public struct SpacesDeviceStartWorkspaceCommandSessionRequest: Codable, Sendable
     }
 }
 
+/// Pins a coding-agent row under `name`, addressed by the agent session id its overview row carries. The
+/// daemon refuses a row `SpacesDeviceAgentPinUnavailableReason` rules out, an empty name, and a name the
+/// workspace already uses.
+public struct SpacesDevicePinAgentSessionRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let agentID: String
+    public let name: String
+
+    public init(workspaceID: String, agentID: String, name: String) {
+        self.workspaceID = workspaceID
+        self.agentID = agentID
+        self.name = name
+    }
+}
+
+/// Addresses one pinned thread: unpinning it, or resuming it as a new terminal.
+public struct SpacesDevicePinnedThreadRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let pinID: String
+
+    public init(workspaceID: String, pinID: String) {
+        self.workspaceID = workspaceID
+        self.pinID = pinID
+    }
+}
+
+/// Renames a pinned thread. Unlike a coding-agent rename, an empty name is refused: a pin has no reported
+/// name to fall back to.
+public struct SpacesDeviceRenamePinnedThreadRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let pinID: String
+    public let name: String
+
+    public init(workspaceID: String, pinID: String, name: String) {
+        self.workspaceID = workspaceID
+        self.pinID = pinID
+        self.name = name
+    }
+}
+
 /// Spawns a coding-agent terminal session on a paired device (`spaces agent spawn --device`). Unlike
 /// the local profile spawn, `workspaceID` is required: a remote client has no shared working directory
 /// to infer the owning workspace from, so it must name the workspace explicitly. The daemon gates
@@ -2658,6 +2710,13 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case stopCodingAgent(SpacesDeviceCodingAgentMutationRequest)
     /// Renames a coding-agent row whose name lives on its session rather than in the workspace config.
     case renameAgentSession(SpacesDeviceAgentSessionRenameRequest)
+    /// Pins a coding-agent row as a named, resumable thread; see `SpacesDevicePinAgentSessionRequest`.
+    case pinAgentSession(SpacesDevicePinAgentSessionRequest)
+    /// Removes a pin. A running pin's row stays, keeping the pin's name; a not-running pin disappears.
+    case unpinThread(SpacesDevicePinnedThreadRequest)
+    case renamePinnedThread(SpacesDeviceRenamePinnedThreadRequest)
+    /// Resumes a not-running pin as a new terminal in its workspace, returning the launched session.
+    case resumePinnedThread(SpacesDevicePinnedThreadRequest)
     /// Dismisses alerts on the device so the dismissal reaches every client; see `SpacesDeviceDismissAlertsRequest`.
     case dismissAlerts(SpacesDeviceDismissAlertsRequest)
     /// Stores the calling phone's push registration on its pairing record; see `SpacesDeviceRegisterPushNotificationsRequest`.
@@ -2822,6 +2881,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .restartWorkspaceProcess: "restartWorkspaceProcess"
         case .stopCodingAgent: "stopCodingAgent"
         case .renameAgentSession: "renameAgentSession"
+        case .pinAgentSession: "pinAgentSession"
+        case .unpinThread: "unpinThread"
+        case .renamePinnedThread: "renamePinnedThread"
+        case .resumePinnedThread: "resumePinnedThread"
         case .dismissAlerts: "dismissAlerts"
         case .registerPushNotifications: "registerPushNotifications"
         case .unregisterPushNotifications: "unregisterPushNotifications"
@@ -2916,8 +2979,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
 
     public var isSubscriptionCommand: Bool {
         switch self {
-        case .subscribe, .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature,
-            .subscribeWorkspaceFileSignature, .subscribeWorkspaceFileListSignature:
+        case .subscribe, .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
+            .subscribeWorkspaceFileListSignature:
             true
         default: false
         }
@@ -3041,6 +3104,10 @@ extension SpacesDeviceAPICommand: Codable {
         case restartWorkspaceProcess
         case stopCodingAgent
         case renameAgentSession
+        case pinAgentSession
+        case unpinThread
+        case renamePinnedThread
+        case resumePinnedThread
         case dismissAlerts
         case registerPushNotifications
         case unregisterPushNotifications
@@ -3157,6 +3224,10 @@ extension SpacesDeviceAPICommand: Codable {
             self = .restartWorkspaceProcess(try container.decode(SpacesDeviceWorkspaceProcessMutationRequest.self, forKey: key))
         case .stopCodingAgent: self = .stopCodingAgent(try container.decode(SpacesDeviceCodingAgentMutationRequest.self, forKey: key))
         case .renameAgentSession: self = .renameAgentSession(try container.decode(SpacesDeviceAgentSessionRenameRequest.self, forKey: key))
+        case .pinAgentSession: self = .pinAgentSession(try container.decode(SpacesDevicePinAgentSessionRequest.self, forKey: key))
+        case .unpinThread: self = .unpinThread(try container.decode(SpacesDevicePinnedThreadRequest.self, forKey: key))
+        case .renamePinnedThread: self = .renamePinnedThread(try container.decode(SpacesDeviceRenamePinnedThreadRequest.self, forKey: key))
+        case .resumePinnedThread: self = .resumePinnedThread(try container.decode(SpacesDevicePinnedThreadRequest.self, forKey: key))
         case .dismissAlerts: self = .dismissAlerts(try container.decode(SpacesDeviceDismissAlertsRequest.self, forKey: key))
         case .registerPushNotifications:
             self = .registerPushNotifications(try container.decode(SpacesDeviceRegisterPushNotificationsRequest.self, forKey: key))
@@ -3280,6 +3351,10 @@ extension SpacesDeviceAPICommand: Codable {
         case .restartWorkspaceProcess(let payload): try container.encode(payload, forKey: .restartWorkspaceProcess)
         case .stopCodingAgent(let payload): try container.encode(payload, forKey: .stopCodingAgent)
         case .renameAgentSession(let payload): try container.encode(payload, forKey: .renameAgentSession)
+        case .pinAgentSession(let payload): try container.encode(payload, forKey: .pinAgentSession)
+        case .unpinThread(let payload): try container.encode(payload, forKey: .unpinThread)
+        case .renamePinnedThread(let payload): try container.encode(payload, forKey: .renamePinnedThread)
+        case .resumePinnedThread(let payload): try container.encode(payload, forKey: .resumePinnedThread)
         case .dismissAlerts(let payload): try container.encode(payload, forKey: .dismissAlerts)
         case .registerPushNotifications(let payload): try container.encode(payload, forKey: .registerPushNotifications)
         case .unregisterPushNotifications(let payload): try container.encode(payload, forKey: .unregisterPushNotifications)

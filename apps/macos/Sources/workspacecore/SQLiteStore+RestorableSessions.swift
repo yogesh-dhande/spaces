@@ -90,7 +90,7 @@ extension SQLiteStore {
         \(typedAgentIdentity("agent_sessions.detected_agent_kind")),
         \(typedAgentIdentity("agent_sessions.session_key")),
         CASE terminal_sessions.kind WHEN 'shell' THEN \(source.command) ELSE terminal_sessions.launch_command END,
-        COALESCE(NULLIF(terminal_runtime_states.working_directory, ''), terminal_sessions.working_directory),
+        \(restorableWorkingDirectoryColumn),
         COALESCE(
           NULLIF(\(typedAgentIdentity("agent_sessions.user_label")), ''),
           NULLIF(\(typedAgentIdentity("agent_sessions.label")), ''),
@@ -100,6 +100,11 @@ extension SQLiteStore {
         COALESCE(CASE WHEN automations.kind = 'agent' THEN automation_runs.automation_id END, '')
         """
     }
+
+    /// The directory a captured agent comes back in: the runtime row's live one when joined in, else the
+    /// session's launch directory. Shared with pinning, which resumes a conversation where it was working.
+    static let restorableWorkingDirectoryColumn =
+        "COALESCE(NULLIF(terminal_runtime_states.working_directory, ''), terminal_sessions.working_directory)"
 
     /// `column` read off the joined `agent_sessions` row, which a `.shell`-kind session takes only while
     /// that row's status says the agent lifecycle it describes has not finished.

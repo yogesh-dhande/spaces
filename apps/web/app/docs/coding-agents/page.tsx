@@ -204,6 +204,23 @@ export default function CodingAgentsDocsPage() {
         </Prose>
       </Section>
 
+      <Section id="pinned-threads" title="Pinned threads">
+        <Prose>
+          Pin a conversation you keep coming back to. Right-click an agent in the sidebar (long-press
+          on iPhone), choose Pin, and give it a name. The pinned thread stays at the top of its
+          workspace&apos;s agents under that name, even after the agent stops.
+        </Prose>
+        <Prose>
+          Click a pinned thread that is not running and Spaces resumes that conversation in a new
+          terminal. A pin stays on the conversation you pinned: if you run{" "}
+          <InlineCode>/clear</InlineCode> in it, the terminal carries on as an ordinary agent and the
+          pin stays behind, ready to resume. Pin is unavailable until the agent has a conversation it
+          can resume, and for one-shot runs such as <InlineCode>claude -p</InlineCode>. Unpin keeps a
+          running agent under its name and removes a stopped one from the list. On iPhone, the Agents
+          tab gathers every pinned thread in a Pinned group.
+        </Prose>
+      </Section>
+
       <Section id="stopping" title="Stopping an agent">
         <Prose>
           End an agent and its terminal from its sidebar row, from the iPhone Agents tab, or with{" "}

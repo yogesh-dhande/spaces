@@ -18,13 +18,16 @@ struct SpacesDeviceOverviewBuilder {
         /// `WorkspaceOrchestrator.hasTrackedRuntimeIndicators` over the three row lists above, decided by
         /// the caller because only the orchestrator can read whether a row's terminal session has ended.
         let hasTrackedRuntimeIndicators: Bool
+        /// The workspace's pins in pin order.
+        let pinnedThreads: [PinnedThreadRecord]
 
         init(
             project: ProjectRecord, workspace: WorkspaceRecord, settings: WorkspaceSettings? = nil, runningProcesses: [RunningProcessRecord] = [],
             agentWindows: [AgentWindowRecord] = [], windows: [WindowRecord] = [], hasTrackedRuntimeIndicators: Bool = false,
             assignedPorts: [SpacesDeviceAssignedPort] = [], environment: [String: String] = [:], resolvedBrowserSessions: [BrowserSession] = [],
-            setupState: WorkspaceSetupState? = nil
+            setupState: WorkspaceSetupState? = nil, pinnedThreads: [PinnedThreadRecord] = []
         ) {
+            self.pinnedThreads = pinnedThreads
             self.project = project
             self.workspace = workspace
             self.settings = settings
@@ -106,7 +109,8 @@ struct SpacesDeviceOverviewBuilder {
                 assignedPorts: descriptor.assignedPorts, environment: descriptor.environment,
                 setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
                 config: workspaceConfig(from: descriptor.settings, resolvedBrowserSessions: descriptor.resolvedBrowserSessions),
-                processRows: runtimeRows.processes, codingAgentRows: runtimeRows.agents, terminalRows: runtimeRows.terminals)
+                processRows: runtimeRows.processes, codingAgentRows: runtimeRows.agents, pinnedThreads: pinnedThreadSummaries(for: descriptor),
+                terminalRows: runtimeRows.terminals)
         }
 
         let workspaceSessionSummaries = workspaceRows.sorted { lhs, rhs in
@@ -380,25 +384,61 @@ struct SpacesDeviceOverviewBuilder {
         // terminal. It is named by that session: the user's rename when one is stored, else the stored
         // label, which registration materializes even when nothing reported one. The literal is reached
         // only by a row stored before labels were materialized, and is pure display, never a focus name.
+        let pinIDByAgentID = Dictionary(
+            descriptor.pinnedThreads.compactMap { pin in pin.agentSessionID.map { ($0, pin.id) } }, uniquingKeysWith: { first, _ in first })
+        let pinnedSessionKeys = Set(descriptor.pinnedThreads.map(\.sessionKey))
         for agent in descriptor.agentWindows {
             if let claimedKey = terminalTrackingKey(agent) { claimedTerminalKeys.insert(claimedKey) }
             rows.append(
                 codingAgentRow(
                     id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id, name: agent.effectiveLabel ?? "Coding Agent",
-                    command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", agent: agent, sessionsByID: sessionsByID))
+                    command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", agent: agent, sessionsByID: sessionsByID,
+                    pinID: pinIDByAgentID[agent.id], conversationIsPinned: agent.sessionKey.map(pinnedSessionKeys.contains) ?? false))
         }
-        return CodingAgentRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
+        // Pinned rows lead in pin order, which is the order every client lists them in; the rest keep the
+        // agents' own order.
+        let pinOrder = Dictionary(uniqueKeysWithValues: descriptor.pinnedThreads.enumerated().map { ($1.id, $0) })
+        let pinned = rows.filter { $0.pinID != nil }.sorted { (pinOrder[$0.pinID ?? ""] ?? 0) < (pinOrder[$1.pinID ?? ""] ?? 0) }
+        return CodingAgentRows(rows: pinned + rows.filter { $0.pinID == nil }, claimedTerminalKeys: claimedTerminalKeys)
+    }
+
+    private static func pinnedThreadSummaries(for descriptor: WorkspaceDescriptor) -> [SpacesDeviceWorkspacePinnedThread] {
+        let agentIDs = Set(descriptor.agentWindows.map(\.id))
+        return descriptor.pinnedThreads.map { pin in
+            let agentRowID = pin.agentSessionID.flatMap { agentIDs.contains($0) ? "agent:\($0)" : nil }
+            // A running pin's brief is on its row; the pin carries one only while it has no row to show it.
+            return SpacesDeviceWorkspacePinnedThread(
+                id: pin.id, workspaceID: pin.workspaceID, name: pin.name, agentRowID: agentRowID, brief: agentRowID == nil ? pin.brief : nil,
+                briefUpdatedAt: agentRowID == nil ? pin.briefUpdatedAt : nil)
+        }
     }
 
     private static func codingAgentRow(
-        id: String, workspaceID: String, name: String, command: String, agent: AgentWindowRecord, sessionsByID: [String: TerminalSessionCatalogEntry]
+        id: String, workspaceID: String, name: String, command: String, agent: AgentWindowRecord, sessionsByID: [String: TerminalSessionCatalogEntry],
+        pinID: String?, conversationIsPinned: Bool
     ) -> SpacesDeviceWorkspaceCodingAgentRow {
         let rawSessionID = terminalSessionID(for: agent)
         let session = rawSessionID.flatMap { sessionsByID[$0] }
         return SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, agentID: agent.id, sessionID: session?.sessionID,
             runState: agentRunState(session: session), activityState: activityState(for: agent), updatedAt: agent.updatedAt, brief: agent.brief,
-            briefUpdatedAt: agent.briefUpdatedAt, canStop: true, liveTitle: session?.liveTitle)
+            briefUpdatedAt: agent.briefUpdatedAt, canStop: true, liveTitle: session?.liveTitle, pinID: pinID,
+            pinUnavailableReason: SpacesDeviceAgentPinUnavailableReason.evaluate(
+                sessionKey: agent.sessionKey, relaunchCommand: pinRelaunchCommand(agent: agent, session: session),
+                conversationIsPinned: pinID != nil || conversationIsPinned))
+    }
+
+    /// The command a pin would resume, chosen the way the restorable capture chooses it (see
+    /// `SQLiteStore.pinnableConversation`): a typed agent relaunches from its terminal's foreground command,
+    /// falling back to the one sampled onto its row, and an agent Spaces launched from its session's own.
+    private static func pinRelaunchCommand(agent: AgentWindowRecord, session: TerminalSessionCatalogEntry?) -> String? {
+        guard let session else { return agent.launchCommand }
+        switch session.kind {
+        case .shell:
+            let foreground = session.runtimeState.foregroundCommand ?? ""
+            return foreground.isEmpty ? agent.launchCommand : foreground
+        case .agent, .process, .automation: return session.launchConfiguration.launchCommand
+        }
     }
 
     private static func workspaceTerminalRows(

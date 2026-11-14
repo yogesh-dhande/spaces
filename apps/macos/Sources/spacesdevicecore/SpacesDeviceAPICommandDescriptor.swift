@@ -172,6 +172,13 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "stopCodingAgent", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .renameAgentSession:
             return Self.descriptor(wireKey: "renameAgentSession", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .pinAgentSession: return Self.descriptor(wireKey: "pinAgentSession", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .unpinThread: return Self.descriptor(wireKey: "unpinThread", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .renamePinnedThread:
+            return Self.descriptor(wireKey: "renamePinnedThread", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .resumePinnedThread:
+            return Self.descriptor(
+                wireKey: "resumePinnedThread", lane: .workspaceTerminalLaunch, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .dismissAlerts: return Self.descriptor(wireKey: "dismissAlerts", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .registerPushNotifications:
             return Self.descriptor(wireKey: "registerPushNotifications", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)

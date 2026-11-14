@@ -46,7 +46,7 @@
                 showsDeviceSegment: false)
 
             XCTAssertEqual(groups.map(\.kind), [.blocked, .done, .working])
-            XCTAssertEqual(groups.map { $0.entries.map(\.row.id) }, [["agent-waiting"], ["agent-done"], ["agent-spinning"]])
+            XCTAssertEqual(groups.map { $0.entries.map(\.runtimeRow.id) }, [["agent:agent-waiting"], ["agent:agent-done"], ["agent:agent-spinning"]])
             XCTAssertEqual(groups[0].entries[0].runtimeRow.brief, brief)
         }
 

@@ -367,8 +367,9 @@ extension SQLiteStore {
     /// clears the generation's records, in one transaction. A conversation held by a row of some other
     /// terminal keeps its brief, since the user resumed it by hand while the offer stood. The skipped
     /// sessions' own rows do not count: an ended session's row can linger until the next reconcile pass,
-    /// and counting it would make the outcome depend on that timing. Restore never calls this: restored
-    /// agents show the briefs their conversations kept.
+    /// and counting it would make the outcome depend on that timing. A pinned conversation keeps its brief
+    /// whatever the user skipped: the pin outlives the offer and still shows it. Restore never calls this:
+    /// restored agents show the briefs their conversations kept.
     public func discardRestorableSessions(generation: String) throws {
         try withImmediateTransaction {
             try execute(
@@ -379,6 +380,11 @@ extension SQLiteStore {
                         WHERE restorable_sessions.generation = ?
                           AND restorable_sessions.workspace_id = agent_conversation_briefs.workspace_id
                           AND restorable_sessions.agent_session_key = agent_conversation_briefs.session_key
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM pinned_threads
+                        WHERE pinned_threads.workspace_id = agent_conversation_briefs.workspace_id
+                          AND pinned_threads.session_key = agent_conversation_briefs.session_key
                       )
                       AND NOT EXISTS (
                         SELECT 1 FROM agent_sessions

@@ -85,6 +85,7 @@ struct CommandPaletteItem: Sendable {
         case .workspaceProcess(let workspaceID, let processID): return "process:\(workspaceID):\(processID)"
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
         case .agentWindow(let record): return "agent:\(record.id)"
+        case .pinnedThread(let workspaceID, let pinID): return "pinned-thread:\(workspaceID):\(pinID)"
         case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
         }
     }
@@ -104,14 +105,14 @@ struct CommandPaletteItem: Sendable {
         case .browser: return "globe"
         case .process, .missingConfiguredProcess: return "terminal"
         case .window: return (detail?.localizedStandardContains("http") == true) ? "globe" : "chevron.left.forwardslash.chevron.right"
-        case .agent: return "cpu.fill"
+        case .agent, .pinnedThread: return "cpu.fill"
         }
     }
 
     var typeKind: RowPrimitives.TypeKind {
         switch kind {
         case .browser: return .browser
-        case .agent: return .agent
+        case .agent, .pinnedThread: return .agent
         case .process, .window, .missingConfiguredProcess: return .process
         }
     }
@@ -131,6 +132,7 @@ struct CommandPaletteItem: Sendable {
         case .workspaceProcess(let workspaceID, let processID): return "process:\(workspaceID):\(processID)"
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
         case .agentWindow(let record): return "agent:\(record.workspaceID):\(record.id)"
+        case .pinnedThread(let workspaceID, let pinID): return "pinned-thread:\(workspaceID):\(pinID)"
         case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
         }
     }
@@ -223,6 +225,7 @@ extension CommandPaletteController {
         case .workspaceProcess: return .process
         case .workspaceMissingConfiguredProcess: return .missingConfiguredProcess
         case .agentWindow: return .agent
+        case .pinnedThread: return .pinnedThread
         case .terminalSession: return .window
         case nil:
             if agentStatus != nil { return .agent }
@@ -263,9 +266,9 @@ extension CommandPaletteController {
         }
     }
 
-    nonisolated static func buildCommandPaletteItems(
-        overview: SpacesDeviceOverviewPayload, alertsGroups: [AppKitController.AlertsGroup] = []
-    ) -> [CommandPaletteItem] {
+    nonisolated static func buildCommandPaletteItems(overview: SpacesDeviceOverviewPayload, alertsGroups: [AppKitController.AlertsGroup] = [])
+        -> [CommandPaletteItem]
+    {
         var items: [CommandPaletteItem] = buildCommandPaletteAlertsItems(alertsGroups: alertsGroups)
         items.append(contentsOf: deviceCommandPaletteWorkspaceItems(from: overview, alertsGroups: alertsGroups))
         return items
@@ -291,14 +294,15 @@ extension CommandPaletteController {
                 let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
                 let windows = AppKitController.deviceTerminalWindows(from: detail.terminalRows)
                 let processes = AppKitController.runningProcesses(from: detail.processRows)
-                let agentWindows = AppKitController.agentWindows(from: detail.codingAgentRows)
+                let (agentWindows, pinnedThreads) = AppKitController.agentTargetInputs(from: detail)
                 let settings = AppKitController.localWorkspaceSettings(from: detail.config)
                 let browserSessions = detail.config.resolvedBrowserSessions.map(AppKitController.localBrowserSession(from:))
                 let processEntries = AppKitController.orderedWorkspaceRunProcessEntries(
                     configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
                 let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
                 let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
-                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows)
+                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows,
+                    pinnedThreads: pinnedThreads)
                 for (offset, target) in shortcutTargets.enumerated() {
                     let itemID = "\(workspace.id)::\(offset)"
                     switch target.kind {
@@ -354,6 +358,15 @@ extension CommandPaletteController {
                                 focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey))))
+                    case .pinnedThread:
+                        guard let pin = detail.pinnedThreads.first(where: { $0.id == target.pinnedThreadID }) else { continue }
+                        let request = AppKitController.WindowFocusRequest.pinnedThread(workspaceID: workspace.id, pinID: pin.id)
+                        items.append(
+                            CommandPaletteItem(
+                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
+                                workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
+                                kind: target.kind, label: pin.name, detail: nil, status: .idle, focusRequest: request,
+                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: request)))
                     case .agent:
                         guard let agentWindow = target.agentWindow,
                             let agentRow = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
@@ -404,8 +417,7 @@ extension CommandPaletteController {
             do {
                 let localOverview = try SpacesDeviceClient.localOverview(
                     database: SpacesClientDatabase.defaultDatabase(), clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                return .success(
-                    buildCommandPaletteItems(overview: localOverview.overview, alertsGroups: alertsGroups))
+                return .success(buildCommandPaletteItems(overview: localOverview.overview, alertsGroups: alertsGroups))
             } catch { return .failure(error) }
         }.value
     }

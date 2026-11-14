@@ -161,7 +161,14 @@ private struct DeviceSyncState {
     private var transientlyExpandedWorkspaceID: String?
     /// The runtime target currently being renamed inline, if any. The row cell swaps
     /// its title for an editor while this matches (same pattern as the device rename).
-    private var renamingRuntimeTarget: (workspaceID: String, item: SidebarRuntimeTargetItem)?
+    /// `purpose` is what Return does with the typed name: `.pin` pins the agent row under it instead of
+    /// renaming, through the same editor so both read the same.
+    private var renamingRuntimeTarget: (workspaceID: String, item: SidebarRuntimeTargetItem, purpose: RuntimeTargetNamePurpose)?
+
+    private enum RuntimeTargetNamePurpose {
+        case rename
+        case pin
+    }
     weak var renamingRuntimeTargetField: NSTextField?
     /// Per-remote-device overview pull/push bookkeeping: last successful fetch instant, whether a
     /// pull is in flight, and the two generation counters that gate a stale pull result. A device
@@ -2086,9 +2093,7 @@ private struct DeviceSyncState {
 
     /// Rebuilds one device's header row alone, for a change the header shows that no section data moved
     /// with (an update attempt starting, or the wait for a restarting device running long).
-    func reloadDeviceHeader(deviceID: String) {
-        host.outlineView.reloadItem(outlineItemRef(for: .device(deviceID)))
-    }
+    func reloadDeviceHeader(deviceID: String) { host.outlineView.reloadItem(outlineItemRef(for: .device(deviceID))) }
 
     private func outlineItemRef(for item: OutlineItem) -> OutlineItemRef {
         let key = item.cacheKey
@@ -2524,7 +2529,7 @@ private struct DeviceSyncState {
         switch kind {
         case .browser: return "globe"
         case .process, .window, .missingConfiguredProcess: return "terminal"
-        case .agent: return "sparkles"
+        case .agent, .pinnedThread: return "sparkles"
         }
     }
 
@@ -2641,6 +2646,17 @@ private struct DeviceSyncState {
                 briefGlyph.setContentHuggingPriority(.required, for: .horizontal)
                 briefGlyph.setContentCompressionResistancePriority(.required, for: .horizontal)
                 row.addArrangedSubview(briefGlyph)
+            }
+
+            if item.pinID != nil {
+                let pinGlyph = NSImageView()
+                pinGlyph.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Pinned")?.withSymbolConfiguration(
+                    .init(pointSize: 10, weight: .regular))
+                pinGlyph.contentTintColor = Theme.mutedSecondary
+                pinGlyph.setAccessibilityLabel("Pinned")
+                pinGlyph.setContentHuggingPriority(.required, for: .horizontal)
+                pinGlyph.setContentCompressionResistancePriority(.required, for: .horizontal)
+                row.addArrangedSubview(pinGlyph)
             }
         }
 
@@ -2824,7 +2840,30 @@ private struct DeviceSyncState {
         // Rename writes the new name through the daemon (a session rename command or a workspace
         // config edit), so it is a daemon action too.
         addItem("Rename", symbol: "pencil", action: #selector(renameRuntimeTargetMenuItem(_:)), isEnabled: daemonActionsEnabled)
-        if item.kind != .browser {
+        switch Self.pinMenuState(item: item) {
+        case .pin(let unavailableReason):
+            let pinMenuItem = NSMenuItem(title: "Pin…", action: #selector(pinRuntimeTargetMenuItem(_:)), keyEquivalent: "")
+            pinMenuItem.target = self
+            pinMenuItem.image = NSImage(systemSymbolName: "pin", accessibilityDescription: nil)
+            pinMenuItem.representedObject = context
+            pinMenuItem.isEnabled = daemonActionsEnabled && unavailableReason == nil
+            if let unavailableReason {
+                // `NSMenuItem.subtitle` needs macOS 14.4 and the target is 14, so the reason is a second
+                // line of the attributed title.
+                let title = NSMutableAttributedString(
+                    string: "Pin…", attributes: [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.disabledControlTextColor])
+                title.append(
+                    NSAttributedString(
+                        string: "\n\(unavailableReason.message)",
+                        attributes: [.font: NSFont.menuFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+                pinMenuItem.attributedTitle = title
+            }
+            menu.addItem(pinMenuItem)
+        case .unpin: addItem("Unpin", symbol: "pin.slash", action: #selector(unpinRuntimeTargetMenuItem(_:)), isEnabled: daemonActionsEnabled)
+        case nil: break
+        }
+        // A not-running pin has no session to move into a window.
+        if item.kind != .browser && item.kind != .pinnedThread {
             // Only session-backed targets can move into a panel window; a target that
             // hasn't started yet keeps the item visible but disabled for discoverability.
             // Moving an already-open session into a window is client-side, so an outage does not
@@ -2854,7 +2893,9 @@ private struct DeviceSyncState {
         // pane does. The device records the dismissal, so it is a daemon action like the rest.
         if !item.undismissedAttentionIDs.isEmpty {
             menu.addItem(.separator())
-            addItem("Dismiss Alert", symbol: "checkmark.circle", action: #selector(dismissRuntimeTargetAlertMenuItem(_:)), isEnabled: daemonActionsEnabled)
+            addItem(
+                "Dismiss Alert", symbol: "checkmark.circle", action: #selector(dismissRuntimeTargetAlertMenuItem(_:)), isEnabled: daemonActionsEnabled
+            )
         }
         return menu
     }
@@ -2881,8 +2922,34 @@ private struct DeviceSyncState {
 
     @objc private func renameRuntimeTargetMenuItem(_ sender: NSMenuItem) {
         guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
-        renamingRuntimeTarget = (context.workspaceID, context.item)
+        renamingRuntimeTarget = (context.workspaceID, context.item, .rename)
         reloadRuntimeTargetRow(workspaceID: context.workspaceID, key: context.item.key)
+    }
+
+    /// Opens the inline name editor prefilled with the row's current name; Return pins under the typed name.
+    @objc private func pinRuntimeTargetMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        renamingRuntimeTarget = (context.workspaceID, context.item, .pin)
+        reloadRuntimeTargetRow(workspaceID: context.workspaceID, key: context.item.key)
+    }
+
+    @objc private func unpinRuntimeTargetMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        host.unpinSidebarRuntimeTarget(workspaceID: context.workspaceID, item: context.item)
+    }
+
+    enum PinMenuState: Equatable {
+        /// The item to pin the row, disabled with the reason when it cannot be pinned yet.
+        case pin(unavailableReason: SpacesDeviceAgentPinUnavailableReason?)
+        case unpin
+    }
+
+    /// Which pin item a row's menu carries: Pin on an unpinned agent row, Unpin on any pinned row (running
+    /// or not), nothing on rows that are not agents.
+    nonisolated static func pinMenuState(item: SidebarRuntimeTargetItem) -> PinMenuState? {
+        if item.pinID != nil { return .unpin }
+        guard item.kind == .agent, item.agentID != nil else { return nil }
+        return .pin(unavailableReason: item.pinUnavailableReason)
     }
 
     @objc private func toggleRuntimeTargetComeBackLaterMenuItem(_ sender: NSMenuItem) {
@@ -2907,7 +2974,10 @@ private struct DeviceSyncState {
         renamingRuntimeTarget = nil
         renamingRuntimeTargetField = nil
         reloadRuntimeTargetRow(workspaceID: renaming.workspaceID, key: renaming.item.key)
-        host.commitSidebarRuntimeTargetRename(workspaceID: renaming.workspaceID, item: renaming.item, newTitle: newTitle)
+        switch renaming.purpose {
+        case .rename: host.commitSidebarRuntimeTargetRename(workspaceID: renaming.workspaceID, item: renaming.item, newTitle: newTitle)
+        case .pin: host.pinSidebarAgent(workspaceID: renaming.workspaceID, item: renaming.item, name: newTitle)
+        }
     }
 
     private func reloadRuntimeTargetRow(workspaceID: String, key: String) {

@@ -159,6 +159,20 @@
             XCTAssertTrue(model.canRename(row: row), "A configured process row is renamable outside Demo Mode.")
         }
 
+        func testPinActionsAreHiddenInDemoModeAndOfferedOutsideIt() {
+            let unpinned = SpacesMobileWorkspaceRuntimeRow(
+                source: .codingAgent(makeAgentRow(id: "agent-a", runState: .running, activityState: .idle)))
+            let pinned = SpacesMobileWorkspaceRuntimeRow(source: .pinnedThread(makePin(id: "pin-a")))
+            let model = SpacesMobileAppModel()
+            XCTAssertTrue(model.canPin(row: unpinned))
+            XCTAssertTrue(model.canUnpin(row: pinned))
+
+            model.setDemoMode(true)
+
+            XCTAssertFalse(model.canPin(row: unpinned))
+            XCTAssertFalse(model.canUnpin(row: pinned))
+        }
+
         // MARK: - Mutation identity guard across a Demo Mode toggle
 
         func testMutationInFlightAcrossDemoToggleDoesNotPublishStaleOverview() async throws {

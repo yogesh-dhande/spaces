@@ -96,7 +96,7 @@ import Testing
         case .archiveWorkspace, .deleteProject: .workspaceTeardown
         case .stopWorkspace: .workspaceStop
         case .runWorkspaceSetup: .workspaceSetup
-        case .startWorkspaceCommandSession, .resumeLostShell: .workspaceTerminalLaunch
+        case .startWorkspaceCommandSession, .resumeLostShell, .resumePinnedThread: .workspaceTerminalLaunch
         case .createWorkspace: .workspaceCreate
         case .createProject, .previewGitProject: .projectClone
         case .importProject, .exportProject: .projectConfigFile
@@ -132,10 +132,11 @@ import Testing
         case .createProject: 600
         case .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .startWorkspaceCommandSession, .resumeLostShell,
-            .stopWorkspaceTerminal, .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess,
-            .stopCodingAgent, .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer, .spawnAgentSession, .killAgentSession, .createAutomation,
-            .updateAutomation, .setAutomationNextRun, .deleteAutomation, .triggerAutomation, .cancelAutomationRun, .endAutomationAgents,
-            .restoreSessions, .discardRestorableSessions, .workspaceFileDelete, .workspaceFileCreateDirectory, .workspaceFileRename:
+            .resumePinnedThread, .stopWorkspaceTerminal, .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess,
+            .restartWorkspaceProcess, .stopCodingAgent, .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer, .spawnAgentSession,
+            .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun, .deleteAutomation, .triggerAutomation,
+            .cancelAutomationRun, .endAutomationAgents, .restoreSessions, .discardRestorableSessions, .workspaceFileDelete,
+            .workspaceFileCreateDirectory, .workspaceFileRename:
             60
         case .agentHooksStatus: 20
         // Clamped to `TerminalScrollbackBudget.defaultMaxBytes`, written out here as its literal value for
@@ -144,11 +145,12 @@ import Testing
         case .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileWrite, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease,
             .workspaceDiffFileChunk, .workspaceFileList, .workspaceRefList:
             60
-        case .pair, .ping, .daemonStatus, .requestDaemonRestart, .startDaemonSelfUpdate, .setDaemonUpdateChannel, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
-            .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
-            .renameAgentSession, .dismissAlerts, .registerPushNotifications, .unregisterPushNotifications, .visitTerminalSession, .setComeBackLater,
-            .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk,
-            .subscribe, .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
+        case .pair, .ping, .daemonStatus, .requestDaemonRestart, .startDaemonSelfUpdate, .setDaemonUpdateChannel, .overview, .previewProject,
+            .listDirectories, .workspaceCreateOptions, .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata,
+            .renameTerminalSession, .renameAgentSession, .pinAgentSession, .unpinThread, .renamePinnedThread, .dismissAlerts,
+            .registerPushNotifications, .unregisterPushNotifications, .visitTerminalSession, .setComeBackLater, .state, .terminalControl,
+            .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
+            .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
             .subscribeWorkspaceFileListSignature, .openServiceTunnel, .listAgentSessions, .writeAgentBrief, .readAgentBrief, .clearAgentBrief,
             .listAutomations, .listAutomationRuns, .workspaceReviewCommentList, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete,
             .workspaceReviewCommentsSend:

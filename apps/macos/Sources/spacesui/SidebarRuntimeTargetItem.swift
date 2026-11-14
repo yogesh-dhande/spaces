@@ -54,13 +54,19 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// The row's Come Back Later toggle, for the context menu. Nil for a row that has no device row to
     /// mark (a browser session, a configured process that has no row yet).
     let comeBackLater: ComeBackLaterToggle?
+    /// The pinned thread this row is, or is attached to: set on a not-running pin and on a running agent
+    /// row that is pinned. Rename and Unpin act on the pin, not on the row's session.
+    let pinID: String?
+    /// Why an unpinned agent row cannot be pinned yet. Nil when it can, and on every row that is already
+    /// pinned or is not an agent.
+    let pinUnavailableReason: SpacesDeviceAgentPinUnavailableReason?
 
     init(
         key: String, title: String, detail: String?, kind: AppKitController.WorkspaceRunShortcutTarget.Kind, runState: SpacesDeviceRunState?,
         shortcutIndex: Int?, sessionID: String?, canRun: Bool, canStop: Bool, canRestart: Bool, processID: String?, processKey: String?,
         processTemplateID: String?, agentID: String?, browserTargetURL: String?, agentActivityState: SpacesDeviceCodingAgentActivityState? = nil,
-        undismissedAttentionIDs: [String] = [], isExitAcknowledged: Bool = false, hasBrief: Bool = false,
-        comeBackLater: ComeBackLaterToggle? = nil
+        undismissedAttentionIDs: [String] = [], isExitAcknowledged: Bool = false, hasBrief: Bool = false, comeBackLater: ComeBackLaterToggle? = nil,
+        pinID: String? = nil, pinUnavailableReason: SpacesDeviceAgentPinUnavailableReason? = nil
     ) {
         self.key = key
         self.title = title
@@ -82,6 +88,8 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
         self.isExitAcknowledged = isExitAcknowledged
         self.hasBrief = hasBrief
         self.comeBackLater = comeBackLater
+        self.pinID = pinID
+        self.pinUnavailableReason = pinUnavailableReason
     }
 }
 
@@ -122,7 +130,7 @@ enum SidebarAttentionStatus: Int, Hashable, Sendable, Comparable {
         // Ad hoc terminals and browser sessions are not managed process/agent rows, so their
         // lifecycle does not contribute an operational color or workspace attention state.
         case .browser, .window: return nil
-        case .agent: return .inactive
+        case .agent, .pinnedThread: return .inactive
         }
     }
 
@@ -144,6 +152,8 @@ extension SidebarRuntimeTargetItem {
 enum SidebarRuntimeTargetRenameDestination: Equatable, Sendable {
     case terminalSession(sessionID: String)
     case agentSession(agentID: String)
+    /// A pinned row, running or not: the name is the pin's.
+    case pinnedThread(pinID: String)
     case configuredProcess
     case configuredBrowserSession
     /// Nothing to store: the name is unchanged, an empty name arrived on a row whose config entry must
@@ -184,7 +194,8 @@ extension AppKitController {
         // run state: a row that has never started has no terminal to come back to.
         func comeBackLater(rowKind: SpacesDeviceComeBackLaterRowKind, rowID: String, runState: SpacesDeviceRunState) -> ComeBackLaterToggle {
             let key = SpacesDeviceComeBackLaterFlag.alertKey(rowKind: rowKind, rowID: rowID)
-            let isOn = alertsGroups.first(where: { $0.workspaceID == detail.id })?.items.contains { $0.kind == .comeBackLater && $0.alertKey == key } == true
+            let isOn =
+                alertsGroups.first(where: { $0.workspaceID == detail.id })?.items.contains { $0.kind == .comeBackLater && $0.alertKey == key } == true
             return ComeBackLaterToggle(rowKind: rowKind, rowID: rowID, isOn: isOn, hasStarted: runState != .notStarted)
         }
         switch target.kind {
@@ -200,8 +211,7 @@ extension AppKitController {
             }
             let isExitAcknowledged =
                 row.runState == .exited
-                && AlertsController.isProcessExitAcknowledged(
-                    processID: processID, workspaceID: detail.id, alertsGroups: alertsGroups)
+                && AlertsController.isProcessExitAcknowledged(processID: processID, workspaceID: detail.id, alertsGroups: alertsGroups)
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, detail: nil, kind: .process, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: processID,
@@ -225,7 +235,15 @@ extension AppKitController {
                 sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
                 processTemplateID: nil, agentID: agentWindow.id, browserTargetURL: nil, agentActivityState: row.activityState,
                 undismissedAttentionIDs: undismissedAttentionIDs(agentID: agentWindow.id, sessionID: row.sessionID), hasBrief: row.brief != nil,
-                comeBackLater: comeBackLater(rowKind: .agent, rowID: row.id, runState: row.runState))
+                comeBackLater: comeBackLater(rowKind: .agent, rowID: row.id, runState: row.runState), pinID: row.pinID,
+                pinUnavailableReason: row.pinUnavailableReason)
+        case .pinnedThread:
+            guard let pin = detail.pinnedThreads.first(where: { $0.id == target.pinnedThreadID }) else { return nil }
+            // Styled like a not-started target: no session, nothing to stop, gray inactive.
+            return SidebarRuntimeTargetItem(
+                key: key, title: title ?? pin.name, detail: nil, kind: .pinnedThread, runState: .notStarted, shortcutIndex: shortcutIndex,
+                sessionID: nil, canRun: false, canStop: false, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil,
+                agentID: nil, browserTargetURL: nil, hasBrief: pin.brief != nil, pinID: pin.id)
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
             let templateID = detail.config.processes.first {
@@ -299,7 +317,8 @@ extension AppKitController {
                     workspaceID: workspaceID, processKey: processKey, processTemplateID: item.processTemplateID,
                     context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
-        case .agent, .browser, .window: return
+        // A not-running pin starts by being resumed, which is what selecting its row does.
+        case .agent, .browser, .window, .pinnedThread: return
         }
     }
 
@@ -323,7 +342,7 @@ extension AppKitController {
                 try SpacesDeviceClient.stopWorkspaceTerminal(
                     workspaceID: workspaceID, sessionID: sessionID, context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
-        case .browser, .missingConfiguredProcess: return
+        case .browser, .missingConfiguredProcess, .pinnedThread: return
         }
     }
 
@@ -335,15 +354,32 @@ extension AppKitController {
                     workspaceID: workspaceID, processID: item.processID, processKey: item.processKey, processTemplateID: item.processTemplateID,
                     context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
-        case .agent, .browser, .window, .missingConfiguredProcess: return
+        case .agent, .browser, .window, .missingConfiguredProcess, .pinnedThread: return
+        }
+    }
+
+    /// Pins a running or exited agent row under `name`. The daemon refuses a name another row of the
+    /// workspace holds, and that refusal shows like a rename refusal.
+    func pinSidebarAgent(workspaceID: String, item: SidebarRuntimeTargetItem, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let agentID = item.agentID, !trimmed.isEmpty else { return }
+        runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
+            try SpacesDeviceClient.pinAgentSession(
+                workspaceID: workspaceID, agentID: agentID, name: trimmed, context: DeviceRequestContext(device: device, clientApp: clientApp))
+        }
+    }
+
+    func unpinSidebarRuntimeTarget(workspaceID: String, item: SidebarRuntimeTargetItem) {
+        guard let pinID = item.pinID else { return }
+        runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
+            try SpacesDeviceClient.unpinThread(
+                workspaceID: workspaceID, pinID: pinID, context: DeviceRequestContext(device: device, clientApp: clientApp))
         }
     }
 
     /// Dismisses every undismissed alert the row currently owns, through the same entry point the Alerts
     /// pane uses, so the owning device records them and the list follows its answer.
-    func dismissSidebarRuntimeTargetAlerts(item: SidebarRuntimeTargetItem) {
-        alerts.dismissAlertsAttentionItems(item.undismissedAttentionIDs)
-    }
+    func dismissSidebarRuntimeTargetAlerts(item: SidebarRuntimeTargetItem) { alerts.dismissAlertsAttentionItems(item.undismissedAttentionIDs) }
 
     private func runSidebarDeviceMutation(
         workspaceID: String, _ mutation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> SpacesDeviceAPIResponse
@@ -388,6 +424,11 @@ extension AppKitController {
                 try SpacesDeviceClient.renameAgentSession(
                     workspaceID: workspaceID, agentID: agentID, title: title, context: DeviceRequestContext(device: device, clientApp: clientApp))
             }
+        case .pinnedThread(let pinID):
+            runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
+                try SpacesDeviceClient.renamePinnedThread(
+                    workspaceID: workspaceID, pinID: pinID, name: title, context: DeviceRequestContext(device: device, clientApp: clientApp))
+            }
         case .configuredProcess:
             do {
                 try updateDeviceWorkspaceConfig(workspaceID: workspaceID) { settings in
@@ -417,6 +458,9 @@ extension AppKitController {
     {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard title != item.title else { return .discard }
+        // A pin always keeps a name: an empty rename cannot clear it back to a default the way an
+        // unpinned agent's can.
+        if let pinID = item.pinID { return title.isEmpty ? .discard : .pinnedThread(pinID: pinID) }
         // Agents and ad hoc terminals are live sessions nothing in the workspace config names, so their
         // rename is stored on the session and an empty name clears it back to the name underneath.
         let storesRenameOnSession = item.kind == .window || item.kind == .agent
@@ -430,6 +474,8 @@ extension AppKitController {
             return .agentSession(agentID: agentID)
         case .process, .missingConfiguredProcess: return .configuredProcess
         case .browser: return .configuredBrowserSession
+        // Unreachable: a pinned row carries its pin id and returned above.
+        case .pinnedThread: return .discard
         }
     }
 

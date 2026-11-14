@@ -344,12 +344,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case workspaceProcess(workspaceID: String, processID: String)
         case workspaceMissingConfiguredProcess(workspaceID: String, processKey: String)
         case agentWindow(AgentWindowRecord)
+        /// A pinned thread that is not running; focusing it resumes it.
+        case pinnedThread(workspaceID: String, pinID: String)
         case terminalSession(workspaceID: String, sessionID: String)
 
         var workspaceID: String {
             switch self {
             case .workspaceBrowserSession(let workspaceID, _), .workspaceWindow(let workspaceID, _), .workspaceProcess(let workspaceID, _),
-                .workspaceMissingConfiguredProcess(let workspaceID, _), .terminalSession(let workspaceID, _):
+                .workspaceMissingConfiguredProcess(let workspaceID, _), .pinnedThread(let workspaceID, _), .terminalSession(let workspaceID, _):
                 return workspaceID
             case .agentWindow(let record): return record.workspaceID
             }
@@ -365,6 +367,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .workspaceProcess(let workspaceID, let processID): "process:\(workspaceID):\(processID)"
             case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): "missing-process:\(workspaceID):\(processKey)"
             case .agentWindow(let record): "agent-window:\(record.id)"
+            case .pinnedThread(let workspaceID, let pinID): "pinned-thread:\(workspaceID):\(pinID)"
             case .terminalSession(let workspaceID, let sessionID): "session:\(workspaceID):\(sessionID)"
             }
         }
@@ -1235,10 +1238,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Internal rather than `private`: `TerminalPaneService.createTerminalSessionForPane` also needs this
     /// to resolve the pane open request for the session its mutation just started.
-    func terminalOpenRequest(fromMutationResponse response: SpacesDeviceAPIResponse, workspaceID: String) -> DeviceTerminalOpenRequest? {
+    func terminalOpenRequest(fromMutationResponse response: SpacesDeviceAPIResponse, workspaceID: String, deviceID: String)
+        -> DeviceTerminalOpenRequest?
+    {
+        Self.terminalOpenRequest(
+            fromMutationResponse: response, workspaceID: workspaceID, deviceID: deviceID,
+            overview: response.overview ?? overview(forWorkspaceID: workspaceID))
+    }
+
+    /// A mutation that launched a terminal (Start Agent, resuming a pin) opens it from its explicit launched
+    /// session, because a fast-exiting command can leave `overview.sessions` before the response is built
+    /// while the user still needs its pane and failure output (a resumed agent whose conversation is gone
+    /// prints its own error and exits). A mutation that launched nothing (resuming a pin that already has a
+    /// live row) names the existing session, which resolves through the overview.
+    nonisolated static func terminalOpenRequest(
+        fromMutationResponse response: SpacesDeviceAPIResponse, workspaceID: String, deviceID: String, overview: SpacesDeviceOverviewPayload?
+    ) -> DeviceTerminalOpenRequest? {
+        if let request = startedWorkspaceCommandPaneOpenRequest(deviceID: deviceID, response: response) { return request }
         guard let sessionID = response.sessionID else { return nil }
-        return Self.deviceTerminalOpenRequest(
-            workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? overview(forWorkspaceID: workspaceID))
+        return deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview)
     }
 
     /// Start Agent's background terminal is opened from the mutation's explicit launched-session
@@ -2116,6 +2134,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case window
             case missingConfiguredProcess
             case agent
+            /// A pinned thread with no running agent. A running pin is an `.agent` target.
+            case pinnedThread
         }
 
         let kind: Kind
@@ -2124,6 +2144,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let targetURL: String?
         let processKey: String?
         let agentWindow: AgentWindowRecord?
+        var pinnedThreadID: String? = nil
+    }
+
+    /// A not-running pin's place in the coding-agent family: it sits before the agent window at
+    /// `agentIndex`, so pins and running rows interleave in the order `agentEntries` gives them.
+    struct WorkspacePinnedThreadSlot: Sendable, Equatable {
+        let pin: SpacesDeviceWorkspacePinnedThread
+        let agentIndex: Int
     }
 
     struct WorkspaceRuntimeTargetIndex: Sendable {
@@ -2136,10 +2164,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         init(
             browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
-            agentWindows: [AgentWindowRecord]
+            agentWindows: [AgentWindowRecord], pinnedThreads: [WorkspacePinnedThreadSlot] = []
         ) {
             let orderedTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
-                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows)
+                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows,
+                pinnedThreads: pinnedThreads)
             self.orderedTargets = orderedTargets
 
             var targetsByProcessID: [String: WorkspaceRunShortcutTarget] = [:]
@@ -2180,7 +2209,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: agentWindow.id)] = index
                         }
                     }
-                case .window: break
+                case .window, .pinnedThread: break
                 }
             }
 
@@ -2267,6 +2296,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case openURL(workspaceID: String, targetURL: String)
         case openTerminal(DeviceTerminalOpenRequest)
         case runProcess(workspaceID: String, processKey: String, processTemplateID: String?)
+        case resumePinnedThread(workspaceID: String, pinID: String)
         case noWorkspace
         case noMatch
     }
@@ -2470,7 +2500,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func orderedWorkspaceRunShortcutTargets(
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
-        agentWindows: [AgentWindowRecord]
+        agentWindows: [AgentWindowRecord], pinnedThreads: [WorkspacePinnedThreadSlot] = []
     ) -> [WorkspaceRunShortcutTarget] {
         var targets: [WorkspaceRunShortcutTarget] = []
 
@@ -2503,11 +2533,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
         }
 
-        for agentWindow in agentWindows {
+        for (index, agentWindow) in agentWindows.enumerated() {
+            for slot in pinnedThreads where slot.agentIndex == index { targets.append(pinnedThreadTarget(slot.pin)) }
             targets.append(
                 WorkspaceRunShortcutTarget(
                     kind: .agent, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil, agentWindow: agentWindow))
         }
+        for slot in pinnedThreads where slot.agentIndex >= agentWindows.count { targets.append(pinnedThreadTarget(slot.pin)) }
 
         for entry in processEntries {
             guard case .window = entry.kind, let windowListIndex = entry.windowListIndex else { continue }
@@ -2517,6 +2549,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
 
         return targets
+    }
+
+    nonisolated private static func pinnedThreadTarget(_ pin: SpacesDeviceWorkspacePinnedThread) -> WorkspaceRunShortcutTarget {
+        WorkspaceRunShortcutTarget(
+            kind: .pinnedThread, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil, agentWindow: nil, pinnedThreadID: pin.id)
+    }
+
+    /// The workspace's coding-agent family in `agentEntries` order, split into what the target builders
+    /// take: the running rows as agent windows, and each not-running pin with the agent window it precedes.
+    nonisolated static func agentTargetInputs(from detail: SpacesDeviceWorkspaceDetailViewModel) -> (
+        agentWindows: [AgentWindowRecord], pinnedThreads: [WorkspacePinnedThreadSlot]
+    ) {
+        var windows: [AgentWindowRecord] = []
+        var slots: [WorkspacePinnedThreadSlot] = []
+        for entry in detail.agentEntries {
+            switch entry {
+            case .agent(let row): windows.append(contentsOf: agentWindows(from: [row]))
+            case .pinnedThread(let pin): slots.append(WorkspacePinnedThreadSlot(pin: pin, agentIndex: windows.count))
+            }
+        }
+        return (windows, slots)
     }
 
     nonisolated static func deviceWindowShortcutResolution(index: Int, selectedWorkspaceID: String?, overview: SpacesDeviceOverviewPayload)
@@ -2540,13 +2593,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         let windows = deviceTerminalWindows(from: detail.terminalRows)
         let processes = runningProcesses(from: detail.processRows)
-        let agentWindows = agentWindows(from: detail.codingAgentRows)
+        let (agentWindows, pinnedThreads) = agentTargetInputs(from: detail)
         let settings = localWorkspaceSettings(from: detail.config)
         let processEntries = orderedWorkspaceRunProcessEntries(
             configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
         return workspaceRuntimeTargetIndex(
-            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows,
+            pinnedThreads: pinnedThreads
         ).orderedTargets
     }
 
@@ -2587,6 +2641,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview)
                     ?? DeviceTerminalOpenRequest(
                         workspaceID: workspaceID, sessionID: sessionID, title: row.name, workingDirectory: detail.dir, kind: .agent))
+        case .pinnedThread:
+            guard let pinID = target.pinnedThreadID else { return .noMatch }
+            return .resumePinnedThread(workspaceID: workspaceID, pinID: pinID)
         }
     }
 
@@ -2657,10 +2714,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func workspaceRuntimeTargetIndex(
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
-        agentWindows: [AgentWindowRecord]
+        agentWindows: [AgentWindowRecord], pinnedThreads: [WorkspacePinnedThreadSlot] = []
     ) -> WorkspaceRuntimeTargetIndex {
         WorkspaceRuntimeTargetIndex(
-            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows)
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows,
+            pinnedThreads: pinnedThreads)
     }
 
     nonisolated static func workspaceProcessStatusByName(_ processes: [RunningProcessRecord]) -> [String: RowPrimitives.StatusKind] {
@@ -6537,11 +6595,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// the pane rendered but no longer identified as showing. Sidebar arrow navigation reads those pane
     /// flags to know where the selection currently sits, so it then has neither a pane nor a selected
     /// row to move from and stops responding.
-    nonisolated static func sidebarClearedSelectionPresentsPlaceholder(
-        showingAlerts: Bool, showingAutomations: Bool, showingResources: Bool = false
-    ) -> Bool {
-        !showingAlerts && !showingAutomations && !showingResources
-    }
+    nonisolated static func sidebarClearedSelectionPresentsPlaceholder(showingAlerts: Bool, showingAutomations: Bool, showingResources: Bool = false)
+        -> Bool
+    { !showingAlerts && !showingAutomations && !showingResources }
 
     nonisolated static func sidebarArrowSelectionTarget(
         visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], hiddenWorkspaceIDs: [String], selectedProjectID: String?,
@@ -6725,7 +6781,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch await Self.deviceMutation(device: device, operation: operation) {
         case .success(let response):
             applyDeviceMutationResponse(response, deviceID: device.id, epoch: epoch, selectedWorkspaceID: workspaceID)
-            return terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID)
+            return terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID, deviceID: device.id)
         case .failure(let error):
             showError(error)
             return nil

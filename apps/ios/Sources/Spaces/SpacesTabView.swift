@@ -18,6 +18,10 @@ struct SpacesTabView: View {
     @State private var terminalListRefreshGeneration = 0
     @State private var renamingRowID: String?
     @State private var renameText = ""
+    /// What committing the inline name field does: rename the row, or pin it under that name.
+    @State private var renamePurpose = RenamePurpose.rename
+
+    private enum RenamePurpose { case rename, pin }
     @State private var isShowingPairingScanner = false
     @FocusState private var isRenameFieldFocused: Bool
 
@@ -128,12 +132,16 @@ struct SpacesTabView: View {
                             Section {
                                 DaemonVersionHeroView(content: hero, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
                                     Task {
-                                        if model.blockedHeroRunsSelfUpdate { await model.runDaemonSelfUpdateAction() } else { await model.retryStagedApply() }
+                                        if model.blockedHeroRunsSelfUpdate {
+                                            await model.runDaemonSelfUpdateAction()
+                                        } else {
+                                            await model.retryStagedApply()
+                                        }
                                     }
                                 }.frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.compatibilityHero)
-                                // A finished update can leave the device blocked (its new build is still too old for this
-                                // app), so the hero ends the confirmation too, or the retained attempt hides the next offer.
-                                .modifier(EndsSelfUpdateConfirmation(model: model, surface: .hero, shownDeviceID: $selfUpdateSurfaceDeviceID))
+                                    // A finished update can leave the device blocked (its new build is still too old for this
+                                    // app), so the hero ends the confirmation too, or the retained attempt hides the next offer.
+                                    .modifier(EndsSelfUpdateConfirmation(model: model, surface: .hero, shownDeviceID: $selfUpdateSurfaceDeviceID))
                             }
                         }
                     } else if model.isLoading && model.overview == nil {
@@ -218,8 +226,8 @@ struct SpacesTabView: View {
                 Task { await model.requestDaemonUpdate() }
             }
         case .selfUpdateCard(let content):
-            DaemonSelfUpdateCardView(content: content) { Task { await model.runDaemonSelfUpdateAction() } }
-                .modifier(EndsSelfUpdateConfirmation(model: model, surface: .card, shownDeviceID: $selfUpdateSurfaceDeviceID))
+            DaemonSelfUpdateCardView(content: content) { Task { await model.runDaemonSelfUpdateAction() } }.modifier(
+                EndsSelfUpdateConfirmation(model: model, surface: .card, shownDeviceID: $selfUpdateSurfaceDeviceID))
         case .none, .hero: EmptyView()
         }
     }
@@ -458,22 +466,29 @@ struct SpacesTabView: View {
     }
 
     private func hasContextMenu(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
-        guard row.canRun || row.canStop || row.canRestart || model.canRename(row: row) else {
+        guard row.canRun || row.canStop || row.canRestart || model.canRename(row: row) || model.canPin(row: row) || model.canUnpin(row: row) else {
             guard let activeDeviceID = model.activeDeviceID else { return false }
             return model.hasDismissableAlerts(for: row, deviceID: activeDeviceID) || model.comeBackLaterTarget(for: row) != nil
         }
         return true
     }
 
-    private func beginRename(for row: SpacesMobileWorkspaceRuntimeRow) {
+    private func beginRename(for row: SpacesMobileWorkspaceRuntimeRow, purpose: RenamePurpose = .rename) {
         renameText = row.title
+        renamePurpose = purpose
         renamingRowID = row.id
     }
 
     private func commitRename(for row: SpacesMobileWorkspaceRuntimeRow) {
         let title = renameText
+        let purpose = renamePurpose
         renamingRowID = nil
-        Task { await model.rename(row: row, to: title) }
+        switch purpose {
+        case .rename: Task { await model.rename(row: row, to: title) }
+        case .pin:
+            guard let activeDeviceID = model.activeDeviceID else { return }
+            Task { await model.pin(row: row, name: title, deviceID: activeDeviceID) }
+        }
     }
 
     /// Browser session rows are always tappable: opening one loads a URL through the on-device proxy and
@@ -497,6 +512,7 @@ struct SpacesTabView: View {
     }
 
     @ViewBuilder private func runtimeTrailingIndicator(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if row.pinID != nil { RowPinGlyph() }
         if row.brief != nil { RowBriefGlyph() }
         if row.isBrowserSession || row.sessionID != nil { RowChevron() } else if row.canRun { RowPlayIndicator() }
     }
@@ -513,7 +529,7 @@ struct SpacesTabView: View {
             Button {
                 pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .run)
             } label: {
-                Label("Run", systemImage: "play.fill")
+                Label(row.pinID != nil ? "Resume" : "Run", systemImage: "play.fill")
             }.tint(Theme.accent).disabled(model.isMutating)
         }
         if row.canStop {
@@ -540,7 +556,7 @@ struct SpacesTabView: View {
             Button {
                 pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .run)
             } label: {
-                Label("Run", systemImage: "play.fill")
+                Label(row.pinID != nil ? "Resume" : "Run", systemImage: "play.fill")
             }.disabled(model.isMutating)
         }
         if row.canStop {
@@ -555,6 +571,23 @@ struct SpacesTabView: View {
                 pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .restart)
             } label: {
                 Label("Restart", systemImage: "arrow.clockwise")
+            }.disabled(model.isMutating)
+        }
+        if model.canPin(row: row) {
+            // The reason rides as the item's subtitle, so a disabled Pin says why instead of just greying out.
+            let reason = row.pinUnavailableReason
+            Button {
+                beginRename(for: row, purpose: .pin)
+            } label: {
+                Label("Pin", systemImage: "pin")
+                if let reason { Text(reason.message) }
+            }.disabled(model.isMutating || reason != nil)
+        }
+        if model.canUnpin(row: row), let activeDeviceID = model.activeDeviceID {
+            Button {
+                Task { await model.unpin(row: row, deviceID: activeDeviceID) }
+            } label: {
+                Label("Unpin", systemImage: "pin.slash")
             }.disabled(model.isMutating)
         }
         if model.canRename(row: row) {

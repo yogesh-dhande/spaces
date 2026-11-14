@@ -2,12 +2,15 @@ import Foundation
 import spacesdevicecore
 
 /// Activity bands on the Agents tab, in display order: the agents that need the user come first,
-/// then the ones with a result to read, then the ones still working, then everything idle.
+/// then the ones with a result to read, then the ones still working, then everything idle. Pinned
+/// threads close the list as their own group, a membership list rather than an activity band: a
+/// running pin appears in its band and again in Pinned.
 enum SpacesMobileAgentGroupKind: String, CaseIterable, Sendable {
     case blocked
     case done
     case working
     case notRunning
+    case pinned
 
     var label: String {
         switch self {
@@ -15,14 +18,15 @@ enum SpacesMobileAgentGroupKind: String, CaseIterable, Sendable {
         case .done: "Done"
         case .working: "Working"
         case .notRunning: "Not running"
+        case .pinned: "Pinned"
         }
     }
 }
 
-/// One coding-agent row plus the workspace and device context needed to render and activate it outside
-/// its home workspace list.
+/// One coding-agent row, or a not-running pin, plus the workspace and device context needed to render
+/// and activate it outside its home workspace list.
 struct SpacesMobileAgentEntry: Identifiable, Equatable, Sendable {
-    let row: SpacesDeviceWorkspaceCodingAgentRow
+    let runtimeRow: SpacesMobileWorkspaceRuntimeRow
     let deviceID: String
     let projectName: String
     let workspaceDisplayName: String
@@ -32,10 +36,15 @@ struct SpacesMobileAgentEntry: Identifiable, Equatable, Sendable {
     let deviceText: String?
     let isDeviceOffline: Bool
 
+    /// Whether this entry is listed in the Pinned group. A running pin is also listed in its activity
+    /// band, so the group is part of the identity: both listings must stay distinct in SwiftUI's `ForEach`
+    /// identity and in the row's accessibility identifier.
+    let isInPinnedGroup: Bool
+
     /// Qualified by device id, not just the row's own workspace-scoped id: the Agents tab lists every
     /// paired device's rows in one set of bands, and two devices' rows must never collide in SwiftUI's
     /// `ForEach` identity or in the row's own accessibility identifier.
-    var id: String { "\(deviceID):\(row.workspaceID):\(row.id)" }
+    var id: String { "\(deviceID):\(runtimeRow.workspaceID):\(runtimeRow.id)\(isInPinnedGroup ? ":pinned" : "")" }
 
     /// "project / workspace" or "project / workspace · device".
     var detail: String {
@@ -43,8 +52,6 @@ struct SpacesMobileAgentEntry: Identifiable, Equatable, Sendable {
         guard let deviceText else { return projectWorkspace }
         return "\(projectWorkspace) · \(deviceText)"
     }
-
-    var runtimeRow: SpacesMobileWorkspaceRuntimeRow { SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(row)) }
 }
 
 struct SpacesMobileAgentGroup: Identifiable, Equatable, Sendable {
@@ -54,10 +61,10 @@ struct SpacesMobileAgentGroup: Identifiable, Equatable, Sendable {
     var id: String { kind.rawValue }
 }
 
-/// Pure grouping of every coding-agent row, across every paired device's overview, into activity bands.
-/// Empty bands are omitted, and "Not running" is never listed at all: the tab surfaces agents with a
-/// state worth acting on, while stopped agents stay reachable from their workspace's rows on the
-/// Spaces tab.
+/// Pure grouping of every coding-agent row, across every paired device's overview, into activity bands,
+/// plus the Pinned group. Empty groups are omitted, and "Not running" is never listed at all: the tab
+/// surfaces agents with a state worth acting on, while stopped agents stay reachable from their
+/// workspace's rows on the Spaces tab. A stopped agent that is pinned is the exception, listed in Pinned.
 enum SpacesMobileAgentGrouping {
     /// `devices` order decides the order agents from different devices appear in a shared band: each
     /// device's own agents keep the overview's own workspace order (unchanged from the single-device
@@ -72,12 +79,21 @@ enum SpacesMobileAgentGrouping {
             // Excludes a workspace hidden by its own flag or by its project's (see
             // `SpacesDeviceOverviewPayload.isWorkspaceVisible`), the same rule the Spaces tab's browse list uses.
             for workspace in device.overview.workspaces where device.overview.isWorkspaceVisible(workspace) {
-                for agent in workspace.codingAgentRows {
-                    let entry = SpacesMobileAgentEntry(
-                        row: agent, deviceID: device.deviceID, projectName: workspace.projectName, workspaceDisplayName: workspace.displayName,
-                        deviceText: showsDeviceSegment ? SpacesMobileDeviceDisplay.text(name: device.deviceName, isOffline: device.isOffline) : nil,
-                        isDeviceOffline: device.isOffline)
-                    entriesByKind[kind(for: agent), default: []].append(entry)
+                for agentEntry in workspace.agentEntries {
+                    func entry(isInPinnedGroup: Bool) -> SpacesMobileAgentEntry {
+                        SpacesMobileAgentEntry(
+                            runtimeRow: agentEntry.runtimeRow, deviceID: device.deviceID, projectName: workspace.projectName,
+                            workspaceDisplayName: workspace.displayName,
+                            deviceText: showsDeviceSegment
+                                ? SpacesMobileDeviceDisplay.text(name: device.deviceName, isOffline: device.isOffline) : nil,
+                            isDeviceOffline: device.isOffline, isInPinnedGroup: isInPinnedGroup)
+                    }
+                    switch agentEntry {
+                    case .agent(let agent):
+                        entriesByKind[kind(for: agent), default: []].append(entry(isInPinnedGroup: false))
+                        if agent.pinID != nil { entriesByKind[.pinned, default: []].append(entry(isInPinnedGroup: true)) }
+                    case .pinnedThread: entriesByKind[.pinned, default: []].append(entry(isInPinnedGroup: true))
+                    }
                 }
             }
         }

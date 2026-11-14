@@ -936,6 +936,29 @@ public enum SpacesDeviceClient {
         -> SpacesDeviceAPIResponse
     { try request(.init(command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title))), context: context) }
 
+    /// Pins a coding-agent row as a named, resumable thread. The daemon refuses an ineligible row (see
+    /// `SpacesDeviceAgentPinUnavailableReason`), an empty name, and a name the workspace already uses.
+    public static func pinAgentSession(workspaceID: String, agentID: String, name: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .pinAgentSession(.init(workspaceID: workspaceID, agentID: agentID, name: name))), context: context) }
+
+    /// Removes a pin. A running pin's row stays under the pin's name; a not-running pin disappears.
+    public static func unpinThread(workspaceID: String, pinID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .unpinThread(.init(workspaceID: workspaceID, pinID: pinID))), context: context)
+    }
+
+    /// Renames a pinned thread, and its running row with it. An empty name is refused.
+    public static func renamePinnedThread(workspaceID: String, pinID: String, name: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    { try request(.init(command: .renamePinnedThread(.init(workspaceID: workspaceID, pinID: pinID, name: name))), context: context) }
+
+    /// Resumes a not-running pin in a new terminal in its workspace. The mutation result's `sessionID`
+    /// is the terminal to open and `launchedTerminalSession` is set when this call launched it; a pin that
+    /// is already running answers with its existing terminal's `sessionID` alone.
+    public static func resumePinnedThread(workspaceID: String, pinID: String, context: DeviceRequestContext) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .resumePinnedThread(.init(workspaceID: workspaceID, pinID: pinID))), context: context)
+    }
+
     /// Asks the owning daemon to replace a shell it lost without an exit with a fresh shell in the same
     /// terminal row. The mutation result's `sessionID` is the replacement and `replacedSessionID` the
     /// session to retarget from. A session that is not a lost shell fails with `.conflict`, and one whose

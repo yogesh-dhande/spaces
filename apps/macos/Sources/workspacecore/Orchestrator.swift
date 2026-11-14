@@ -1996,6 +1996,7 @@ public final class WorkspaceOrchestrator {
                         detectedAgent: AdHocDetectedForegroundAgent(
                             kind: kindLabel, label: kindLabel, displayCommand: nil, launchCommand: launchCommand), workspace: workspace,
                         sessionID: session.id, sessionKey: resumedAgentSessionKey)
+                    try attachPinnedThread(workspaceID: workspace.id, sessionKey: resumedAgentSessionKey, terminalSessionID: session.id)
                 }
                 return session
             }
@@ -2453,11 +2454,13 @@ public final class WorkspaceOrchestrator {
     }
 
     func validateWorkspaceFocusNames(
-        workspaceID: String, processes: [ProcessTemplate]? = nil, browserSessions: [BrowserSession]? = nil, agentWindows: [AgentWindowRecord]? = nil
+        workspaceID: String, processes: [ProcessTemplate]? = nil, browserSessions: [BrowserSession]? = nil, agentWindows: [AgentWindowRecord]? = nil,
+        pinnedThreads: [PinnedThreadRecord]? = nil
     ) throws {
         let workspaceProcesses = try processes ?? store.workspaceProcesses(workspaceID: workspaceID)
         let workspaceBrowserSessions = try browserSessions ?? store.workspaceBrowserSessions(workspaceID: workspaceID)
         let workspaceAgentWindows = try agentWindows ?? store.agentWindows(workspaceID: workspaceID)
+        let workspacePinnedThreads = try pinnedThreads ?? store.pinnedThreads(workspaceID: workspaceID)
         let processEntries = try workspaceProcesses.map { process in
             (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
         }
@@ -2482,6 +2485,10 @@ public final class WorkspaceOrchestrator {
                 // name.
                 guard let name = sanitizedFocusName(record.effectiveLabel) else { return nil }
                 return (name, "terminal")
+            } // A running pin is represented by its row above; only a not-running pin is a row of its own.
+            + workspacePinnedThreads.compactMap { pin -> (name: String, kind: String)? in
+                guard pin.agentSessionID == nil, let name = sanitizedFocusName(pin.name) else { return nil }
+                return (name, "coding agent")
             } + terminalEntries
         // Ambiguous persisted names violate the focus-identity invariant. Full validation deliberately
         // rejects them instead of grandfathering, migrating, or guessing which target should own the
@@ -2502,7 +2509,7 @@ public final class WorkspaceOrchestrator {
         }
         let configuredNames =
             try store.workspaceProcesses(workspaceID: workspaceID).compactMap { sanitizedFocusName($0.name ?? $0.command) }
-            + resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID).map(\.name)
+            + resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID).map(\.name) + notRunningPinnedThreadNames(workspaceID: workspaceID)
         let reservedLaunchNames = try reservedAdHocTerminalLaunchNames(workspaceID: workspaceID, excludingWindowIDs: excludingWindowIDs)
         guard !(runtimeNames + configuredNames + reservedLaunchNames).contains(where: { normalizedFocusName($0) == normalizedName }) else {
             throw WorkspaceError.invalidArgument(

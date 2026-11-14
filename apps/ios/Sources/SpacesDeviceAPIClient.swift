@@ -380,6 +380,47 @@ struct SpacesDeviceAPIClient: Sendable {
                 clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
+    /// Pins a coding-agent row as a named, resumable thread. The device refuses an ineligible row, an empty
+    /// name, and a name the workspace already uses.
+    func pinAgentSession(workspaceID: String, agentID: String, name: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .pinAgentSession(.init(workspaceID: workspaceID, agentID: agentID, name: name)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
+    /// Removes a pin. A running pin's row stays under the pin's name; a not-running pin disappears.
+    func unpinThread(workspaceID: String, pinID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .unpinThread(.init(workspaceID: workspaceID, pinID: pinID)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
+    /// Renames a pinned thread, and its running row with it. An empty name is refused.
+    func renamePinnedThread(workspaceID: String, pinID: String, name: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .renamePinnedThread(.init(workspaceID: workspaceID, pinID: pinID, name: name)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
+    /// Resumes a not-running pin in a new terminal in its workspace. The mutation result's `sessionID` is
+    /// the terminal to open; a pin that is already running answers with its existing terminal.
+    func resumePinnedThread(workspaceID: String, pinID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .resumePinnedThread(.init(workspaceID: workspaceID, pinID: pinID)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
     /// Asks the device to replace a shell it lost without an exit with a fresh shell in the same terminal
     /// row. The mutation result's `sessionID` is the replacement and `replacedSessionID` the session being
     /// replaced. A session that is not a lost shell fails with `.conflict`, and one whose working directory

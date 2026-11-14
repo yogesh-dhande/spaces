@@ -338,7 +338,8 @@ extension WorkspaceOrchestrator {
     func generatedAdHocTerminalWindowName(workspaceID: String) throws -> String {
         let visibleNames = try workspaceFocusableWindowNames(workspaceID: workspaceID)
         let reservedLaunchNames = try reservedAdHocTerminalLaunchNames(workspaceID: workspaceID, excludingWindowIDs: [])
-        let usedNames = Set((visibleNames + reservedLaunchNames).map(normalizedFocusName))
+        let usedNames = Set(
+            (visibleNames + reservedLaunchNames + (try notRunningPinnedThreadNames(workspaceID: workspaceID))).map(normalizedFocusName))
         var suffix = 1
         while usedNames.contains(normalizedFocusName("shell-\(suffix)")) { suffix += 1 }
         return "shell-\(suffix)"
@@ -365,6 +366,13 @@ extension WorkspaceOrchestrator {
                 ? [pair.effectiveName] : [pair.effectiveName, pair.launchName]
             guard let claimingLabel = claimingAgentNormalizedLabelBySessionID[pair.sessionID] else { return names }
             return names.filter { normalizedFocusName($0) != claimingLabel }
+        }
+    }
+
+    /// The visible and launch names of the ad-hoc shell terminal `sessionID`, empty when it is not one.
+    func adHocTerminalNames(workspaceID: String, sessionID: String) throws -> [String] {
+        try adHocTerminalNamePairs(workspaceID: workspaceID, excludingWindowIDs: []).filter { $0.sessionID == sessionID }.flatMap {
+            [$0.effectiveName, $0.launchName]
         }
     }
 

@@ -18,8 +18,8 @@ enum WindowCycleModeTargets {
     /// `agentTargets`.
     static func targets(
         mode: WindowCycleMode, devices: [WindowCycleDeviceSnapshot], openTerminalSessionIDsByWorkspace: [String: [String]],
-        openBrowserSessionsByWorkspace: [String: [BrowserSession]], trackedBrowserWindowIDsByWorkspace: [String: Set<Int>],
-        recentCursors: [String], retaining retainedCursors: [WorkspaceWindowCycle.Cursor]
+        openBrowserSessionsByWorkspace: [String: [BrowserSession]], trackedBrowserWindowIDsByWorkspace: [String: Set<Int>], recentCursors: [String],
+        retaining retainedCursors: [WorkspaceWindowCycle.Cursor]
     ) -> [WindowCycleTarget] {
         switch mode {
         // Workspace mode rotates over one workspace's own windows, built from that workspace's
@@ -139,9 +139,8 @@ enum WindowCycleModeTargets {
         var sidebarIndex = 0
         for device in devices {
             let alertItemsByWorkspace = Dictionary(
-                AlertsController.visibleAlertsGroups(
-                    in: AlertsController.buildOverviewAlertsGroups(from: device.overview, deviceID: device.deviceID)
-                ).map { ($0.workspaceID, $0.items) }, uniquingKeysWith: { first, _ in first })
+                AlertsController.visibleAlertsGroups(in: AlertsController.buildOverviewAlertsGroups(from: device.overview, deviceID: device.deviceID))
+                    .map { ($0.workspaceID, $0.items) }, uniquingKeysWith: { first, _ in first })
             for workspace in cycleableWorkspaces(of: device) {
                 let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: workspace)
                 let openSessionIDs = Set(openTerminalSessionIDsByWorkspace[workspace.id] ?? [])
@@ -225,7 +224,7 @@ enum WindowCycleModeTargets {
         case .workspaceProcess(_, let processID): return detail.processRows.first(where: { ($0.processID ?? $0.id) == processID })?.sessionID
         case .agentWindow(let record): return record.terminalTrackingID
         case .terminalSession(_, let sessionID): return sessionID
-        case .workspaceBrowserSession, .workspaceWindow, .workspaceMissingConfiguredProcess, nil: return nil
+        case .workspaceBrowserSession, .workspaceWindow, .workspaceMissingConfiguredProcess, .pinnedThread, nil: return nil
         }
     }
 

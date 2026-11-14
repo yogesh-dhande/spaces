@@ -1022,6 +1022,18 @@ Every agent-row termination (sidebar and Device API stop, `agent kill`, workspac
 - `killAgentSession` handles a pre-signal session through `terminateSpawnedAgentTerminalSession`, which requires launch kind `.agent`.
 - `validateAgentSubscription` rejects a missing target, a self-watch, and any edge closing a cycle. Acyclicity at subscribe time is what lets delivery run without loop guards.
 
+#### Pinned threads
+
+A pin lives in its own `pinned_threads` table, not on `agent_sessions`, because every session-ending path deletes the agent row while the pin has to outlive it. The table holds the conversation (`session_key`), the name, the raw launch command and working directory (captured with the same rule as the restore capture, so a pin resumes what restore would), and `agent_session_id`, the attached running row or NULL.
+
+- `agent_session_id` references `agent_sessions(id)` with `ON DELETE SET NULL`, so every delete path (session end, stop, prune, workspace teardown) detaches the pin with no code of its own. A migration that rebuilds `agent_sessions` fires that action and must carry the attachments across. `UNIQUE (workspace_id, session_key)` keeps one pin per conversation, which makes restore re-attachment a lookup.
+- While a pin is attached, its row's `user_label` equals the pin's name, so every existing surface (focus-name validation, overview, CLI list, notifications, the restore capture title) shows the pin name unchanged. A pin that is not running is the only copy of its name and is added to the name reservations explicitly. Pin, rename, attach, and detach are the only writers of that pair (`WorkspaceOrchestrator+PinnedThread.swift`), each in one transaction.
+- Detach runs where a row's conversation changes or its agent exits on a live terminal: `registerAgentWindow`, `updateAgentWindowStatusInTransaction`, `updateAgentWindowSessionKey`, and `recordAgentExitStatus`. It computes the split-off row's label before writing anything, because the pin still holds its name and a temporary duplicate would fail focus-name validation mid-transaction.
+- Attach happens in `createWorkspaceAgentSession`, the one launch path behind resuming a pin, standalone restore, and automation restore. It resolves the new row by terminal and attaches only when that row's conversation is the pin's.
+- Eligibility is one rule (`SpacesDeviceAgentPinUnavailableReason.evaluate`) used both for the overview's disabled-menu reason and for refusing a pin request, so the two cannot disagree.
+- The overview carries `pinnedThreads` per workspace (with the last brief for pins that are not running) and `pinID`/`pinUnavailableReason` on agent rows; the broadcast projections include them, so a pin change pushes at once. `SpacesDeviceWorkspaceSummary.agentEntries` is the single ordering rule both clients render: pins in pin order, then unpinned agents.
+- Skipping a restore keeps a pinned conversation's brief (`discardRestorableSessions` excludes pinned conversations), since a pin that is not running shows it.
+
 #### Notification engine
 
 `AgentNotificationEngine` (`workspacecore`) is pure logic over the store plus an injected deliver closure; the daemon builds one per signal at `recordProfileAgentSignal` and delivers through the `terminal send` path. The notice format is in spec.md.

@@ -11,7 +11,8 @@ struct AgentsTabView: View {
     var body: some View {
         NavigationStack {
             // An agent row is a live session the user already started, so this tab opens sessions and
-            // never launches one: the shared navigation's pending-launch route stays permanently empty.
+            // never shows the launch screen: the shared navigation's pending-launch route stays permanently
+            // empty. Resuming a not-running pin awaits the daemon here instead and opens its session.
             content.background(Theme.bg.ignoresSafeArea()).navigationTitle("Agents").tint(Theme.accent).terminalSessionNavigation(
                 model: model, selectedSession: $selectedSession, pendingTerminalLaunch: .constant(nil))
         }.accessibilityIdentifier("tab.agents")
@@ -46,18 +47,25 @@ struct AgentsTabView: View {
         let button = Button {
             activateAgentRow(entry)
         } label: {
-            BandRow(dotKind: row.statusDotKind(exitAcknowledged: false), tile: .tile(for: .codingAgents), title: entry.row.name, detail: entry.detail)
-            {
+            BandRow(dotKind: row.statusDotKind(exitAcknowledged: false), tile: .tile(for: .codingAgents), title: row.title, detail: entry.detail) {
+                if row.pinID != nil { RowPinGlyph() }
                 if row.brief != nil { RowBriefGlyph() }
-                if row.sessionID != nil { RowChevron() }
+                if row.sessionID != nil { RowChevron() } else if row.canRun { RowPlayIndicator() }
             }
-        }.buttonStyle(.plain).disabled(model.isMutating || row.sessionID == nil).opacity(entry.isDeviceOffline ? Theme.offlineRowOpacity : 1)
+        }.buttonStyle(.plain).disabled(isAgentRowDisabled(entry)).opacity(entry.isDeviceOffline ? Theme.offlineRowOpacity : 1)
             .accessibilityIdentifier("agents.row.\(entry.id)")
-        if model.hasDismissableAlerts(for: row, deviceID: entry.deviceID) || model.comeBackLaterTarget(for: row) != nil {
+        if model.hasDismissableAlerts(for: row, deviceID: entry.deviceID) || model.comeBackLaterTarget(for: row) != nil || model.canUnpin(row: row) {
             button.contextMenu {
                 if model.comeBackLaterTarget(for: row) != nil { ComeBackLaterMenuButton(model: model, row: row, deviceID: entry.deviceID) }
                 if model.hasDismissableAlerts(for: row, deviceID: entry.deviceID) {
                     DismissAlertMenuButton(model: model, row: row, deviceID: entry.deviceID)
+                }
+                if model.canUnpin(row: row) {
+                    Button {
+                        Task { await model.unpin(row: row, deviceID: entry.deviceID) }
+                    } label: {
+                        Label("Unpin", systemImage: "pin.slash")
+                    }.disabled(model.isMutating || entry.isDeviceOffline)
                 }
             }
         } else {
@@ -65,9 +73,24 @@ struct AgentsTabView: View {
         }
     }
 
+    /// A row with a live session opens it. A not-running pin has none but resumes on tap, which needs its
+    /// device reachable.
+    private func isAgentRowDisabled(_ entry: SpacesMobileAgentEntry) -> Bool {
+        let row = entry.runtimeRow
+        if row.sessionID != nil { return model.isMutating }
+        return !row.canRun || model.isMutating || entry.isDeviceOffline
+    }
+
     private func activateAgentRow(_ entry: SpacesMobileAgentEntry) {
         let row = entry.runtimeRow
-        guard let session = model.terminalSession(for: row, in: model.overview(forDeviceID: entry.deviceID)) else { return }
-        selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: entry.deviceID)
+        if let session = model.terminalSession(for: row, in: model.overview(forDeviceID: entry.deviceID)) {
+            selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: entry.deviceID)
+            return
+        }
+        guard row.canRun else { return }
+        Task {
+            guard let session = await model.run(row: row, deviceID: entry.deviceID) else { return }
+            selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: entry.deviceID)
+        }
     }
 }

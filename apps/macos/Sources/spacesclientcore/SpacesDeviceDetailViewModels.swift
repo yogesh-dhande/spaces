@@ -39,9 +39,16 @@ public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
     public let config: SpacesDeviceWorkspaceConfig
     public let processRows: [SpacesDeviceWorkspaceProcessRow]
     public let codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]
+    public let pinnedThreads: [SpacesDeviceWorkspacePinnedThread]
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
 
+    /// The coding-agent list in display order: pins first in pin order, then unpinned rows.
+    public var agentEntries: [SpacesDeviceWorkspaceAgentEntry] {
+        SpacesDeviceWorkspaceSummary.agentEntries(pinnedThreads: pinnedThreads, codingAgentRows: codingAgentRows)
+    }
+
     public init(workspace: SpacesDeviceWorkspaceSummary) {
+        pinnedThreads = workspace.pinnedThreads
         id = workspace.id
         projectID = workspace.projectID
         projectName = workspace.projectName

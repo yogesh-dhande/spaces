@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 27
+    public static let currentVersion = 28
 
     /// The coding-agent orchestration watch graph, `agent_subscriptions`. The subscriber key is a terminal
     /// session id (a subscriber may be a plain terminal with no agent row), and the target is the agent
@@ -957,7 +957,36 @@ public enum DatabaseSchema {
                     UPDATE agent_sessions SET brief = NULL, brief_updated_at = NULL WHERE COALESCE(session_key, '') != '';
                     """)
         },
+        DatabaseMigrationStep(fromVersion: 27, toVersion: 28, description: "Add pinned threads", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: pinnedThreadsSQL)
+        },
     ]
+
+    /// Named, resumable coding-agent conversations kept under their workspace after the agent stops. A pin
+    /// is its own table rather than columns on `agent_sessions` because that row is deleted when its
+    /// session ends while the pin outlives it. `agent_session_id` is the row currently running the
+    /// conversation, and `ON DELETE SET NULL` detaches the pin on every path that deletes the row. A future
+    /// migration that rebuilds `agent_sessions` must carry these attachments across or the pins detach.
+    /// While attached, `agent_sessions.user_label` equals `name`; a detached pin's `name` is the only copy.
+    /// `launch_command` and `working_directory` are what resumes the conversation, captured at pin time.
+    static let pinnedThreadsSQL = """
+            CREATE TABLE IF NOT EXISTS pinned_threads (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              session_key TEXT NOT NULL,
+              name TEXT NOT NULL,
+              launch_command TEXT NOT NULL,
+              working_directory TEXT NOT NULL,
+              agent_session_id TEXT,
+              pinned_at TEXT NOT NULL,
+              UNIQUE (workspace_id, session_key),
+              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+              FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE SET NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS pinned_threads_agent_unique
+              ON pinned_threads(agent_session_id) WHERE agent_session_id IS NOT NULL;
+        """
 
     /// The briefs agents wrote, keyed by the conversation they belong to rather than the agent row, so a
     /// resumed conversation shows its brief again after the row it was written on is gone. A row with a
@@ -1357,6 +1386,8 @@ public enum DatabaseSchema {
             );
 
             \(agentConversationBriefsSQL)
+
+            \(pinnedThreadsSQL)
 
             \(agentSubscriptionsSQL)
 
