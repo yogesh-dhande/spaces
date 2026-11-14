@@ -77,7 +77,8 @@ struct SpacesDeviceOverviewBuilder {
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
         liveSessions: [TerminalSessionCatalogEntry], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus,
         automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = [],
-        automationAttributedSessionIDs: [String] = [], dismissedAlertKeys: [String] = [], comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag] = []
+        automationAttributedSessionIDs: [String] = [], dismissedAlertKeys: [String] = [], comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag] = [],
+        savedPromptsRevision: Int = 0
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
@@ -151,7 +152,8 @@ struct SpacesDeviceOverviewBuilder {
             retainedTerminalSessionIDs: retainedTerminalSessionIDs(
                 liveSessions: liveSessions, workspaces: workspaces, automationAttributedSessionIDs: automationAttributedSessionIDs),
             workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
-            automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys.sorted(), comeBackLaterFlags: comeBackLaterFlags
+            automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys.sorted(), comeBackLaterFlags: comeBackLaterFlags,
+            savedPromptsRevision: savedPromptsRevision
         ).reconcilingAlertState()
     }
 

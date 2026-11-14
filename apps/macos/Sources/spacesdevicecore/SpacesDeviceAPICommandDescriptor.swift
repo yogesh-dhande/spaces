@@ -312,6 +312,16 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "restoreSessions", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         case .discardRestorableSessions:
             return Self.descriptor(wireKey: "discardRestorableSessions", lane: .mainQueue, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
+        case .listSavedPrompts:
+            return Self.descriptor(wireKey: "listSavedPrompts", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .createSavedPrompt:
+            return Self.descriptor(wireKey: "createSavedPrompt", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .updateSavedPrompt:
+            return Self.descriptor(wireKey: "updateSavedPrompt", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .deleteSavedPrompt:
+            return Self.descriptor(wireKey: "deleteSavedPrompt", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .recordSavedPromptUse:
+            return Self.descriptor(wireKey: "recordSavedPromptUse", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         }
     }
 

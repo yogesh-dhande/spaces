@@ -138,7 +138,10 @@ import spacesterminalcore
                 workspaceID: "workspace-1", sessionID: "session-1", text: "text",
                 comments: [SpacesDeviceReviewCommentSendEntry(id: "comment-1", revision: 1)])),
         .restoreSessions(SpacesDeviceRestorableSessionsRequest(generation: "generation-1")),
-        .discardRestorableSessions(SpacesDeviceRestorableSessionsRequest(generation: "generation-1")),
+        .discardRestorableSessions(SpacesDeviceRestorableSessionsRequest(generation: "generation-1")), .listSavedPrompts,
+        .createSavedPrompt(SpacesDeviceSavedPromptFields(title: "title", text: "text")),
+        .updateSavedPrompt(SpacesDeviceSavedPromptUpdateRequest(id: "prompt-1", title: "title", text: "text")),
+        .deleteSavedPrompt(SpacesDeviceSavedPromptReference(id: "prompt-1")), .recordSavedPromptUse(SpacesDeviceSavedPromptReference(id: "prompt-1")),
     ]
 
     private static let automationFields = TerminalServiceAutomationFields(
@@ -149,7 +152,7 @@ import spacesterminalcore
     /// `SpacesDeviceAPIEmptyPayload`. Checked for a fully literal, exact payload in addition to the key.
     private static let emptyPayloadKeys: Set<String> = [
         "ping", "daemonStatus", "requestDaemonRestart", "startDaemonSelfUpdate", "overview", "subscribeDeviceOverview", "subscribeDeviceResources",
-        "agentHooksStatus", "listAutomations",
+        "agentHooksStatus", "listAutomations", "listSavedPrompts",
     ]
 
     /// Completeness contract for `samples`, split across three layers because no single mechanism covers
@@ -157,18 +160,18 @@ import spacesterminalcore
     ///  1. `goldenWireKey`'s default-less `switch` forces a golden mapping entry for any case added to
     ///     `SpacesDeviceAPICommand` at compile time (a missing arm fails the build).
     ///  2. This assertion rejects a duplicated sample: mapping every sample through `goldenWireKey` and
-    ///     checking the resulting set is exactly 92 distinct keys catches two samples for the same case
-    ///     (the set would be smaller than the list), which a bare `count == 92` check would miss.
+    ///     checking the resulting set is exactly 97 distinct keys catches two samples for the same case
+    ///     (the set would be smaller than the list), which a bare `count == 97` check would miss.
     ///  3. What neither closes: a new 77th case added to the enum but never added to `samples`: the
     ///     switch still compiles (it only requires *a* mapping, not that every mapping is exercised) and
-    ///     the set stays "92 distinct out of 92 samples". `SpacesDeviceAPICommand` still cannot conform to
+    ///     the set stays "97 distinct out of 97 samples". `SpacesDeviceAPICommand` still cannot conform to
     ///     `CaseIterable` (its cases carry differently-typed associated values), so no enumeration source
     ///     independent of a hand-maintained list exists to close this gap against; both `goldenWireKey` and
     ///     `SpacesDeviceAPICommandDescriptor`'s own switch are default-less exhaustive switches over the
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 96)
+        #expect(keys.count == 101)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -310,6 +313,11 @@ import spacesterminalcore
         case .workspaceReviewCommentsSend: "workspaceReviewCommentsSend"
         case .restoreSessions: "restoreSessions"
         case .discardRestorableSessions: "discardRestorableSessions"
+        case .listSavedPrompts: "listSavedPrompts"
+        case .createSavedPrompt: "createSavedPrompt"
+        case .updateSavedPrompt: "updateSavedPrompt"
+        case .deleteSavedPrompt: "deleteSavedPrompt"
+        case .recordSavedPromptUse: "recordSavedPromptUse"
         }
     }
 }

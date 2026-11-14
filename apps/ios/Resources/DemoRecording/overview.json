@@ -155,6 +155,7 @@
         "demo-lantern-backend",
         "demo-harbor-backend"
       ],
+      "savedPromptsRevision" : 0,
       "sessions" : [
         {
           "attachmentSnapshot" : {

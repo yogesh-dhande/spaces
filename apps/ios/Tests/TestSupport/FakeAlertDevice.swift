@@ -74,7 +74,8 @@
             SpacesDeviceOverviewPayload(
                 projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: retainedTerminalSessionIDs,
                 workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
-                automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags)
+                automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags,
+                savedPromptsRevision: savedPromptsRevision)
         }
     }
 #endif

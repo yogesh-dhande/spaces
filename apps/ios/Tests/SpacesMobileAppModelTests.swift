@@ -2921,7 +2921,9 @@
                 id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
                 sessionID: "session-api", runState: .exited, canRun: true, canStop: false, canRestart: false)
             let deviceBOverviewAfterStop = makeOverview(featureProcessRows: [stoppedRow], featureIsRunning: false)
-            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                // The saved-prompts list the model fetches for the selected device on its own is not a mutation.
+                if request.commandName == "listSavedPrompts" { return SpacesDeviceAPIResponse(ok: false, message: "unavailable") }
                 XCTFail("A non-selected device's mutation must never reach the selected device's client.")
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
@@ -2957,7 +2959,8 @@
         /// `handleAuthenticationFailure(message:deviceID:)`, the single place that signal is raised).
         func testStopOnANonSelectedDeviceWithAuthFailureNamesTheDeviceAndLeavesTheSelectedDeviceUntouched() async {
             let selectedOverview = makeOverview()
-            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                if request.commandName == "listSavedPrompts" { return SpacesDeviceAPIResponse(ok: false, message: "unavailable") }
                 XCTFail("A non-selected device's auth failure must never reach the selected device's client.")
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
@@ -2999,7 +3002,8 @@
                 id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
                 processID: "runtime-api-new", sessionID: "session-api-new", runState: .running, canRun: false, canStop: true, canRestart: true)
             let deviceBRefreshedOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
-            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                if request.commandName == "listSavedPrompts" { return SpacesDeviceAPIResponse(ok: false, message: "unavailable") }
                 XCTFail("A non-selected device's recovery fetch must never reach the selected device's client.")
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
@@ -3054,7 +3058,9 @@
                 daemonStatus: TerminalServiceDaemonStatus(
                     version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
                     protocolVersion: SpacesWireProtocol.version, deviceAPIAddresses: ["10.0.0.50", "100.64.0.9"]))
-            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                // The saved-prompts list the model fetches for the selected device on its own is not a mutation.
+                if request.commandName == "listSavedPrompts" { return SpacesDeviceAPIResponse(ok: false, message: "unavailable") }
                 XCTFail("A non-selected device's mutation must never reach the selected device's client.")
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
@@ -3101,7 +3107,9 @@
             let requestStarted = SpacesMobileAsyncGate()
             let releaseResponse = SpacesMobileAsyncGate()
             let staleOverview = makeOverview(featureIsRunning: false)
-            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { _ in
+            let clientA = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                // The saved-prompts list the model fetches for the selected device on its own is not a mutation.
+                if request.commandName == "listSavedPrompts" { return SpacesDeviceAPIResponse(ok: false, message: "unavailable") }
                 XCTFail("A non-selected device's mutation must never reach the selected device's client.")
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
@@ -3226,7 +3234,8 @@
             let gate = SpacesMobileAsyncGate()
             let seedOverview = makeOverview(sessions: [makeSession(id: "session-api-seed")])
             let lateOverview = makeOverview(featureIsRunning: true)
-            let clientA = SpacesDeviceAPIClient(settings: settingsA) { _ in
+            let clientA = SpacesDeviceAPIClient(settings: settingsA) { request in
+                if request.commandName == "listSavedPrompts" { return SpacesDeviceAPIResponse(ok: false, message: "unavailable") }
                 XCTFail("A non-selected device's mutation must never reach the selected device's client.")
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
@@ -4007,8 +4016,8 @@
             let both = selfUpdatingStatus(installedVersion: "1.5.0")
             guard
                 case .pendingUpdate(let staged) = DaemonCompatibilityPresentation.presentation(
-                    remedy: DaemonUpdateRemedy.remedy(for: both), status: both, isBlocked: false, stagedApplyDidNotLand: false,
-                    deviceName: "builder", clientVersion: "1.5.0", selfUpdate: resolvedSelfUpdate(both))
+                    remedy: DaemonUpdateRemedy.remedy(for: both), status: both, isBlocked: false, stagedApplyDidNotLand: false, deviceName: "builder",
+                    clientVersion: "1.5.0", selfUpdate: resolvedSelfUpdate(both))
             else { return XCTFail("A staged build takes the card.") }
             XCTAssertEqual(staged.versionPair, DaemonVersionPair(from: "1.0.0", to: "1.5.0"))
         }
@@ -4021,7 +4030,8 @@
             XCTAssertEqual(stalled.actionTitle, "Try Again")
             XCTAssertTrue(stalled.isWarning)
 
-            let failed = try XCTUnwrap(DaemonSelfUpdateContent.make(.failed(from: "1.0.0", to: "2.0.0", reason: "Disk is full."), deviceName: "builder"))
+            let failed = try XCTUnwrap(
+                DaemonSelfUpdateContent.make(.failed(from: "1.0.0", to: "2.0.0", reason: "Disk is full."), deviceName: "builder"))
             XCTAssertEqual(failed.title, "Update didn't finish")
             XCTAssertEqual(failed.body, "Disk is full.")
             XCTAssertTrue(failed.isWarning)
@@ -4180,8 +4190,7 @@
         /// Try Again starts it again.
         func testSelfUpdatePollStopsOnFailureAndResumesOnRetry() async throws {
             let recorder = SpacesMobileRequestRecorder()
-            let failed = selfUpdatingStatus(
-                progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .failed, failureReason: "Disk is full."))
+            let failed = selfUpdatingStatus(progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .failed, failureReason: "Disk is full."))
             let box = SelfUpdateStatusBox(selfUpdatingStatus())
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
@@ -4217,8 +4226,7 @@
         /// report; the poll has to start again, or a device that then goes away is never noticed.
         func testAnotherClientsRetryAfterAFailureRestartsThePoll() async throws {
             let recorder = SpacesMobileRequestRecorder()
-            let failed = selfUpdatingStatus(
-                progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .failed, failureReason: "Disk is full."))
+            let failed = selfUpdatingStatus(progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .failed, failureReason: "Disk is full."))
             let box = SelfUpdateStatusBox(selfUpdatingStatus(), overviewBase: makeOverview())
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
@@ -4251,8 +4259,7 @@
         /// A failed attempt whose update is finished from elsewhere is confirmed by the next overview, not
         /// only by the poll, and once dismissed it cannot suppress the offers that follow.
         func testAFailedSelfUpdateAttemptIsRetiredByAnOverviewShowingTheTargetVersion() async throws {
-            let failed = selfUpdatingStatus(
-                progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .failed, failureReason: "Disk is full."))
+            let failed = selfUpdatingStatus(progress: DaemonSelfUpdateProgress(targetVersion: "2.0.0", step: .failed, failureReason: "Disk is full."))
             let box = SelfUpdateStatusBox(selfUpdatingStatus(), overviewBase: makeOverview())
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { request in

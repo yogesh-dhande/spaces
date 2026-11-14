@@ -619,6 +619,58 @@ def require_config_process_row(args: argparse.Namespace, app: dict, workspace_id
     return process_row
 
 
+def assert_saved_prompts_round_trip(args: argparse.Namespace, app: dict) -> None:
+    """Creates, uses, edits, and deletes one prompt, checking each answer is the whole ordered library and
+    that the overview's revision follows the last answer. Leaves the library as it found it."""
+
+    def library(response: dict, context: str) -> dict:
+        return result(response, "savedPrompts", context)
+
+    def titles(value: dict) -> list[str]:
+        return [prompt["title"] for prompt in value["prompts"]]
+
+    before = library(send("listSavedPrompts", {}, args, app), "listSavedPrompts")
+    older_title = "parity prompt older"
+    newer_title = "parity prompt newer"
+    library(send("createSavedPrompt", {"title": older_title, "text": "first body"}, args, app), "createSavedPrompt older")
+    created = library(send("createSavedPrompt", {"title": newer_title, "text": "second body"}, args, app), "createSavedPrompt newer")
+    if titles(created)[:2] != [newer_title, older_title]:
+        raise AssertionError(f"createSavedPrompt did not put the newest prompt first: {json.dumps(created, indent=2, sort_keys=True)}")
+    older_id = next(prompt["id"] for prompt in created["prompts"] if prompt["title"] == older_title)
+    if created.get("createdPromptID") != created["prompts"][0]["id"]:
+        raise AssertionError(f"createSavedPrompt did not name the prompt it created: {json.dumps(created, indent=2, sort_keys=True)}")
+
+    used = library(send("recordSavedPromptUse", {"id": older_id}, args, app), "recordSavedPromptUse")
+    if titles(used)[:2] != [older_title, newer_title]:
+        raise AssertionError(f"recordSavedPromptUse did not move the prompt first: {json.dumps(used, indent=2, sort_keys=True)}")
+
+    edited_title = "parity prompt edited"
+    updated = library(
+        send("updateSavedPrompt", {"id": older_id, "title": edited_title, "text": "edited body"}, args, app), "updateSavedPrompt"
+    )
+    if titles(updated)[:2] != [edited_title, newer_title] or updated["prompts"][0]["text"] != "edited body":
+        raise AssertionError(f"updateSavedPrompt did not keep the prompt in place: {json.dumps(updated, indent=2, sort_keys=True)}")
+
+    blank = send("createSavedPrompt", {"title": "  ", "text": "body"}, args, app)
+    if blank.get("ok") is not False or blank.get("errorCode") != "invalidArgument":
+        raise AssertionError(f"createSavedPrompt accepted a blank title: {json.dumps(blank, indent=2, sort_keys=True)}")
+
+    for prompt_id in [prompt["id"] for prompt in updated["prompts"] if prompt["title"] in (edited_title, newer_title)]:
+        final = library(send("deleteSavedPrompt", {"id": prompt_id}, args, app), "deleteSavedPrompt")
+    if titles(final) != titles(before):
+        raise AssertionError(f"deleteSavedPrompt did not restore the library: {json.dumps(final, indent=2, sort_keys=True)}")
+    missing = send("deleteSavedPrompt", {"id": older_id}, args, app)
+    if missing.get("ok") is not False or missing.get("errorCode") != "notFound":
+        raise AssertionError(f"deleteSavedPrompt accepted a deleted prompt: {json.dumps(missing, indent=2, sort_keys=True)}")
+
+    overview_revision = wait_for(
+        lambda: (lambda revision: revision if revision == final["revision"] else None)(current_overview(args, app).get("savedPromptsRevision")),
+        "overview savedPromptsRevision to match the last saved prompts answer",
+    )
+    if overview_revision <= before["revision"]:
+        raise AssertionError("savedPromptsRevision did not rise across the prompt writes")
+
+
 def run(args: argparse.Namespace) -> dict:
     args._request_timings = []
     app = client_app(args)
@@ -821,6 +873,8 @@ def run(args: argparse.Namespace) -> dict:
         "stopCodingAgent",
     )
     wait_for_no_agent_row(args, app, workspace_id, agent_session_id)
+
+    assert_saved_prompts_round_trip(args, app)
 
     overview_final = current_overview(args, app)
     final_workspace = find_workspace(overview_final, workspace_id) or {}

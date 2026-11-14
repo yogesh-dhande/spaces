@@ -104,6 +104,7 @@ import Foundation
         public let onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)?
         public let onOpenLink: @MainActor (String, GhosttyMobileActionEvent.OpenURLKind) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
+        public let onOpenSavedPrompts: (@MainActor () -> Void)?
         public let onPasteClipboardImage: (@MainActor () -> Bool)?
         /// A press or release by a long-press drag in a session whose application is tracking the mouse.
         /// Answers whether it was sent; a refused press makes the long press select text instead.
@@ -134,15 +135,16 @@ import Foundation
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onRenderedViewportChanged: (@MainActor (GhosttyTerminalSnapshotViewport.Window) -> Void)? = nil,
-            onSoftwareKeyboardToggled: (@MainActor (Bool) -> Void)? = nil,
-            onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
+            onSoftwareKeyboardToggled: (@MainActor (Bool) -> Void)? = nil, onSendText: @escaping @MainActor (String, Bool) -> Void,
+            onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)? = nil,
             onSendMouseButton: (@MainActor (UInt8, Bool, TerminalScrollPointerPosition) -> Bool)? = nil,
             onSendMouseMotion: (@MainActor (TerminalScrollPointerPosition) -> Bool)? = nil, clientSelection: TerminalAbsoluteSelection? = nil,
             selectionActions: GhosttyRemoteTerminalSelectionActions? = nil, selectionAccentColor: UIColor = .systemTeal,
             onOpenLink: @escaping @MainActor (String, GhosttyMobileActionEvent.OpenURLKind) -> Void = { _, _ in },
-            onOpenComposer: (@MainActor () -> Void)? = nil, onPasteClipboardImage: (@MainActor () -> Bool)? = nil
+            onOpenComposer: (@MainActor () -> Void)? = nil, onOpenSavedPrompts: (@MainActor () -> Void)? = nil,
+            onPasteClipboardImage: (@MainActor () -> Bool)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -170,6 +172,7 @@ import Foundation
             self.selectionAccentColor = selectionAccentColor
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
+            self.onOpenSavedPrompts = onOpenSavedPrompts
             self.onPasteClipboardImage = onPasteClipboardImage
         }
 
@@ -221,6 +224,7 @@ import Foundation
             hostView.setSelectionAccentColor(selectionAccentColor)
             hostView.onOpenLink = { link, kind in _ = Task { @MainActor in onOpenLink(link, kind) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
+            hostView.onOpenSavedPrompts = onOpenSavedPrompts.map { callback in { _ = Task { @MainActor in callback() } } }
             // Synchronous, unlike the Task-hopping callbacks around it: the paste routes need the
             // handler's answer (did the clipboard image claim this paste?) before deciding whether to
             // fall through to the text paste. UIKit delivers the paste on the main thread.
@@ -423,8 +427,8 @@ import Foundation
         let selectionInteraction = GhosttyRemoteTerminalSelectionInteraction()
         private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
             onSelect: { [weak self] in self?.toggleSelectMode() }, onComposer: { [weak self] in self?.onOpenComposer?() },
-            onPaste: { [weak self] in self?.pasteFromClipboard() }, onText: { [weak self] text in self?.sendAccessoryText(text) },
-            onKey: { [weak self] key in self?.sendAccessoryKey(key) },
+            onSavedPrompts: { [weak self] in self?.onOpenSavedPrompts?() }, onPaste: { [weak self] in self?.pasteFromClipboard() },
+            onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
             onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
         var debugTapLinkHandlerForTesting: ((CGPoint) -> Bool)?
@@ -461,6 +465,7 @@ import Foundation
         public var onSendMouseClick: ((UInt8, TerminalScrollPointerPosition) -> Bool)?
         public var onOpenLink: ((String, GhosttyMobileActionEvent.OpenURLKind) -> Void)?
         public var onOpenComposer: (() -> Void)?
+        public var onOpenSavedPrompts: (() -> Void)?
         /// Handles a paste whose clipboard declares an image. The app layer reads and validates the image
         /// (types this layer cannot see) and returns whether it claimed the paste; `false` means the
         /// declared image carried nothing readable, so the text paste runs instead.
@@ -564,10 +569,8 @@ import Foundation
             trigger.isAccessibilityElement = false
             addSubview(trigger)
             NSLayoutConstraint.activate([
-                trigger.widthAnchor.constraint(equalToConstant: 0),
-                trigger.heightAnchor.constraint(equalToConstant: 0),
-                trigger.leadingAnchor.constraint(equalTo: leadingAnchor),
-                trigger.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
+                trigger.widthAnchor.constraint(equalToConstant: 0), trigger.heightAnchor.constraint(equalToConstant: 0),
+                trigger.leadingAnchor.constraint(equalTo: leadingAnchor), trigger.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
             ])
         }
 
@@ -2144,6 +2147,7 @@ import Foundation
 
             private let onSelect: () -> Void
             private let onComposer: () -> Void
+            private let onSavedPrompts: () -> Void
             private let onPaste: () -> Void
             private let onText: (String) -> Void
             private let onKey: (String) -> Void
@@ -2155,6 +2159,7 @@ import Foundation
             private let pinnedStackView = UIStackView()
             private var modifierButtons: [AccessoryModifier: UIButton] = [:]
             private let selectButton = UIButton(type: .system)
+            private let savedPromptsButton = UIButton(type: .system)
             private let composerButton = UIButton(type: .system)
             private let joystickButton = DirectionalPadButton(type: .system)
             private let keyboardButton = UIButton(type: .system)
@@ -2173,11 +2178,13 @@ import Foundation
             override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.toolbarHeight) }
 
             init(
-                onSelect: @escaping () -> Void, onComposer: @escaping () -> Void, onPaste: @escaping () -> Void, onText: @escaping (String) -> Void,
-                onKey: @escaping (String) -> Void, onModifier: @escaping (AccessoryModifier) -> Void, onKeyboardToggle: @escaping () -> Void
+                onSelect: @escaping () -> Void, onComposer: @escaping () -> Void, onSavedPrompts: @escaping () -> Void, onPaste: @escaping () -> Void,
+                onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void, onModifier: @escaping (AccessoryModifier) -> Void,
+                onKeyboardToggle: @escaping () -> Void
             ) {
                 self.onSelect = onSelect
                 self.onComposer = onComposer
+                self.onSavedPrompts = onSavedPrompts
                 self.onPaste = onPaste
                 self.onText = onText
                 self.onKey = onKey
@@ -2265,6 +2272,12 @@ import Foundation
                 selectButton.addAction(UIAction { [weak self] _ in self?.onSelect() }, for: .touchUpInside)
                 selectButton.isHidden = true
                 contentStackView.addArrangedSubview(selectButton)
+
+                configureButton(savedPromptsButton, imageName: "text.quote")
+                savedPromptsButton.accessibilityIdentifier = "terminal.accessory.prompts"
+                savedPromptsButton.accessibilityLabel = "Saved prompts"
+                savedPromptsButton.addAction(UIAction { [weak self] _ in self?.onSavedPrompts() }, for: .touchUpInside)
+                pinnedStackView.addArrangedSubview(savedPromptsButton)
 
                 configureButton(composerButton, imageName: "plus.bubble")
                 composerButton.accessibilityIdentifier = "terminal.accessory.composer"

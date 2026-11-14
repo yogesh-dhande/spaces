@@ -143,7 +143,7 @@ extension SpacesDeviceOverviewPayload {
             projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: retainedTerminalSessionIDs,
             workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
             automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys.filter(candidateKeys.contains),
-            comeBackLaterFlags: comeBackLaterFlags.filter { candidateKeys.contains($0.alertKey) })
+            comeBackLaterFlags: comeBackLaterFlags.filter { candidateKeys.contains($0.alertKey) }, savedPromptsRevision: savedPromptsRevision)
     }
 
     /// The workspace row a flag sits on, or nil when the overview no longer lists it.

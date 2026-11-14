@@ -40,9 +40,34 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     /// stream, which stays open indefinitely.
     private var overviewStreamSubscribers: [UUID: @Sendable (SpacesDeviceOverviewPayload) -> Void] = [:]
 
+    /// The prompts the demo device holds, ordered like a real device's library. The seed makes the prompts
+    /// screens worth looking at; edits last for the session, like every other demo mutation.
+    private var savedPrompts: [SpacesDeviceSavedPrompt]
+    private var savedPromptsRevision = 1
+
     init(library: DemoRecordingLibrary) {
         self.library = library
-        overview = library.overview
+        savedPrompts = Self.seedPrompts(now: Date())
+        overview = library.overview.demoReplacingSavedPromptsRevision(1)
+    }
+
+    private static func seedPrompts(now: Date) -> [SpacesDeviceSavedPrompt] {
+        let seeds: [(title: String, text: String, ageSeconds: TimeInterval)] = [
+            (
+                "Review the diff", "Review the changes on this branch like a careful teammate. Flag bugs, missing tests, and anything surprising.",
+                3600
+            ),
+            ("Explain this error", "Explain the error above in plain language, say what most likely caused it, and suggest the smallest fix.", 86400),
+            (
+                "Write the commit message",
+                "Summarize the staged changes as a short imperative subject line and a body explaining why they were made.", 259_200
+            ),
+        ]
+        return seeds.enumerated().map { index, seed in
+            let timestamp = TerminalSessionTimestamp.fractionalString(from: now.addingTimeInterval(-seed.ageSeconds))
+            return SpacesDeviceSavedPrompt(
+                id: "demo-prompt-\(index + 1)", title: seed.title, text: seed.text, createdAt: timestamp, updatedAt: timestamp, lastUsedAt: timestamp)
+        }
     }
 
     /// Loads the bundled recording and builds a backend. Throws if the bundle is missing or malformed.
@@ -152,6 +177,12 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
 
         case .dismissAlerts(let request): return serveDismissAlerts(keys: request.keys)
         case .setComeBackLater(let request): return serveSetComeBackLater(request)
+
+        case .listSavedPrompts: return savedPromptsResponse(message: "Listed saved prompts.")
+        case .createSavedPrompt(let request): return serveCreateSavedPrompt(request)
+        case .updateSavedPrompt(let request): return serveUpdateSavedPrompt(request)
+        case .deleteSavedPrompt(let request): return serveDeleteSavedPrompt(request)
+        case .recordSavedPromptUse(let request): return serveRecordSavedPromptUse(request)
 
         case .createWorkspace, .createProject, .importProject, .exportProject, .deleteProject, .pair, .requestDaemonRestart, .resolveTerminalLink,
             .readTerminalLinkChunk, .startDaemonSelfUpdate, .setDaemonUpdateChannel:
@@ -292,6 +323,76 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         for subscriber in overviewStreamSubscribers.values { subscriber(overview) }
     }
 
+    // MARK: - Saved prompts
+
+    private func serveCreateSavedPrompt(_ request: SpacesDeviceSavedPromptFields) -> SpacesDeviceAPIResponse {
+        if let rejection = savedPromptRejection(title: request.title, text: request.text) { return rejection }
+        let timestamp = Self.fractionalTimestamp()
+        let created = SpacesDeviceSavedPrompt(
+            id: UUID().uuidString, title: request.title.trimmingCharacters(in: .whitespacesAndNewlines), text: request.text, createdAt: timestamp,
+            updatedAt: timestamp, lastUsedAt: timestamp)
+        savedPrompts.append(created)
+        return commitSavedPrompts(message: "Saved the prompt.", createdPromptID: created.id)
+    }
+
+    private func serveUpdateSavedPrompt(_ request: SpacesDeviceSavedPromptUpdateRequest) -> SpacesDeviceAPIResponse {
+        if let rejection = savedPromptRejection(title: request.title, text: request.text) { return rejection }
+        guard let index = savedPrompts.firstIndex(where: { $0.id == request.id }) else { return missingSavedPrompt() }
+        let current = savedPrompts[index]
+        savedPrompts[index] = SpacesDeviceSavedPrompt(
+            id: current.id, title: request.title.trimmingCharacters(in: .whitespacesAndNewlines), text: request.text, createdAt: current.createdAt,
+            updatedAt: Self.fractionalTimestamp(), lastUsedAt: current.lastUsedAt)
+        return commitSavedPrompts(message: "Updated the prompt.")
+    }
+
+    private func serveDeleteSavedPrompt(_ request: SpacesDeviceSavedPromptReference) -> SpacesDeviceAPIResponse {
+        guard savedPrompts.contains(where: { $0.id == request.id }) else { return missingSavedPrompt() }
+        savedPrompts.removeAll { $0.id == request.id }
+        return commitSavedPrompts(message: "Deleted the prompt.")
+    }
+
+    private func serveRecordSavedPromptUse(_ request: SpacesDeviceSavedPromptReference) -> SpacesDeviceAPIResponse {
+        guard let index = savedPrompts.firstIndex(where: { $0.id == request.id }) else { return missingSavedPrompt() }
+        let current = savedPrompts[index]
+        savedPrompts[index] = SpacesDeviceSavedPrompt(
+            id: current.id, title: current.title, text: current.text, createdAt: current.createdAt, updatedAt: current.updatedAt,
+            lastUsedAt: Self.fractionalTimestamp())
+        return commitSavedPrompts(message: "Recorded the prompt use.")
+    }
+
+    /// Raises the revision and pushes the overview carrying it, the way a real device's write does.
+    private func commitSavedPrompts(message: String, createdPromptID: String? = nil) -> SpacesDeviceAPIResponse {
+        savedPromptsRevision += 1
+        overview = overview.demoReplacingSavedPromptsRevision(savedPromptsRevision)
+        for subscriber in overviewStreamSubscribers.values { subscriber(overview) }
+        return savedPromptsResponse(message: message, createdPromptID: createdPromptID)
+    }
+
+    private func savedPromptsResponse(message: String, createdPromptID: String? = nil) -> SpacesDeviceAPIResponse {
+        let ordered = savedPrompts.sorted { ($0.lastUsedAt, $0.createdAt, $1.id) > ($1.lastUsedAt, $1.createdAt, $0.id) }
+        return SpacesDeviceAPIResponse(
+            ok: true, message: message,
+            result: .savedPrompts(SpacesDeviceSavedPromptsResult(prompts: ordered, revision: savedPromptsRevision, createdPromptID: createdPromptID)))
+    }
+
+    private func missingSavedPrompt() -> SpacesDeviceAPIResponse {
+        SpacesDeviceAPIResponse(ok: false, message: "That prompt no longer exists.", errorCode: .notFound)
+    }
+
+    /// The same checks a real device makes, so Demo Mode shows the errors a paired device would.
+    private func savedPromptRejection(title: String, text: String) -> SpacesDeviceAPIResponse? {
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return SpacesDeviceAPIResponse(ok: false, message: "A prompt needs a title.", errorCode: .invalidArgument)
+        }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return SpacesDeviceAPIResponse(ok: false, message: "A prompt needs some text.", errorCode: .invalidArgument)
+        }
+        if text.utf8.count > SpacesDeviceSavedPrompt.maximumTextBytes {
+            return SpacesDeviceAPIResponse(ok: false, message: SpacesDeviceSavedPrompt.tooLongMessage, errorCode: .invalidArgument)
+        }
+        return nil
+    }
+
     // MARK: - Session synthesis
 
     /// A session synthesized for a started `notStarted` row: the alias to register and the summary to
@@ -393,6 +494,9 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     }
 
     private static func nowTimestamp() -> String { TerminalSessionTimestamp.string(from: Date()) }
+
+    /// Prompt timestamps keep sub-second resolution so two prompts used within a second still order.
+    private static func fractionalTimestamp() -> String { TerminalSessionTimestamp.fractionalString(from: Date()) }
 }
 
 /// Matches a process row against whatever identifier the request carried (id, template, or key).
@@ -449,7 +553,8 @@ extension SpacesDeviceOverviewPayload {
         // recorded replay or a synthesized row-backed session, so the keep-set is the session ids.
         return SpacesDeviceOverviewPayload(
             projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: sessions.map(\.id).sorted(),
-            daemonStatus: daemonStatus, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags)
+            daemonStatus: daemonStatus, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags,
+            savedPromptsRevision: savedPromptsRevision)
     }
 
     fileprivate func demoReplacingAlertState(dismissedAlertKeys: [String], comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag])
@@ -458,7 +563,16 @@ extension SpacesDeviceOverviewPayload {
         SpacesDeviceOverviewPayload(
             projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: retainedTerminalSessionIDs,
             workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
-            automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags)
+            automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags,
+            savedPromptsRevision: savedPromptsRevision)
+    }
+
+    fileprivate func demoReplacingSavedPromptsRevision(_ revision: Int) -> SpacesDeviceOverviewPayload {
+        SpacesDeviceOverviewPayload(
+            projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: retainedTerminalSessionIDs,
+            workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
+            automationRuns: automationRuns, dismissedAlertKeys: dismissedAlertKeys, comeBackLaterFlags: comeBackLaterFlags,
+            savedPromptsRevision: revision)
     }
 }
 

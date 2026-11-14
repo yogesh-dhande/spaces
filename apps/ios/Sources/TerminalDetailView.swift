@@ -28,6 +28,7 @@ struct TerminalDetailView: View {
     @State private var hasMountedTerminalSurface = false
     @State private var isBackNavigationInProgress = false
     @State private var isShowingComposer = false
+    @State private var isShowingSavedPrompts = false
     /// Bumped once for every dismissal of a sheet or full-screen cover presented over the terminal
     /// (composer, agent brief, link preview, Safari view, Stop confirmation), and forwarded to
     /// `GhosttyRemoteTerminalView` as `sheetDismissalTick`. Presented content can take first responder
@@ -170,6 +171,7 @@ struct TerminalDetailView: View {
                             }, onSendMouseMotion: { pointerPosition in model.sendMouseMotion(at: pointerPosition) },
                             clientSelection: model.clientSelection, selectionActions: selectionActions, selectionAccentColor: UIColor(Theme.accent),
                             onOpenLink: { link, kind in openTerminalLink(link, kind: kind) }, onOpenComposer: { isShowingComposer = true },
+                            onOpenSavedPrompts: { isShowingSavedPrompts = true },
                             // A clipboard image pasted at the terminal lands in the composer pre-attached
                             // rather than in the session: sending an image stays a deliberate composer action.
                             onPasteClipboardImage: {
@@ -234,8 +236,10 @@ struct TerminalDetailView: View {
         ) { safariLink in TerminalSafariView(url: safariLink.url) }.sheet(
             isPresented: $isShowingComposer, onDismiss: { noteTerminalSheetDismissed() }
         ) { TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots) }.sheet(
-            isPresented: briefSheetBinding, onDismiss: { noteTerminalSheetDismissed() }
-        ) { TerminalBriefSheet(appModel: appModel, sessionID: session.id, deviceID: deviceContext.deviceID) }.confirmationDialog(
+            isPresented: $isShowingSavedPrompts, onDismiss: { noteTerminalSheetDismissed() }
+        ) { SavedPromptsSheet(appModel: appModel) }.sheet(isPresented: briefSheetBinding, onDismiss: { noteTerminalSheetDismissed() }) {
+            TerminalBriefSheet(appModel: appModel, sessionID: session.id, deviceID: deviceContext.deviceID)
+        }.confirmationDialog(
             pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
             presenting: pendingStopRow
         ) { row in

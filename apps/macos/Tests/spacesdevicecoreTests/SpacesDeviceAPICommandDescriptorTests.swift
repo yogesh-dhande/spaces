@@ -153,7 +153,7 @@ import Testing
             .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
             .subscribeWorkspaceFileListSignature, .openServiceTunnel, .listAgentSessions, .writeAgentBrief, .readAgentBrief, .clearAgentBrief,
             .listAutomations, .listAutomationRuns, .workspaceReviewCommentList, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete,
-            .workspaceReviewCommentsSend:
+            .workspaceReviewCommentsSend, .listSavedPrompts, .createSavedPrompt, .updateSavedPrompt, .deleteSavedPrompt, .recordSavedPromptUse:
             10
         }
     }

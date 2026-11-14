@@ -146,6 +146,20 @@ import workspacecore
     /// Only a mode change shows it, so it never appears at launch, and a second change while it is up
     /// replaces the text and restarts the timer instead of stacking a second overlay.
     func showCycleModeHUD(model: CycleModeRowModel) {
+        showHUD(
+            title: model.mode.displayName, summary: model.hudSummary,
+            footer:
+                "Next \(host.shortcuts.footerShortcutHint(for: .guiNextShortcut))   Previous \(host.shortcuts.footerShortcutHint(for: .guiPreviousShortcut))"
+        )
+    }
+
+    /// Confirms that a prompt chosen in the command palette was copied. Same centered HUD as the cycling
+    /// mode: the palette just closed, so the confirmation belongs to the window, not to a pane.
+    func showCopiedPromptHUD(title: String) { showHUD(title: "Copied", summary: title, footer: "\u{2318}V to paste") }
+
+    /// The centered HUD both confirmations share; see `showCycleModeHUD` for why it is centered and why it
+    /// lives on the window's content view.
+    private func showHUD(title: String, summary: String, footer: String) {
         // `host.window` is always the main Spaces window, and the HUD is a subview of its content
         // view, so the main window is the only place it can appear. The mode chord is an in-app
         // shortcut, so Spaces is the active app at every keystroke, but the main window still need not
@@ -232,10 +246,9 @@ import workspacecore
             cycleModeHUDChordLabel = chordLabel
         }
 
-        titleLabel.stringValue = model.mode.displayName
-        summaryLabel.stringValue = model.hudSummary
-        chordLabel.stringValue =
-            "Next \(host.shortcuts.footerShortcutHint(for: .guiNextShortcut))   Previous \(host.shortcuts.footerShortcutHint(for: .guiPreviousShortcut))"
+        titleLabel.stringValue = title
+        summaryLabel.stringValue = summary
+        chordLabel.stringValue = footer
         // A pane installed after the HUD was built would otherwise cover it.
         contentView.addSubview(overlay, positioned: .above, relativeTo: nil)
         overlay.isHidden = false

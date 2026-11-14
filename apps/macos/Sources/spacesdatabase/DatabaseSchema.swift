@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 28
+    public static let currentVersion = 29
 
     /// The coding-agent orchestration watch graph, `agent_subscriptions`. The subscriber key is a terminal
     /// session id (a subscriber may be a plain terminal with no agent row), and the target is the agent
@@ -960,6 +960,9 @@ public enum DatabaseSchema {
         DatabaseMigrationStep(fromVersion: 27, toVersion: 28, description: "Add pinned threads", requiresBackup: true) { handle in
             try migrationExecuteBatch(handle, sql: pinnedThreadsSQL)
         },
+        DatabaseMigrationStep(fromVersion: 28, toVersion: 29, description: "Add saved prompts", requiresBackup: true) {
+            try migrationExecuteBatch($0, sql: savedPromptsSQL)
+        },
     ]
 
     /// Named, resumable coding-agent conversations kept under their workspace after the agent stops. A pin
@@ -1081,6 +1084,20 @@ public enum DatabaseSchema {
               row_id TEXT NOT NULL,
               flagged_at TEXT NOT NULL,
               PRIMARY KEY (row_kind, row_id)
+            );
+        """
+
+    /// The prompts the user saved on this device. `last_used_at` is never empty: a new prompt counts as
+    /// used when it is created, so one non-null column orders the list and the store never reads back a
+    /// NULL. Timestamps are fixed-width UTC strings, so sorting the text sorts chronologically.
+    static let savedPromptsSQL = """
+            CREATE TABLE IF NOT EXISTS saved_prompts (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              text TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_used_at TEXT NOT NULL
             );
         """
 
@@ -1416,6 +1433,8 @@ public enum DatabaseSchema {
             \(restorableSessionsSQL)
 
             \(alertStateSQL)
+
+            \(savedPromptsSQL)
 
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL

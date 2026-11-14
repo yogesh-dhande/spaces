@@ -97,6 +97,12 @@ export const docsNavGroups: DocsNavGroup[] = [
         summary:
           "See which terminals use the most CPU and memory on each device, and what Spaces itself costs.",
       },
+      {
+        href: "/docs/prompts",
+        title: "Prompts",
+        summary:
+          "Save prompts you reuse and copy one into any terminal from the Mac, the command palette, or your iPhone.",
+      },
     ],
   },
   {

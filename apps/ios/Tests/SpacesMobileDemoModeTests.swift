@@ -141,6 +141,25 @@
             XCTAssertGreaterThan(model.undismissedAlertCount, 0)
         }
 
+        func testDemoModeListsAndEditsSavedPromptsThroughTheDemoBackend() async throws {
+            let model = SpacesMobileAppModel()
+            model.setDemoMode(true)
+            await model.refresh()
+            for _ in 0..<200 where model.savedPrompts.entries(matching: "").count < 3 { try? await Task.sleep(for: .milliseconds(10)) }
+
+            let titles = model.savedPrompts.entries(matching: "").map(\.prompt.title)
+            XCTAssertEqual(Set(titles), ["Review the diff", "Explain this error", "Write the commit message"])
+            XCTAssertFalse(model.savedPrompts.showsDeviceNames, "one paired device needs no device label")
+
+            model.savedPrompts.beginNewPrompt()
+            model.savedPrompts.draft?.title = "Demo prompt"
+            model.savedPrompts.draft?.text = "Hello"
+            let outcome = await model.savedPrompts.saveDraft()
+
+            XCTAssertEqual(outcome, .created)
+            XCTAssertEqual(model.savedPrompts.entries(matching: "").first?.prompt.title, "Demo prompt")
+        }
+
         // MARK: - Gating unsupported controls
 
         func testCanRenameIsFalseInDemoModeForOtherwiseRenamableRow() async throws {

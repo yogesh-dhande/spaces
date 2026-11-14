@@ -37,7 +37,9 @@ export default function WindowManagementDocsPage() {
         <Prose>
           <code>⌘⌥-</code> opens the command palette from anywhere. With nothing typed it shows
           Alerts first, then your most recently focused targets. Typing fuzzy-searches by name
-          first, then by secondary text. <code>⌘X</code> dismisses the highlighted alert.
+          first, then by secondary text. <code>⌘X</code> dismisses the highlighted alert. Once you type, a Prompts section after the targets lists your matching{" "}
+          <DocLink href="/docs/prompts">saved prompts</DocLink>; choosing one copies it. The numbered
+          shortcuts reach targets only.
         </Prose>
       </Section>
 

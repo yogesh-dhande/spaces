@@ -973,7 +973,8 @@
             XCTAssertEqual(tracking.last, "Select text")
             XCTAssertEqual(tracking.dropLast().last, "Option", "the key sits at the end of the scrolling keys, just after opt")
             XCTAssertEqual(
-                hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Compose message", "Arrow key joystick", "Hide keyboard"])
+                hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned,
+                ["Saved prompts", "Compose message", "Arrow key joystick", "Hide keyboard"])
 
             hostView.debugToggleSelectKeyForTesting()
             hostView.update(snapshot: filledSnapshot(columns: 40, rows: 10), renderStateKey: "not-tracking", fallbackText: "")
@@ -1126,7 +1127,8 @@
                 scrollableButtons.compactMap(\.accessibilityLabel),
                 ["Paste", "tab", "/", "~", "|", "-", "_", "esc", "Shift", "Control", "Command", "Option"])
             XCTAssertEqual(scrollableButtons.first?.accessibilityIdentifier, "terminal.accessory.paste")
-            XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Compose message", "Arrow key joystick", "Hide keyboard"])
+            XCTAssertEqual(
+                pinnedButtons.compactMap(\.accessibilityLabel), ["Saved prompts", "Compose message", "Arrow key joystick", "Hide keyboard"])
             let joystickButton = try XCTUnwrap(pinnedButtons.first { $0.accessibilityLabel == "Arrow key joystick" })
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
 
@@ -1159,7 +1161,8 @@
 
             hostView.setSoftwareKeyboardVisible(false)
             XCTAssertEqual(
-                hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Compose message", "Arrow key joystick", "Show keyboard"])
+                hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned,
+                ["Saved prompts", "Compose message", "Arrow key joystick", "Show keyboard"])
 
             hostView.setAcceptsTerminalInput(false)
             XCTAssertNil(hostView.inputAccessoryView)
@@ -1715,7 +1718,8 @@
 
             private static func impl() throws -> NSObject {
                 try XCTUnwrap(
-                    (NSClassFromString("UIKeyboardImpl") as? NSObject.Type)?.perform(NSSelectorFromString("sharedInstance"))?.takeUnretainedValue() as? NSObject)
+                    (NSClassFromString("UIKeyboardImpl") as? NSObject.Type)?.perform(NSSelectorFromString("sharedInstance"))?.takeUnretainedValue()
+                        as? NSObject)
             }
 
             private static func setBool(_ name: String, _ value: Bool, on impl: NSObject) {
@@ -1801,13 +1805,12 @@
             spin(for: 0.3)
             // Keyboard up: wait for the real keyboard to occlude the pane.
             let keyboardDeadline = Date().addingTimeInterval(8)
-            while hostView.visibleRenderBoundsForTesting().height > screenBounds.height - 200, Date() < keyboardDeadline {
-                spin(for: 0.1)
-            }
+            while hostView.visibleRenderBoundsForTesting().height > screenBounds.height - 200, Date() < keyboardDeadline { spin(for: 0.1) }
             spin(for: 1.0)
             let keyboardUpRows = hostView.renderedViewportSizeForTesting().rows
             XCTAssertLessThan(
-                keyboardUpRows, reportedRows, "precondition: the real software keyboard never showed, so the hide below proves nothing (hardware keyboard attached?)")
+                keyboardUpRows, reportedRows,
+                "precondition: the real software keyboard never showed, so the hide below proves nothing (hardware keyboard attached?)")
 
             // The accessory toolbar's keyboard toggle calls exactly this.
             hostView.setSoftwareKeyboardVisible(false)

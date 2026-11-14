@@ -2308,7 +2308,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             sessions: payload.sessions.map(overviewSessionStateProjection), retainedTerminalSessionIDs: payload.retainedTerminalSessionIDs,
             workspaceIDsWithTeardownInFlight: payload.workspaceIDsWithTeardownInFlight, daemonStatus: payload.daemonStatus,
             automations: payload.automations, automationRuns: payload.automationRuns, dismissedAlertKeys: payload.dismissedAlertKeys,
-            comeBackLaterFlags: payload.comeBackLaterFlags)
+            comeBackLaterFlags: payload.comeBackLaterFlags, savedPromptsRevision: payload.savedPromptsRevision)
     }
 
     private static func overviewSessionStateProjection(_ session: SpacesDeviceTerminalSessionSummary) -> SpacesDeviceTerminalSessionSummary {
@@ -3595,6 +3595,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .endAutomationAgents(let payload): return try handleEndAutomationAgentsRequest(payload, context: context)
         case .restoreSessions(let payload): return try handleRestoreSessionsRequest(payload, context: context)
         case .discardRestorableSessions(let payload): return try handleDiscardRestorableSessionsRequest(payload, context: context)
+        case .listSavedPrompts: return try handleListSavedPromptsRequest(context: context)
+        case .createSavedPrompt(let payload): return try handleCreateSavedPromptRequest(payload, context: context)
+        case .updateSavedPrompt(let payload): return try handleUpdateSavedPromptRequest(payload, context: context)
+        case .deleteSavedPrompt(let payload): return try handleDeleteSavedPromptRequest(payload, context: context)
+        case .recordSavedPromptUse(let payload): return try handleRecordSavedPromptUseRequest(payload, context: context)
         }
     }
 
@@ -6865,6 +6870,76 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         try context.orchestrator().setComeBackLater(
             rowKind: request.rowKind, rowID: rowID, isOn: request.isOn, in: try loadOverview(store: context.store()))
         return try refreshedMutationResponse(context: context, message: request.isOn ? "Flagged to come back later." : "Cleared the flag.")
+    }
+
+    private func handleListSavedPromptsRequest(context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        savedPromptsResponse(try context.store().savedPromptLibrary(), message: "Listed saved prompts.")
+    }
+
+    private func handleCreateSavedPromptRequest(_ request: SpacesDeviceSavedPromptFields, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        if let rejection = savedPromptRejection(title: request.title, text: request.text) { return rejection }
+        let store = try context.store()
+        let created = try store.createSavedPrompt(
+            title: request.title.trimmingCharacters(in: .whitespacesAndNewlines), text: request.text,
+            at: TerminalSessionTimestamp.fractionalString(from: Date()))
+        let library = try store.savedPromptLibrary()
+        return savedPromptsResponse(
+            SpacesDeviceSavedPromptsResult(prompts: library.prompts, revision: library.revision, createdPromptID: created.id),
+            message: "Saved the prompt.")
+    }
+
+    private func handleUpdateSavedPromptRequest(_ request: SpacesDeviceSavedPromptUpdateRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        if let rejection = savedPromptRejection(title: request.title, text: request.text) { return rejection }
+        let store = try context.store()
+        guard
+            try store.updateSavedPrompt(
+                id: request.id, title: request.title.trimmingCharacters(in: .whitespacesAndNewlines), text: request.text,
+                at: TerminalSessionTimestamp.fractionalString(from: Date()))
+        else { return missingSavedPromptResponse }
+        return savedPromptsResponse(try store.savedPromptLibrary(), message: "Updated the prompt.")
+    }
+
+    private func handleDeleteSavedPromptRequest(_ request: SpacesDeviceSavedPromptReference, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let store = try context.store()
+        guard try store.deleteSavedPrompt(id: request.id) else { return missingSavedPromptResponse }
+        return savedPromptsResponse(try store.savedPromptLibrary(), message: "Deleted the prompt.")
+    }
+
+    private func handleRecordSavedPromptUseRequest(_ request: SpacesDeviceSavedPromptReference, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let store = try context.store()
+        guard try store.recordSavedPromptUse(id: request.id, at: TerminalSessionTimestamp.fractionalString(from: Date())) else {
+            return missingSavedPromptResponse
+        }
+        return savedPromptsResponse(try store.savedPromptLibrary(), message: "Recorded the prompt use.")
+    }
+
+    private var missingSavedPromptResponse: SpacesDeviceAPIResponse {
+        SpacesDeviceAPIResponse(ok: false, message: "That prompt no longer exists.", errorCode: .notFound)
+    }
+
+    private func savedPromptsResponse(_ library: SpacesDeviceSavedPromptsResult, message: String) -> SpacesDeviceAPIResponse {
+        SpacesDeviceAPIResponse(ok: true, message: message, result: .savedPrompts(library))
+    }
+
+    /// The title is required once trimmed, the text must not be blank, and the text is capped so one list
+    /// fetch stays bounded. The text itself is stored exactly as typed.
+    private func savedPromptRejection(title: String, text: String) -> SpacesDeviceAPIResponse? {
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return SpacesDeviceAPIResponse(ok: false, message: "A prompt needs a title.", errorCode: .invalidArgument)
+        }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return SpacesDeviceAPIResponse(ok: false, message: "A prompt needs some text.", errorCode: .invalidArgument)
+        }
+        if text.utf8.count > SpacesDeviceSavedPrompt.maximumTextBytes {
+            return SpacesDeviceAPIResponse(ok: false, message: SpacesDeviceSavedPrompt.tooLongMessage, errorCode: .invalidArgument)
+        }
+        return nil
     }
 
     /// Spawns a coding-agent terminal session on the daemon host. Runs the same command gate as the
