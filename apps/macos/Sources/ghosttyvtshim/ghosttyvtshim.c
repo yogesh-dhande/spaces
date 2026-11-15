@@ -179,11 +179,11 @@ static void *spaces_ghostty_vt_dlopen_in_directory(const char *directory) {
 #if defined(__APPLE__)
         "libghostty-vt.dylib",
         "libghostty-vt.1.dylib",
-        "libghostty-vt.1.1.0.dylib",
+        "libghostty-vt.1.0.2.dylib",
 #else
         "libghostty-vt.so",
         "libghostty-vt.so.1",
-        "libghostty-vt.so.1.1.0",
+        "libghostty-vt.so.1.0.2",
 #endif
         NULL,
     };
