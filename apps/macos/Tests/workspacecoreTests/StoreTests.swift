@@ -175,6 +175,10 @@ final class StoreTests: XCTestCase {
             XCTAssertEqual(step.toVersion, version + 1, "Step from \(version) must move exactly one version forward")
             version = step.toVersion
         }
+        // Two branches adding the same version step merge without a conflict when both also set the same
+        // `currentVersion`; the migrator would then run only the first and skip the other's schema.
+        let fromVersions = DatabaseSchema.migrationSteps.map(\.fromVersion)
+        XCTAssertEqual(Set(fromVersions).count, fromVersions.count, "Two migration steps start from the same schema version")
     }
 
     // Upgrading a profile that already holds ended sessions must not cost them their replayable final

@@ -1061,6 +1061,39 @@ public enum SpacesDeviceClient {
         return response.agentSessions ?? []
     }
 
+    /// The device's saved prompt library, most recently used first, with its revision.
+    public static func listSavedPrompts(context: DeviceRequestContext) throws -> SpacesDeviceSavedPromptsResult {
+        try savedPromptsResult(try request(.init(command: .listSavedPrompts), context: context))
+    }
+
+    /// Saves a prompt on the device and returns the whole library. The device rejects a blank title or
+    /// text, and text over `SpacesDeviceSavedPrompt.maximumTextBytes`, with `.invalidArgument`.
+    public static func createSavedPrompt(title: String, text: String, context: DeviceRequestContext) throws -> SpacesDeviceSavedPromptsResult {
+        try savedPromptsResult(try request(.init(command: .createSavedPrompt(.init(title: title, text: text))), context: context))
+    }
+
+    /// Replaces a prompt's title and text, keeping its place in the library. A prompt another client
+    /// deleted fails with `.notFound`.
+    public static func updateSavedPrompt(id: String, title: String, text: String, context: DeviceRequestContext) throws
+        -> SpacesDeviceSavedPromptsResult
+    { try savedPromptsResult(try request(.init(command: .updateSavedPrompt(.init(id: id, title: title, text: text))), context: context)) }
+
+    public static func deleteSavedPrompt(id: String, context: DeviceRequestContext) throws -> SpacesDeviceSavedPromptsResult {
+        try savedPromptsResult(try request(.init(command: .deleteSavedPrompt(.init(id: id))), context: context))
+    }
+
+    /// Records that a prompt was copied, which moves it to the top of the library.
+    public static func recordSavedPromptUse(id: String, context: DeviceRequestContext) throws -> SpacesDeviceSavedPromptsResult {
+        try savedPromptsResult(try request(.init(command: .recordSavedPromptUse(.init(id: id))), context: context))
+    }
+
+    private static func savedPromptsResult(_ response: SpacesDeviceAPIResponse) throws -> SpacesDeviceSavedPromptsResult {
+        guard let library = response.savedPrompts else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return library
+    }
+
     /// Replaces a coding agent's brief on a paired device (`spaces agent brief write --device`). Returns the
     /// whole response: its `agentSessions` carries the updated row, and its `message` says whether the
     /// write stored a document or cleared the brief, which only the device's daemon knows after sanitizing.

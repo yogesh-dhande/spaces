@@ -659,6 +659,61 @@ struct SpacesDeviceAPIClient: Sendable {
         return response.automationRuns ?? []
     }
 
+    /// The device's saved prompt library, most recently used first, with its revision. Read-only
+    /// (replay-safe), so it uses `sendRequest` rather than `mutation`.
+    func listSavedPrompts(commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceSavedPromptsResult {
+        let response = try await sendRequest(
+            .init(command: .listSavedPrompts, authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        return try savedPromptsResult(response)
+    }
+
+    /// Saves a prompt on the device and returns the whole library. The device rejects a blank title or
+    /// text, and text over `SpacesDeviceSavedPrompt.maximumTextBytes`, with `.invalidArgument`.
+    func createSavedPrompt(title: String, text: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceSavedPromptsResult
+    {
+        try savedPromptsResult(
+            try await mutation(
+                .init(
+                    command: .createSavedPrompt(.init(title: title, text: text)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+                commandChannel: commandChannel))
+    }
+
+    /// Replaces a prompt's title and text, keeping its place in the library. A prompt another client
+    /// deleted fails with `.notFound`.
+    func updateSavedPrompt(id: String, title: String, text: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceSavedPromptsResult
+    {
+        try savedPromptsResult(
+            try await mutation(
+                .init(
+                    command: .updateSavedPrompt(.init(id: id, title: title, text: text)), authToken: settings.trimmedAuthToken,
+                    clientApp: clientAppIdentity), commandChannel: commandChannel))
+    }
+
+    func deleteSavedPrompt(id: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceSavedPromptsResult {
+        try savedPromptsResult(
+            try await mutation(
+                .init(command: .deleteSavedPrompt(.init(id: id)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+                commandChannel: commandChannel))
+    }
+
+    /// Records that a prompt was copied, which moves it to the top of the library.
+    func recordSavedPromptUse(id: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceSavedPromptsResult {
+        try savedPromptsResult(
+            try await mutation(
+                .init(command: .recordSavedPromptUse(.init(id: id)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+                commandChannel: commandChannel))
+    }
+
+    private func savedPromptsResult(_ response: SpacesDeviceAPIResponse) throws -> SpacesDeviceSavedPromptsResult {
+        guard let library = response.savedPrompts else {
+            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return saved prompts.")
+        }
+        return library
+    }
+
     /// - Parameter includesRenderUpdate: Whether the response should carry the session's screen. The
     ///   connect bootstrap read passes false because the subscription it is issued alongside delivers the
     ///   frame it would otherwise duplicate; every other read paints from what it gets back and passes true.

@@ -26,7 +26,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 ## Core Concepts
 
 ### Device
-- A device is a Mac or Linux machine running a Spaces daemon. Each daemon is authoritative for its own projects, workspaces, configuration, runtime, terminal sessions, notes, alerts, paired clients, and name. The Mac app, the iOS app, and the CLI are clients of the daemons they are paired with.
+- A device is a Mac or Linux machine running a Spaces daemon. Each daemon is authoritative for its own projects, workspaces, configuration, runtime, terminal sessions, notes, alerts, saved prompts, paired clients, and name. The Mac app, the iOS app, and the CLI are clients of the daemons they are paired with.
 - Projects and workspaces are never shared across devices: the same repository on two devices is two separate entries. If two devices report the same project (a profile database copied between machines), the Mac shows one project row from the first device in sidebar order, with only that device's workspaces; alerts from both copies still show.
 - Creating or changing a project, workspace, terminal, process, or coding agent goes to the daemon that owns the row (on iOS, the selected device).
 - Each device keeps workspaces under its own root, by default `~/spaces/workspaces/`, with app-managed clones in `~/spaces/repos/`.
@@ -100,7 +100,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 
 ### Unreachable devices (Mac)
 - The Mac lists every paired device at once, and each loads independently: a slow or unreachable device, including this Mac's own daemon, never blocks the others.
-- An unreachable device keeps everything it last reported: its projects, workspaces, runtime targets, and alerts stay listed (dimmed, alerts still counted in the badge), a selection under it stays selected, and its open panes stay open. An outage never moves the user elsewhere or empties the sidebar.
+- An unreachable device keeps everything it last reported: its projects, workspaces, runtime targets, and alerts stay listed (dimmed, alerts still counted in the badge), a selection under it stays selected, and its open panes stay open. The exception is saved prompts, which are hidden while their device is unreachable (see [Saved Prompts](#saved-prompts)). An outage never moves the user elsewhere or empties the sidebar.
 - An unreachable device can be browsed but not acted on. Anything that needs its daemon (workspace lifecycle, hide, delete, running or stopping targets, renaming, creating a workspace, saving settings) is unavailable. An already-open pane stays focusable; opening a pane for a target that is not open is refused, rather than leaving a dead pane that would not recover. An action reached by shortcut is refused with a message naming the device as offline and saying how to recover (reconnect a remote device, restart this Mac's daemon).
 - Recovery is automatic: the Mac keeps re-checking every device that is not loaded, this Mac included, retrying less often the longer one stays down, and a network change (joining or leaving a network, wake, Tailscale up or down) reconnects at once. The device's Reconnect (Restart for this Mac) retries immediately instead of waiting out the backoff. Reloading is never needed.
 
@@ -295,7 +295,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - When another client stops or deletes a workspace, whether it lives on this Mac or a paired device, the Mac closes its panes and its tracked browser tabs once it sees the change. With no Mac app running at the stop, the tabs stay open, because only the app tracks them; deleting that workspace later, with the app running, closes them.
 
 ### Sidebar
-- The fixed rows above the projects are Alerts, Automations, and Resources, in that order. Arrow-key navigation moves through them in the same order before the first workspace.
+- The fixed rows above the projects are Alerts, Automations, Resources, and Prompts, in that order. Arrow-key navigation moves through them in the same order before the first workspace.
 - Under a project, the default workspace comes first, then the rest by name (natural, case-insensitive).
 - A workspace's targets are grouped in a fixed order: browser sessions, configured processes (running or not), coding agents, then ad hoc terminals. Pinned threads, running or not, lead the coding agents in the order they were pinned. The numbered target shortcuts follow the same order, so a row's position and its number never disagree.
 - Each managed target carries a state (working or running, blocked, done, inactive or not started, exited), and a workspace shows its highest-attention target's state even while collapsed, in the priority exited, blocked, done, working, idle. Ad hoc terminals and browser sessions carry no state.
@@ -332,7 +332,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - Only leader+Up and leader+Down move the sidebar selection; plain arrow keys never do. They work while a terminal pane has keyboard focus, and a matched chord is consumed at a list edge so it never reaches the terminal.
 
 ### Command palette
-- The palette draws from every navigable target across workspaces: browser sessions, processes, ad hoc terminals, and live coding-agent terminals. An empty query shows Alerts items first, then the most recently focused targets, up to nine rows, falling back to target order with no focus history. A typed query fuzzy-matches project, workspace, target name, and detail, including across fields (`fu` matches `Frontend` plus `URL`). Enter runs the same action as the target's numbered shortcut.
+- The palette draws from every navigable target across workspaces: browser sessions, processes, ad hoc terminals, and live coding-agent terminals. An empty query shows Alerts items first, then the most recently focused targets, up to nine rows, falling back to target order with no focus history. A typed query fuzzy-matches project, workspace, target name, and detail, including across fields (`fu` matches `Frontend` plus `URL`). Enter runs the same action as the target's numbered shortcut. Once a query is typed, a Prompts section after the targets lists the saved prompts whose title or text matches (see [Saved Prompts](#saved-prompts)); with an empty query it is absent. The numbered shortcuts reach targets only.
 
 ### Numbered shortcuts
 - The direct-focus modifier plus `1` through `9`, and `0` for the tenth, focuses the selected workspace's targets in sidebar order: browser sessions and configured processes in saved settings order, then coding agents, then ad hoc terminals. Configured targets come first so their numbers never move as agents and terminals come and go.
@@ -458,6 +458,29 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - CPU is a share of one core, so a busy process can pass 100%. Memory is the process's physical footprint on macOS (what Activity Monitor shows, including compressed pages) and its resident memory on Linux.
 - Each row and card carries a CPU history from when the pane opened, capped at the last 10 minutes.
 - A row's jump button, or a double-click on the row, opens that terminal (on its own device), or in Workspaces mode selects that workspace in the sidebar. A hidden workspace, or one in a hidden project, is still listed (it still uses resources) but has no sidebar row to select, so its Workspaces-mode row has no jump; its terminals still open from Terminals mode.
+
+## Saved Prompts
+- A saved prompt is a title and text the user keeps to paste into a terminal later, typically to a coding agent. Prompts are global: not tied to a project or workspace.
+- Each device stores its own prompts. The Mac and iOS clients show one combined list across every reachable device, so a prompt saved on one device is usable from any client paired with it. A device that is unreachable or blocked has its prompts hidden, not dimmed: they could not be copied from or edited anyway. This is the exception to the dimming rule for an unreachable device's rows. They return when the device does.
+- The title must be non-empty and the text not blank. Text is capped at 100 KB; a longer prompt is refused with "Prompts can be up to 100 KB." and nothing is saved.
+- The list is ordered by when a prompt was last used, most recent first. Using a prompt means Copy or Copy edited, and creating a prompt counts as using it, so a never-copied prompt shows its creation time. Saving an edit does not reorder. The time is stored on the prompt's device, so every client shows the same order; across devices the order trusts each device's clock.
+- Copy is the only way to use a prompt: it copies the text to the clipboard. Copy edited, on an open prompt with unsaved edits, copies the edited text without saving it. Copy still works when recording the use fails; the order just does not move.
+- Search is a case- and diacritic-insensitive substring match on title and text.
+- Two clients editing the same prompt is last write wins, with no conflict detection. A client holding unsaved edits keeps them when the prompt changes elsewhere; one with no edits shows the new text.
+- Text typed while a new prompt is saving is kept as an unsaved edit of the saved prompt.
+- Delete asks for confirmation, naming the prompt and its device, and drops any unsaved edits with it.
+- A new prompt asks which device stores it only when 2 or more devices are paired; the default is this Mac on the Mac and the active device on iOS.
+
+### Mac
+- The Prompts row sits below Resources and shows the number of prompts (hidden at zero). The pane is a table: Title, Prompt (one-line preview), Device (only with 2 or more paired devices; this Mac reads "This Mac"), Used (how long ago), and a Copy button per row.
+- Clicking a row opens it in place: its title becomes editable and the full text opens in an editor below, so the preview is empty while open. Discard and Save appear only while the prompt has unsaved edits, which the editor marks "Edited · not saved". Copy on an open prompt with unsaved edits reads "Copy edited". New Prompt opens an empty draft at the top; it is absent when no device is reachable.
+- Clicking the open row outside its title and Copy, or pressing Esc in the title or text, closes it, first asking Save, Discard, or Cancel when there are unsaved edits.
+- Leaving a prompt with unsaved edits inside the pane (another row, collapsing, New Prompt) or through the sidebar (any sidebar row or arrow navigation) asks Save, Discard, or Cancel. Any other way off the pane (the palette, a shortcut, a deep link) keeps the draft until the user returns to the pane. Quitting drops it.
+- In the command palette, choosing a prompt copies it, closes the palette so focus returns to the previous terminal, and shows a "Copied" confirmation in the main window with the title and the paste chord.
+
+### iOS
+- The picker opens from the terminal's Prompts key as a sheet with a search field and a Copy button on each row; Copy closes the sheet. Its Library link opens the full list, where a row opens a detail screen to edit or delete the prompt and a plus creates one.
+- A detail screen with unsaved edits asks Save, Discard, or Cancel when the user goes back, and the sheet cannot be swiped away while edits are unsaved.
 
 ## Coding Agents
 
@@ -603,6 +626,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - On the alternate screen (a full-screen program such as a coding agent's interface), the keyboard does resize the session: the program lays out again above the keyboard and nothing is hidden. A program starting or exiting while the keyboard is up resizes or restores the session the same way. Other viewers see the resize.
 - Mac file paths and HTTPS links to images, video, PDF, text, Markdown, and HTML preview inside Spaces (HTML scoped to the single file, with no sibling or network loads); previews over 4 MiB for text, Markdown, or HTML are refused. Other web links open in an in-app Safari view with the device's normal cookies, and `spaces://` links navigate in the app.
 - Paste (key, `cmd` then `v`, or the system Paste) sends clipboard text as a paste; a clipboard image opens the composer with the image attached rather than sending it. `cmd` then `v` is consumed even when the clipboard is empty. A modifier key applies to the next text, arrow, Return, or Backspace, so `shift` then Return sends Shift+Enter without a hardware keyboard.
+- A Prompts key on the accessory bar opens the saved-prompt picker (see [Saved Prompts](#saved-prompts)). Its Copy puts a prompt on the clipboard and closes the picker; Paste then sends it like any clipboard text.
 - The composer sends as one burst: the text, then each image as a path on the owning device, then Return, all with paste semantics. Images follow the Mac's image-paste rules. If any step fails, Return is not sent and the whole draft is kept; a successful send clears it. The draft survives closing and reopening the composer.
 
 ### Browser sessions

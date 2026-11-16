@@ -252,6 +252,11 @@ private struct DeviceSyncState {
     // Resources sidebar row
     private var resourcesHeaderStack: NSStackView?
     private var resourcesRowRail: NSView?
+
+    // Prompts sidebar row
+    private var promptsHeaderStack: NSStackView?
+    private var promptsRowRail: NSView?
+    private var promptsRowBadge: NSTextField?
     /// Top-bar warning icon shown while another Spaces instance owns desktop control.
     private(set) weak var desktopControlStatusIcon: NSImageView?
 
@@ -1572,6 +1577,8 @@ private struct DeviceSyncState {
             host.showAutomationsDetail()
         } else if host.showingResources {
             host.showResourcesDetail()
+        } else if host.showingPrompts {
+            host.showPromptsDetail()
         } else if AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
             visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
             newLoadState: host.deviceModel.deviceSections[index].loadState)
@@ -1623,6 +1630,9 @@ private struct DeviceSyncState {
         // A brief reaches this client only in a coding-agent row of an overview, so this is where every
         // open pane's brief column, and the footer glyph that toggles it, follows the installed rows.
         host.panelCoordinator.refreshAgentBriefs()
+        // A prompt library change reaches this client only as a revision in an overview, so this is where
+        // the devices whose revision moved are fetched, and where a device leaving drops its prompts.
+        host.prompts.reconcileDevices()
     }
 
     /// The single entry point for "the sidebar's data changed": re-merges the device sections and then
@@ -1907,15 +1917,20 @@ private struct DeviceSyncState {
             let target = AppKitController.sidebarArrowSelectionTarget(
                 visibleWorkspaceIDsByProject: visibleWorkspaceIDsByProject, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID,
                 selectedWorkspaceID: host.selectedWorkspaceID, showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations,
-                showingResources: host.showingResources, direction: direction)
+                showingResources: host.showingResources, showingPrompts: host.showingPrompts, direction: direction)
         else { return false }
-        switch target {
-        case .alerts: host.alerts.showAlertsDetail(presentation: .userNavigation)
-        case .automations: host.showAutomationsDetail()
-        case .resources: host.showResourcesDetail()
-        case .workspace(let workspaceID):
-            guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
-            selectWorkspace(workspace)
+        if case .workspace(let workspaceID) = target, findWorkspace(id: workspaceID) == nil { return false }
+        // Leaving the Prompts pane with unsaved edits asks first, so the move may run after the answer.
+        host.prompts.confirmLeaving { [self] in
+            switch target {
+            case .alerts: host.alerts.showAlertsDetail(presentation: .userNavigation)
+            case .automations: host.showAutomationsDetail()
+            case .resources: host.showResourcesDetail()
+            case .prompts: host.showPromptsDetail()
+            case .workspace(let workspaceID):
+                guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
+                selectWorkspace(workspace)
+            }
         }
         return true
     }
@@ -2048,6 +2063,17 @@ private struct DeviceSyncState {
     func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { true }
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
+        // A click or arrow key in the outline leaves the Prompts pane, so unsaved edits are settled first and
+        // the selection is made afterwards. Programmatic selections do not pass through here and keep the draft.
+        if host.showingPrompts, host.prompts.hasUnsavedEdits, isSelectableOutlineItem(item) {
+            let row = outlineView.row(forItem: item)
+            host.prompts.confirmLeaving { outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+            return false
+        }
+        return isSelectableOutlineItem(item)
+    }
+
+    private func isSelectableOutlineItem(_ item: Any) -> Bool {
         switch (item as? OutlineItemRef)?.item {
         case .device, .emptyProject, .runtimeTarget: return false
         // A row marked as deleting is inert: it refuses selection here, which also covers arrow-key
@@ -3177,7 +3203,8 @@ private struct DeviceSyncState {
             host.selectedWorkspaceID = nil
             host.showingSettings = false
             if AppKitController.sidebarClearedSelectionPresentsPlaceholder(
-                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, showingResources: host.showingResources)
+                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, showingResources: host.showingResources,
+                showingPrompts: host.showingPrompts)
             {
                 host.showPlaceholder(presentation: .userNavigation)
             }
@@ -3616,6 +3643,75 @@ private struct DeviceSyncState {
         header.layer?.backgroundColor = NSColor.clear.cgColor
         resourcesRowRail?.isHidden = !host.showingResources
         if let rail = resourcesRowRail {
+            bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
+        }
+    }
+
+    func makePromptsSidebarRow() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.setAccessibilityIdentifier("sidebar-prompts")
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "text.quote", accessibilityDescription: "Prompts")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
+        icon.contentTintColor = .secondaryLabelColor
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let titleLabel = NSTextField(labelWithString: "Prompts")
+        titleLabel.font = Typography.controlLabel
+        titleLabel.textColor = .labelColor
+
+        // A muted count: unlike the Alerts badge it asks for nothing, so it stays out of the attention colors.
+        let badge = NSTextField(labelWithString: "")
+        badge.font = Typography.monoBadge
+        badge.textColor = .secondaryLabelColor
+        badge.alignment = .right
+        badge.isHidden = true
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        promptsRowBadge = badge
+
+        let header = NSStackView(views: [icon, titleLabel, NSView(), badge, makeSidebarBadgeTrailingSlot()])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+        header.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        header.wantsLayer = true
+        header.layer?.cornerRadius = UIRadius.regular
+        header.translatesAutoresizingMaskIntoConstraints = false
+        promptsHeaderStack = header
+        header.addGestureRecognizer(NSClickGestureRecognizer(target: host, action: #selector(AppKitController.promptsRowClicked)))
+
+        container.addSubview(header)
+        let rail = NSView()
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        rail.wantsLayer = true
+        rail.isHidden = true
+        container.addSubview(rail)
+        promptsRowRail = rail
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: container.topAnchor), header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor), header.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            rail.leadingAnchor.constraint(equalTo: container.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
+            rail.topAnchor.constraint(equalTo: header.topAnchor), rail.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        ])
+        updatePromptsRowAppearance()
+        return container
+    }
+
+    /// Shows the number of saved prompts across reachable devices, hidden at zero.
+    func updatePromptsSidebarRow(count: Int) {
+        promptsRowBadge?.stringValue = "\(count)"
+        promptsRowBadge?.isHidden = count == 0
+    }
+
+    func updatePromptsRowAppearance() {
+        guard let header = promptsHeaderStack else { return }
+        header.layer?.borderWidth = 0
+        header.layer?.backgroundColor = NSColor.clear.cgColor
+        promptsRowRail?.isHidden = !host.showingPrompts
+        if let rail = promptsRowRail {
             bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
         }
     }

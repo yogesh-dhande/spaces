@@ -126,6 +126,18 @@ private func encoded(_ payload: SpacesDeviceOverviewPayload) throws -> Data { tr
         }
     }
 
+    @Test func aSavedPromptsRevisionChangeAloneSendsImmediately() throws {
+        let base = makePayload(sessions: [makeSession()])
+        let next = SpacesDeviceOverviewPayload(
+            workspaces: base.workspaces, sessions: base.sessions, daemonStatus: base.daemonStatus, savedPromptsRevision: 1)
+        let now = Date()
+        let decision = SpacesDeviceAPIServer.overviewBroadcastDecision(
+            previousBytes: try encoded(base), newBytes: try encoded(next), previousProjection: SpacesDeviceAPIServer.overviewStateProjection(base),
+            newProjection: SpacesDeviceAPIServer.overviewStateProjection(next), lastBroadcastAt: now.addingTimeInterval(-0.1), now: now,
+            metadataCoalesceInterval: Self.interval)
+        #expect(decision == .sendNow)
+    }
+
     @Test func aBellCountsAsState() throws {
         let previous = makePayload(sessions: [makeSession(bellAt: nil)])
         let next = makePayload(sessions: [makeSession(bellAt: "2026-01-01T00:00:05Z")])

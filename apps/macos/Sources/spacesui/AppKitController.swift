@@ -65,6 +65,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case alerts
         case automations
         case resources
+        case prompts
         case workspace(String)
     }
 
@@ -146,6 +147,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var showingAlerts: Bool { detailPane.isAlerts }
     var showingAutomations: Bool { detailPane.isAutomations }
     var showingResources: Bool { detailPane.isResources }
+    var showingPrompts: Bool { detailPane.isPrompts }
     /// The `BlockRemedy` the visible compatibility block was last rendered with, so
     /// `reconcileCompatibilityBlock` can tell "still showing the current guidance" apart from "the
     /// device's wire status moved on and this block is now stale" without re-deriving what was already on
@@ -205,6 +207,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     lazy var shortcuts = ShortcutsController(host: self) { [unowned self] in try self.clientDatabase() }
     lazy var automations = AutomationsController(host: self)
     lazy var resources = ResourcesController(host: self)
+    lazy var prompts = SavedPromptsController(host: self)
     /// Whether the main window is visible to the user, from its occlusion state. Starts true because the
     /// window is presented at launch and no occlusion change is reported until it first differs.
     var mainWindowIsOnScreen = true
@@ -2941,6 +2944,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let resourcesRow = sidebar.makeResourcesSidebarRow()
         resourcesRow.translatesAutoresizingMaskIntoConstraints = false
 
+        let promptsRow = sidebar.makePromptsSidebarRow()
+        promptsRow.translatesAutoresizingMaskIntoConstraints = false
+
         // The cycling row is pinned to the bottom of the scrolling content, just above the
         // footer separator: it reports a state that applies to the whole sidebar, so it stays
         // put while projects scroll past it.
@@ -2957,6 +2963,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.addSubview(alertsRow)
         container.addSubview(automationsRow)
         container.addSubview(resourcesRow)
+        container.addSubview(promptsRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
         container.addSubview(cycleModeRow)
@@ -2978,7 +2985,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             resourcesRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             resourcesRow.topAnchor.constraint(equalTo: automationsRow.bottomAnchor, constant: 2),
 
-            sectionHeader.topAnchor.constraint(equalTo: resourcesRow.bottomAnchor, constant: 10),
+            promptsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            promptsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            promptsRow.topAnchor.constraint(equalTo: resourcesRow.bottomAnchor, constant: 2),
+
+            sectionHeader.topAnchor.constraint(equalTo: promptsRow.bottomAnchor, constant: 10),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
@@ -3009,7 +3020,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return hasToken && !device.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    @objc func alertsRowClicked() { alerts.showAlertsDetail(presentation: .userNavigation) }
+    @objc func alertsRowClicked() { prompts.confirmLeaving { [self] in alerts.showAlertsDetail(presentation: .userNavigation) } }
 
     @objc func cycleModeRowClicked() { sidebar.showCycleModeMenu() }
 
@@ -3022,10 +3033,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     // MARK: - Automations
 
-    @objc func automationsRowClicked() { automations.showAutomationsDetail() }
+    @objc func automationsRowClicked() { prompts.confirmLeaving { [self] in automations.showAutomationsDetail() } }
     func showAutomationsDetail() { automations.showAutomationsDetail() }
-    @objc func resourcesRowClicked() { resources.showResourcesDetail() }
+    @objc func resourcesRowClicked() { prompts.confirmLeaving { [self] in resources.showResourcesDetail() } }
     func showResourcesDetail() { resources.showResourcesDetail() }
+    @objc func promptsRowClicked() { prompts.showPromptsDetail() }
+    func showPromptsDetail() { prompts.showPromptsDetail() }
     func updateAutomationsSidebarRow() { sidebar.updateAutomationsSidebarRow() }
 
     /// The per-device automation slices for the pane and sidebar row: every device section mapped to its
@@ -3246,10 +3259,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func updateAlertsSidebarBadge() { sidebar.updateAlertsSidebarBadge() }
     func updateAlertsRowAppearance() {
         sidebar.updateAlertsRowAppearance()
-        // The Alerts, Automations, and Resources rows share a mutually-exclusive selection highlight, so
-        // refresh all of them whenever the detail pane changes.
+        // The Alerts, Automations, Resources, and Prompts rows share a mutually-exclusive selection
+        // highlight, so refresh all of them whenever the detail pane changes.
         sidebar.updateAutomationsRowAppearance()
         sidebar.updateResourcesRowAppearance()
+        sidebar.updatePromptsRowAppearance()
     }
     func refreshSidebarSelectionRows(previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?)
     {
@@ -3753,6 +3767,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if showingAlerts { alerts.showAlertsDetail() }
         if showingAutomations { showAutomationsDetail() }
         if showingResources { showResourcesDetail() }
+        if showingPrompts { showPromptsDetail() }
     }
 
     /// `epoch` is `panelCoordinator.paneReplacementEpoch` as the caller read it before dispatching the
@@ -3824,6 +3839,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         if showingResources {
             showResourcesDetail()
+            return
+        }
+        if showingPrompts {
+            showPromptsDetail()
             return
         }
         if let selectedWorkspaceID {
@@ -3963,6 +3982,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if !pane.isAlerts { alerts.invalidateRenderedAlertsDetail() }
         // Resource measurement exists only while its pane is on screen, so any other pane ends it.
         if !pane.isResources { resources.stop() }
+        // The prompts pane keeps an unsaved draft in memory; only its views go.
+        if !pane.isPrompts { prompts.paneDidHide() }
         // A visit follows the workspace the main window shows, so a pane change can start or end one.
         refreshTerminalVisit()
     }
@@ -6589,34 +6610,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Whether clearing the outline selection should fall back to the detail placeholder.
     ///
-    /// Alerts, Automations, and Resources all clear the outline selection while presenting themselves, and that
+    /// Alerts, Automations, Resources, and Prompts all clear the outline selection while presenting themselves, and that
     /// `deselectAll` re-enters `outlineViewSelectionDidChange` synchronously. Presenting the placeholder
     /// from there resets the detail pane to `.none` underneath the pane that just opened, which leaves
     /// the pane rendered but no longer identified as showing. Sidebar arrow navigation reads those pane
     /// flags to know where the selection currently sits, so it then has neither a pane nor a selected
     /// row to move from and stops responding.
-    nonisolated static func sidebarClearedSelectionPresentsPlaceholder(showingAlerts: Bool, showingAutomations: Bool, showingResources: Bool = false)
-        -> Bool
-    { !showingAlerts && !showingAutomations && !showingResources }
+    nonisolated static func sidebarClearedSelectionPresentsPlaceholder(
+        showingAlerts: Bool, showingAutomations: Bool, showingResources: Bool = false, showingPrompts: Bool = false
+    ) -> Bool { !showingAlerts && !showingAutomations && !showingResources && !showingPrompts }
 
     nonisolated static func sidebarArrowSelectionTarget(
         visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], hiddenWorkspaceIDs: [String], selectedProjectID: String?,
-        selectedWorkspaceID: String?, showingAlerts: Bool, showingAutomations: Bool, showingResources: Bool = false, direction: Int
+        selectedWorkspaceID: String?, showingAlerts: Bool, showingAutomations: Bool, showingResources: Bool = false, showingPrompts: Bool = false,
+        direction: Int
     ) -> SidebarArrowSelectionTarget? {
         guard direction == -1 || direction == 1 else { return nil }
         let visibleWorkspaceIDs = visibleWorkspaceIDsByProject.flatMap(\.workspaceIDs) + hiddenWorkspaceIDs
-        // Top-level row order is Alerts ↔ Automations ↔ Resources ↔ first workspace; the Automations and
-        // Resources rows are always present.
+        // Top-level row order is Alerts ↔ Automations ↔ Resources ↔ Prompts ↔ first workspace; the Automations,
+        // Resources, and Prompts rows are always present.
         if showingAlerts { return direction > 0 ? .automations : nil }
         if showingAutomations { return direction > 0 ? .resources : .alerts }
-        if showingResources {
-            guard direction > 0 else { return .automations }
+        if showingResources { return direction > 0 ? .prompts : .automations }
+        if showingPrompts {
+            guard direction > 0 else { return .resources }
             guard let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
             return .workspace(firstWorkspaceID)
         }
         if let selectedWorkspaceID, let currentIndex = visibleWorkspaceIDs.firstIndex(of: selectedWorkspaceID) {
             let targetIndex = currentIndex + direction
-            if targetIndex < 0 { return .resources }
+            if targetIndex < 0 { return .prompts }
             guard targetIndex < visibleWorkspaceIDs.count else { return nil }
             return .workspace(visibleWorkspaceIDs[targetIndex])
         }
@@ -6626,7 +6649,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if direction < 0 {
             let priorProjects = visibleWorkspaceIDsByProject[..<projectIndex].reversed()
             for project in priorProjects { if let workspaceID = project.workspaceIDs.last { return .workspace(workspaceID) } }
-            return .resources
+            return .prompts
         }
         for project in visibleWorkspaceIDsByProject[(projectIndex + 1)...] {
             if let workspaceID = project.workspaceIDs.first { return .workspace(workspaceID) }
@@ -6876,6 +6899,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .alerts: alerts.showAlertsDetail()
         case .automations: showAutomationsDetail()
         case .resources: showResourcesDetail()
+        case .prompts: showPromptsDetail()
         case .workspace(let workspaceID, _):
             guard let (project, workspace) = findWorkspace(id: workspaceID) else { return }
             showWorkspaceDetail(project: project, workspace: workspace)
@@ -6979,12 +7003,54 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc public func numberOfRows(in tableView: NSTableView) -> Int {
         guard tableView === commandPalette.commandPaletteTableView else { return 0 }
-        return commandPalette.commandPaletteFilteredItems.count
+        return commandPalette.commandPaletteRows.count
+    }
+
+    @objc public func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard tableView === commandPalette.commandPaletteTableView, commandPalette.commandPaletteRows.indices.contains(row) else {
+            return tableView.rowHeight
+        }
+        return commandPalette.commandPaletteRows[row] == .promptsHeader ? CommandPaletteHeaderCellView.height : tableView.rowHeight
+    }
+
+    @objc public func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        guard tableView === commandPalette.commandPaletteTableView, commandPalette.commandPaletteRows.indices.contains(row) else { return true }
+        return CommandPaletteRows.isSelectable(commandPalette.commandPaletteRows[row])
     }
 
     @objc public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard tableView === commandPalette.commandPaletteTableView else { return nil }
-        guard commandPalette.commandPaletteFilteredItems.indices.contains(row) else { return nil }
+        guard commandPalette.commandPaletteRows.indices.contains(row) else { return nil }
+        switch commandPalette.commandPaletteRows[row] {
+        case .target: break
+        case .promptsHeader:
+            let identifier = NSUserInterfaceItemIdentifier("command-palette-prompts-header")
+            return (tableView.makeView(withIdentifier: identifier, owner: self) as? CommandPaletteHeaderCellView)
+                ?? {
+                    let cell = CommandPaletteHeaderCellView(title: "Prompts")
+                    cell.identifier = identifier
+                    return cell
+                }()
+        case .prompt(let index):
+            guard commandPalette.commandPalettePromptMatches.indices.contains(index) else { return nil }
+            let identifier = NSUserInterfaceItemIdentifier("command-palette-prompt-cell")
+            let cell =
+                (tableView.makeView(withIdentifier: identifier, owner: self) as? CommandPalettePromptCellView)
+                ?? {
+                    let cell = CommandPalettePromptCellView()
+                    cell.identifier = identifier
+                    return cell
+                }()
+            let showsDevice = SavedPromptsPaneModel.showsDeviceChoices(pairedDeviceCount: deviceModel.deviceSections.count)
+            cell.update(
+                entry: commandPalette.commandPalettePromptMatches[index], showsDevice: showsDevice,
+                isSelected: row == commandPalette.commandPaletteSelectedIndex
+            ) { [weak self] in
+                self?.commandPalette.commandPaletteSelectedIndex = row
+                self?.commandPalette.executeSelectedCommandPaletteItem()
+            }
+            return cell
+        }
 
         let identifier = NSUserInterfaceItemIdentifier("command-palette-cell")
         let cell =

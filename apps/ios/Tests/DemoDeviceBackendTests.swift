@@ -260,8 +260,7 @@
             let backend = DemoDeviceBackend(library: library)
             let agent = try XCTUnwrap(library.overview.workspaces.lazy.flatMap(\.codingAgentRows).first)
 
-            let flagged = await backend.serve(
-                SpacesDeviceAPIRequest(command: .setComeBackLater(.init(rowKind: .agent, rowID: agent.id, isOn: true))))
+            let flagged = await backend.serve(SpacesDeviceAPIRequest(command: .setComeBackLater(.init(rowKind: .agent, rowID: agent.id, isOn: true))))
             XCTAssertEqual(flagged.overview?.comeBackLaterFlags.map(\.rowID), [agent.id])
             XCTAssertTrue(flagged.overview?.alertCandidates().contains { $0.kind == .comeBackLater && $0.subjectID == agent.id } == true)
 
@@ -269,6 +268,75 @@
                 SpacesDeviceAPIRequest(
                     command: .dismissAlerts(.init(keys: [SpacesDeviceComeBackLaterFlag.alertKey(rowKind: .agent, rowID: agent.id)]))))
             XCTAssertTrue(dismissed.overview?.comeBackLaterFlags.isEmpty == true, "dismissing the flag's alert clears the flag")
+        }
+
+        // MARK: - Saved prompts
+
+        private func savedPrompts(_ backend: DemoDeviceBackend, _ command: SpacesDeviceAPICommand) async throws -> SpacesDeviceSavedPromptsResult {
+            let response = await backend.serve(SpacesDeviceAPIRequest(command: command))
+            XCTAssertTrue(response.ok, response.message)
+            return try XCTUnwrap(response.savedPrompts)
+        }
+
+        func testDemoDeviceStartsWithThreePromptsAndTheirRevisionInTheOverview() async throws {
+            let backend = DemoDeviceBackend(library: try loadLibrary())
+
+            let seeded = try await savedPrompts(backend, .listSavedPrompts)
+            XCTAssertEqual(seeded.prompts.count, 3)
+            XCTAssertEqual(seeded.prompts.first?.title, "Review the diff")
+            let overview = await backend.serve(SpacesDeviceAPIRequest(command: .overview))
+            XCTAssertEqual(overview.overview?.savedPromptsRevision, seeded.revision)
+        }
+
+        func testDemoPromptsCreateUseUpdateAndDeleteLikeARealDevice() async throws {
+            let backend = DemoDeviceBackend(library: try loadLibrary())
+            let seeded = try await savedPrompts(backend, .listSavedPrompts)
+            let oldest = try XCTUnwrap(seeded.prompts.last)
+
+            let created = try await savedPrompts(backend, .createSavedPrompt(.init(title: "  Mine  ", text: "text")))
+            XCTAssertEqual(created.prompts.first?.title, "Mine")
+            XCTAssertGreaterThan(created.revision, seeded.revision)
+
+            // Timestamps have millisecond resolution, so steps that must order are kept a tick apart.
+            try await Task.sleep(for: .milliseconds(5))
+            let used = try await savedPrompts(backend, .recordSavedPromptUse(.init(id: oldest.id)))
+            XCTAssertEqual(used.prompts.first?.id, oldest.id)
+
+            let updated = try await savedPrompts(backend, .updateSavedPrompt(.init(id: oldest.id, title: "Renamed", text: "new text")))
+            XCTAssertEqual(updated.prompts.first?.title, "Renamed")
+            XCTAssertEqual(updated.prompts.first?.lastUsedAt, used.prompts.first?.lastUsedAt)
+
+            let deleted = try await savedPrompts(backend, .deleteSavedPrompt(.init(id: oldest.id)))
+            XCTAssertEqual(deleted.prompts.count, 3)
+            XCTAssertFalse(deleted.prompts.contains { $0.id == oldest.id })
+        }
+
+        func testDemoPromptsRefuseBlankInputAndUnknownIDsAndPushTheRevision() async throws {
+            let backend = DemoDeviceBackend(library: try loadLibrary())
+            let collector = DemoOverviewStreamCollector()
+            let handle = try await backend.openOverviewStream(
+                authToken: nil, clientApp: nil, onOverview: { overview in Task { await collector.record(overview) } }, onDisconnect: { _ in })
+
+            let blank = await backend.serve(SpacesDeviceAPIRequest(command: .createSavedPrompt(.init(title: " ", text: "text"))))
+            XCTAssertEqual(blank.errorCode, .invalidArgument)
+            let missing = await backend.serve(SpacesDeviceAPIRequest(command: .deleteSavedPrompt(.init(id: "missing"))))
+            XCTAssertEqual(missing.errorCode, .notFound)
+
+            let created = try await savedPrompts(backend, .createSavedPrompt(.init(title: "Pushed", text: "text")))
+            for _ in 0..<50 { await Task.yield() }
+            let pushed = await collector.recorded
+            XCTAssertEqual(pushed.last?.savedPromptsRevision, created.revision)
+
+            let running = try XCTUnwrap(
+                pushed.last?.workspaces.lazy.flatMap { $0.processRows.filter { $0.runState == .running && $0.processID != nil } }.first)
+            _ = await backend.serve(
+                SpacesDeviceAPIRequest(
+                    command: .stopWorkspaceProcess(.init(workspaceID: running.workspaceID, processID: running.processID, processKey: running.name))))
+            for _ in 0..<50 { await Task.yield() }
+            let afterRowMutation = await collector.recorded
+            XCTAssertEqual(afterRowMutation.last?.savedPromptsRevision, created.revision, "a row mutation republishes the prompts revision")
+
+            handle.cancel()
         }
 
         // MARK: - Overview stream

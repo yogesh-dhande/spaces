@@ -722,12 +722,15 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     public let dismissedAlertKeys: [String]
     /// Come Back Later flags on rows this overview still lists.
     public let comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag]
+    /// Raised by every change to the device's saved prompts. The prompts themselves stay out of the
+    /// overview, which goes to every client on every change; a client pulls the list when this goes up.
+    public let savedPromptsRevision: Int
 
     public init(
         projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
         retainedTerminalSessionIDs: [String] = [], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus,
         automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = [],
-        dismissedAlertKeys: [String] = [], comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag] = []
+        dismissedAlertKeys: [String] = [], comeBackLaterFlags: [SpacesDeviceComeBackLaterFlag] = [], savedPromptsRevision: Int = 0
     ) {
         self.projects = projects
         self.workspaces = workspaces
@@ -739,6 +742,7 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         self.automationRuns = automationRuns
         self.dismissedAlertKeys = dismissedAlertKeys
         self.comeBackLaterFlags = comeBackLaterFlags
+        self.savedPromptsRevision = savedPromptsRevision
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -752,6 +756,7 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         case automationRuns
         case dismissedAlertKeys
         case comeBackLaterFlags
+        case savedPromptsRevision
     }
 
     /// Custom decode so an overview from a daemon that predates a given field (projects predates
@@ -771,6 +776,7 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         automationRuns = try container.decodeIfPresent([TerminalServiceAutomationRunSummary].self, forKey: .automationRuns) ?? []
         dismissedAlertKeys = try container.decodeIfPresent([String].self, forKey: .dismissedAlertKeys) ?? []
         comeBackLaterFlags = try container.decodeIfPresent([SpacesDeviceComeBackLaterFlag].self, forKey: .comeBackLaterFlags) ?? []
+        savedPromptsRevision = try container.decode(Int.self, forKey: .savedPromptsRevision)
     }
 }
 
@@ -2842,6 +2848,13 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertRequest)
     case workspaceReviewCommentDelete(SpacesDeviceWorkspaceReviewCommentDeleteRequest)
     case workspaceReviewCommentsSend(SpacesDeviceWorkspaceReviewCommentsSendRequest)
+    /// Reads the device's saved prompt library. Read-only.
+    case listSavedPrompts
+    case createSavedPrompt(SpacesDeviceSavedPromptFields)
+    case updateSavedPrompt(SpacesDeviceSavedPromptUpdateRequest)
+    case deleteSavedPrompt(SpacesDeviceSavedPromptReference)
+    /// Records that a prompt was copied, which moves it to the top of the library.
+    case recordSavedPromptUse(SpacesDeviceSavedPromptReference)
 
     public var name: String {
         switch self {
@@ -2939,6 +2952,11 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .workspaceReviewCommentUpsert: "workspaceReviewCommentUpsert"
         case .workspaceReviewCommentDelete: "workspaceReviewCommentDelete"
         case .workspaceReviewCommentsSend: "workspaceReviewCommentsSend"
+        case .listSavedPrompts: "listSavedPrompts"
+        case .createSavedPrompt: "createSavedPrompt"
+        case .updateSavedPrompt: "updateSavedPrompt"
+        case .deleteSavedPrompt: "deleteSavedPrompt"
+        case .recordSavedPromptUse: "recordSavedPromptUse"
         case .restoreSessions: "restoreSessions"
         case .discardRestorableSessions: "discardRestorableSessions"
         }
@@ -3059,7 +3077,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
             .readAgentBrief, .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileList,
-            .workspaceRefList, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList:
+            .workspaceRefList, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList,
+            .listSavedPrompts:
             true
         default: false
         }
@@ -3164,6 +3183,11 @@ extension SpacesDeviceAPICommand: Codable {
         case workspaceReviewCommentUpsert
         case workspaceReviewCommentDelete
         case workspaceReviewCommentsSend
+        case listSavedPrompts
+        case createSavedPrompt
+        case updateSavedPrompt
+        case deleteSavedPrompt
+        case recordSavedPromptUse
     }
 
     public init(from decoder: any Decoder) throws {
@@ -3309,6 +3333,11 @@ extension SpacesDeviceAPICommand: Codable {
             self = .workspaceReviewCommentDelete(try container.decode(SpacesDeviceWorkspaceReviewCommentDeleteRequest.self, forKey: key))
         case .workspaceReviewCommentsSend:
             self = .workspaceReviewCommentsSend(try container.decode(SpacesDeviceWorkspaceReviewCommentsSendRequest.self, forKey: key))
+        case .listSavedPrompts: self = .listSavedPrompts
+        case .createSavedPrompt: self = .createSavedPrompt(try container.decode(SpacesDeviceSavedPromptFields.self, forKey: key))
+        case .updateSavedPrompt: self = .updateSavedPrompt(try container.decode(SpacesDeviceSavedPromptUpdateRequest.self, forKey: key))
+        case .deleteSavedPrompt: self = .deleteSavedPrompt(try container.decode(SpacesDeviceSavedPromptReference.self, forKey: key))
+        case .recordSavedPromptUse: self = .recordSavedPromptUse(try container.decode(SpacesDeviceSavedPromptReference.self, forKey: key))
         }
     }
 
@@ -3411,6 +3440,11 @@ extension SpacesDeviceAPICommand: Codable {
         case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
         case .workspaceReviewCommentDelete(let payload): try container.encode(payload, forKey: .workspaceReviewCommentDelete)
         case .workspaceReviewCommentsSend(let payload): try container.encode(payload, forKey: .workspaceReviewCommentsSend)
+        case .listSavedPrompts: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .listSavedPrompts)
+        case .createSavedPrompt(let payload): try container.encode(payload, forKey: .createSavedPrompt)
+        case .updateSavedPrompt(let payload): try container.encode(payload, forKey: .updateSavedPrompt)
+        case .deleteSavedPrompt(let payload): try container.encode(payload, forKey: .deleteSavedPrompt)
+        case .recordSavedPromptUse(let payload): try container.encode(payload, forKey: .recordSavedPromptUse)
         }
     }
 }
@@ -3512,6 +3546,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case workspaceReviewCommentList(SpacesDeviceWorkspaceReviewCommentListResult)
     case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertResult)
     case restoredSessions(SpacesDeviceRestoredSessionsResult)
+    case savedPrompts(SpacesDeviceSavedPromptsResult)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -3545,6 +3580,7 @@ extension SpacesDeviceAPIResult: Codable {
         case workspaceReviewCommentList
         case workspaceReviewCommentUpsert
         case restoredSessions
+        case savedPrompts
     }
 
     public init(from decoder: any Decoder) throws {
@@ -3587,6 +3623,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .workspaceReviewCommentUpsert:
             self = .workspaceReviewCommentUpsert(try container.decode(SpacesDeviceWorkspaceReviewCommentUpsertResult.self, forKey: key))
         case .restoredSessions: self = .restoredSessions(try container.decode(SpacesDeviceRestoredSessionsResult.self, forKey: key))
+        case .savedPrompts: self = .savedPrompts(try container.decode(SpacesDeviceSavedPromptsResult.self, forKey: key))
         }
     }
 
@@ -3622,6 +3659,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .workspaceReviewCommentList(let payload): try container.encode(payload, forKey: .workspaceReviewCommentList)
         case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
         case .restoredSessions(let payload): try container.encode(payload, forKey: .restoredSessions)
+        case .savedPrompts(let payload): try container.encode(payload, forKey: .savedPrompts)
         }
     }
 }
@@ -3736,6 +3774,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var workspaceReviewCommentList: SpacesDeviceWorkspaceReviewCommentListResult? {
         if case .workspaceReviewCommentList(let payload) = result { payload } else { nil }
     }
+
+    public var savedPrompts: SpacesDeviceSavedPromptsResult? { if case .savedPrompts(let payload) = result { payload } else { nil } }
 
     public var workspaceReviewCommentUpsert: SpacesDeviceWorkspaceReviewCommentUpsertResult? {
         if case .workspaceReviewCommentUpsert(let payload) = result { payload } else { nil }

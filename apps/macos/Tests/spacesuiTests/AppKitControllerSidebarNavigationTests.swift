@@ -71,20 +71,50 @@ import Testing
         #expect(target == .automations)
     }
 
-    @Test func downArrowFromResourcesSelectsFirstVisibleWorkspace() {
+    @Test func downArrowFromResourcesSelectsPrompts() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
             selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: false, showingResources: true, direction: 1)
 
-        #expect(target == .workspace("workspace-a"))
+        #expect(target == .prompts)
     }
 
-    @Test func downArrowFromResourcesStopsWhenNoWorkspaces() {
+    @Test func downArrowFromResourcesSelectsPromptsWhenNoWorkspaces() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false,
             showingAutomations: false, showingResources: true, direction: 1)
 
+        #expect(target == .prompts)
+    }
+
+    @Test func upArrowFromPromptsSelectsResources() {
+        let target = AppKitController.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: [("project-a", ["workspace-a"])], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil,
+            showingAlerts: false, showingAutomations: false, showingPrompts: true, direction: -1)
+
+        #expect(target == .resources)
+    }
+
+    @Test func downArrowFromPromptsSelectsFirstVisibleWorkspace() {
+        let target = AppKitController.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
+            selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: false, showingPrompts: true, direction: 1)
+
+        #expect(target == .workspace("workspace-a"))
+    }
+
+    @Test func downArrowFromPromptsStopsWhenNoWorkspaces() {
+        let target = AppKitController.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: [], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false,
+            showingAutomations: false, showingPrompts: true, direction: 1)
+
         #expect(target == nil)
+    }
+
+    @Test func clearingSelectionForPromptsKeepsThePromptsPane() {
+        #expect(
+            AppKitController.sidebarClearedSelectionPresentsPlaceholder(
+                showingAlerts: false, showingAutomations: false, showingResources: false, showingPrompts: true) == false)
     }
 
     @Test func clearingSelectionForResourcesKeepsTheResourcesPane() {
@@ -93,20 +123,20 @@ import Testing
                 == false)
     }
 
-    @Test func upArrowFromFirstWorkspaceReturnsToResources() {
+    @Test func upArrowFromFirstWorkspaceReturnsToPrompts() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
             selectedProjectID: "project-a", selectedWorkspaceID: "workspace-a", showingAlerts: false, showingAutomations: false, direction: -1)
 
-        #expect(target == .resources)
+        #expect(target == .prompts)
     }
 
-    @Test func upArrowFromFirstWorkspaceReturnsToResourcesViaProjectFallback() {
+    @Test func upArrowFromFirstWorkspaceReturnsToPromptsViaProjectFallback() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", []), ("project-b", [])], hiddenWorkspaceIDs: [], selectedProjectID: "project-a",
             selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: false, direction: -1)
 
-        #expect(target == .resources)
+        #expect(target == .prompts)
     }
 
     @Test func arrowNavigationMovesAcrossProjectBoundariesUsingFlatVisibleOrder() {

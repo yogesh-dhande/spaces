@@ -44,6 +44,11 @@ final class CommandPalettePanel: NSPanel {
     var commandPaletteLoadTask: Task<Void, Never>?
     var commandPaletteItems: [CommandPaletteItem] = []
     var commandPaletteFilteredItems: [CommandPaletteItem] = []
+    /// Saved prompts matching a non-empty query, listed after the targets under a "Prompts" header.
+    var commandPalettePromptMatches: [SavedPromptLibrary.Entry] = []
+    var commandPaletteRows: [CommandPaletteRow] {
+        CommandPaletteRows.rows(targetCount: commandPaletteFilteredItems.count, promptCount: commandPalettePromptMatches.count)
+    }
     var commandPaletteContextWorkspaceID: String?
     var commandPaletteSelectedIndex = 0
     var commandPaletteNeedsReload = true
@@ -735,7 +740,9 @@ final class CommandPalettePanel: NSPanel {
             : Self.visibleCommandPaletteItems(
                 allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID,
                 recentFocusIdentities: recentCommandPaletteFocusIdentities)
-        commandPaletteSelectedIndex = commandPaletteFilteredItems.isEmpty ? 0 : 0
+        // Session-picker mode picks a session for a pane, so saved prompts have no place in it.
+        commandPalettePromptMatches = sessionPickerContext == nil ? host.prompts.paletteMatches(for: query) : []
+        commandPaletteSelectedIndex = CommandPaletteRows.firstSelectableIndex(in: commandPaletteRows)
         host.logHotkeyDebug(
             "apply_palette_filter query=\(query.isEmpty ? "<empty>" : query) all=\(commandPaletteItems.count) filtered=\(commandPaletteFilteredItems.count) context_workspace=\(commandPaletteContextWorkspaceID ?? "nil")"
         )
@@ -744,35 +751,64 @@ final class CommandPalettePanel: NSPanel {
 
     func rebuildCommandPaletteRows() {
         guard let tableView = commandPaletteTableView else { return }
-        tableView.isHidden = commandPaletteFilteredItems.isEmpty
-        let showEmptyState =
-            commandPaletteFilteredItems.isEmpty
-            && !(commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let rows = commandPaletteRows
+        tableView.isHidden = rows.isEmpty
+        let showEmptyState = rows.isEmpty && !(commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         commandPaletteEmptyLabel?.isHidden = !showEmptyState
-        host.logHotkeyDebug("rebuild_palette_rows count=\(commandPaletteFilteredItems.count) selected=\(commandPaletteSelectedIndex)")
+        host.logHotkeyDebug("rebuild_palette_rows count=\(rows.count) selected=\(commandPaletteSelectedIndex)")
         tableView.reloadData()
-        if commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex) {
+        if rows.indices.contains(commandPaletteSelectedIndex) {
             tableView.selectRowIndexes(IndexSet(integer: commandPaletteSelectedIndex), byExtendingSelection: false)
             tableView.scrollRowToVisible(commandPaletteSelectedIndex)
         } else {
             tableView.deselectAll(nil)
         }
         host.logHotkeyDebug("rebuild_palette_rows_done rows=\(tableView.numberOfRows) selected_row=\(tableView.selectedRow)")
-        let count = commandPaletteFilteredItems.count
+        let count = commandPaletteFilteredItems.count + commandPalettePromptMatches.count
         commandPaletteSummaryLabel?.stringValue = count > 0 ? "\(count)" : ""
         commandPaletteSummaryLabel?.superview?.isHidden = count == 0
     }
 
+    /// Re-lists the Prompts section after the library changed under an open palette, keeping the user's
+    /// place in the list when their row is still there.
+    func refreshPromptMatches() {
+        guard commandPalettePanel?.isVisible == true, sessionPickerContext == nil else { return }
+        let query = commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let matches = host.prompts.paletteMatches(for: query)
+        guard matches != commandPalettePromptMatches else { return }
+        commandPalettePromptMatches = matches
+        let rows = commandPaletteRows
+        if !rows.indices.contains(commandPaletteSelectedIndex) || !CommandPaletteRows.isSelectable(rows[commandPaletteSelectedIndex]) {
+            commandPaletteSelectedIndex = CommandPaletteRows.firstSelectableIndex(in: rows)
+        }
+        rebuildCommandPaletteRows()
+    }
+
     func moveCommandPaletteSelection(delta: Int) {
-        guard !commandPaletteFilteredItems.isEmpty else { return }
-        let nextIndex = min(max(commandPaletteSelectedIndex + delta, 0), commandPaletteFilteredItems.count - 1)
+        let rows = commandPaletteRows
+        guard !rows.isEmpty else { return }
+        let nextIndex = CommandPaletteRows.selectionIndex(from: commandPaletteSelectedIndex, delta: delta, in: rows)
         guard nextIndex != commandPaletteSelectedIndex else { return }
         commandPaletteSelectedIndex = nextIndex
         commandPaletteTableView?.selectRowIndexes(IndexSet(integer: nextIndex), byExtendingSelection: false)
         commandPaletteTableView?.scrollRowToVisible(nextIndex)
     }
 
+    /// Choosing a prompt copies it and closes the palette. Dismissing first hands focus back to the terminal
+    /// the user came from, so the paste that follows lands there.
+    private func copyPaletteSelectedPrompt(_ entry: SavedPromptLibrary.Entry) {
+        guard pendingSelectionExecution == nil else { return }
+        dismissCommandPalette()
+        host.prompts.copy(entry: entry, text: entry.prompt.text)
+        host.overlays.showCopiedPromptHUD(title: entry.prompt.title)
+    }
+
     func executeSelectedCommandPaletteItem() {
+        let rows = commandPaletteRows
+        if rows.indices.contains(commandPaletteSelectedIndex), case .prompt(let index) = rows[commandPaletteSelectedIndex] {
+            copyPaletteSelectedPrompt(commandPalettePromptMatches[index])
+            return
+        }
         guard commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex) else {
             NSSound.beep()
             return

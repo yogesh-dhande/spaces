@@ -93,7 +93,8 @@ struct SpacesDeviceOverviewLoader {
             projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions,
             workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automationSummaries,
             automationRuns: automationRunSummaries, automationAttributedSessionIDs: try store.terminalSessionIDsAttributedToExistingAutomationRuns(),
-            dismissedAlertKeys: Array(try store.alertDismissalKeys()), comeBackLaterFlags: try store.comeBackLaterFlags())
+            dismissedAlertKeys: Array(try store.alertDismissalKeys()), comeBackLaterFlags: try store.comeBackLaterFlags(),
+            savedPromptsRevision: try store.savedPromptsRevision())
     }
 
     /// The daemon status the Device API reports. `deviceAPIAddresses` must be the addresses a pairing link

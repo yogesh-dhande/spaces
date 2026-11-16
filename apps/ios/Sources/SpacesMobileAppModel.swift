@@ -507,11 +507,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
 @MainActor @Observable final class SpacesMobileAppModel {
     var settings: SpacesMobileConnectionSettings
-    var pairedDevices: [SpacesMobilePairedDeviceRecord]
+    var pairedDevices: [SpacesMobilePairedDeviceRecord] { didSet { reconcileSavedPrompts() } }
     /// The device every published fact below is about. `didSet` re-derives the restore offer, because an
     /// offer names the device it was made for: the identity moving is what takes a question about the
     /// previous device off screen, and what lets the next device's own status raise its own.
-    var activeDeviceID: String? { didSet { updateSessionRestoreOffer() } }
+    var activeDeviceID: String? {
+        didSet {
+            updateSessionRestoreOffer()
+            reconcileSavedPrompts()
+        }
+    }
     /// Whether Demo Mode is on. While on, the device list shows only the synthetic Demo Mac and the
     /// active client is backed by the in-memory `DemoDeviceBackend`; the real paired devices are parked
     /// in memory and left untouched on disk. Persisted across launches via `DemoModeStore`.
@@ -525,6 +530,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         didSet {
             cachedRuntimeRowIndex = nil
             updateSessionRestoreOffer()
+            reconcileSavedPrompts()
         }
     }
     /// The clock every relative-time label (automation next-fire, run started/duration, alert age) reads
@@ -829,7 +835,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Not `@ObservationIgnored`: the Agents and Alerts tabs derive their rows from every paired device's
     /// entry here, not only the selected one's `overview`, so a non-selected device's delivery has to be
     /// observable too.
-    private var deviceOverviews: [String: SpacesDeviceOverviewPayload] = [:]
+    private var deviceOverviews: [String: SpacesDeviceOverviewPayload] = [:] { didSet { reconcileSavedPrompts() } }
     /// Paired devices whose overview stream has failed to connect or dropped since its last delivered
     /// overview. Set for any paired device's stream failure (see `handleDeviceStreamFailure`), cleared the
     /// moment that device's stream next delivers an overview (`handleDeviceStreamOverview`). Mirrors the
@@ -842,6 +848,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // A device that came back is sent the push registration again, since it may have lost it while
             // unreachable. (Its banner re-seeds at the stream failure; see `handleDeviceStreamFailure`.)
             if !oldValue.subtracting(offlineDeviceIDs).isEmpty { Task { await syncPushRegistration() } }
+            reconcileSavedPrompts()
         }
     }
     /// Non-selected paired devices a frozen-core probe (`classifyNonSelectedDeviceStreamFailure`) has
@@ -854,7 +861,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// `applyCompatibility` from both the inline overview path and the standalone handshake fallback.
     /// Not `@ObservationIgnored`: `overview(forDeviceID:)` reads it, and that read has to be tracked so a
     /// probe's verdict refreshes the Agents/Alerts rows and badge count it drives.
-    private var blockedNonSelectedDeviceIDs: Set<String> = []
+    private var blockedNonSelectedDeviceIDs: Set<String> = [] { didSet { reconcileSavedPrompts() } }
     /// Test-only override: when a device id has an entry here, `overviewStreamClient(forDeviceID:)`
     /// returns it instead of building a client from that device's paired-device record and the real
     /// network backend, so a test can give a *non-selected* device a fake streaming backend. The active
@@ -929,6 +936,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     @ObservationIgnored let retainedTerminalScreens = TerminalRetainedScreenStore()
     /// Which coding agents' brief sheets the user hid this run; see `AgentBriefVisibility`.
     let agentBriefVisibility = AgentBriefVisibility()
+    /// The prompts of every reachable paired device, kept current by `reconcileSavedPrompts`.
+    let savedPrompts = SavedPromptsModel()
     /// Monotonic identity of the connection the published overview belongs to. Bumped whenever the
     /// active connection changes (device switch or removal, new settings, auth reset) so an overview
     /// fetch begun against the previous connection can neither publish its stale payload nor satisfy
@@ -2336,6 +2345,24 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return MutationConnection(
             client: client, channel: channel,
             token: MutationConnectionToken(deviceID: deviceID, isSelected: false, identity: nonSelectedDeviceIdentities[deviceID, default: 0]))
+    }
+
+    /// Feeds `savedPrompts` the devices whose prompts are shown (an offline or blocked device's are hidden,
+    /// since they could be neither edited nor have their use recorded) with the revision each overview
+    /// reports, so a device whose prompts changed is fetched again. Runs from every observed change to the
+    /// overviews, offline and blocked sets, paired devices, and selected device, and is cheap when nothing
+    /// moved. The connection closure is installed here because `mutationConnection` is private.
+    private func reconcileSavedPrompts() {
+        savedPrompts.connectionForDevice = { [weak self] deviceID in
+            guard let connection = self?.mutationConnection(forDeviceID: deviceID) else { return nil }
+            return SavedPromptsConnection(client: connection.client, channel: connection.channel)
+        }
+        let reachable = pairedDevices.compactMap { record -> SavedPromptLibrary.Device? in
+            guard !offlineDeviceIDs.contains(record.id), let deviceOverview = overview(forDeviceID: record.id) else { return nil }
+            return SavedPromptLibrary.Device(id: record.id, name: record.name, overviewRevision: deviceOverview.savedPromptsRevision)
+        }
+        let defaultDeviceID = activeDeviceID.flatMap { id in reachable.contains { $0.id == id } ? id : nil }
+        savedPrompts.reconcile(reachable: reachable, pairedDeviceCount: pairedDevices.count, defaultDeviceID: defaultDeviceID)
     }
 
     /// Opens `deviceID`'s overview stream for the coordinator's `attempt`. `attempt` rides in both stream
