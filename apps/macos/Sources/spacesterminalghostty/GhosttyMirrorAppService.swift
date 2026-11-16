@@ -45,8 +45,7 @@
         /// from its own threads.
         private nonisolated static func makeRuntimeConfig(userdata: UnsafeMutableRawPointer) -> ghostty_runtime_config_s {
             ghostty_runtime_config_s(
-                userdata: userdata,
-                supports_selection_clipboard: true,
+                userdata: userdata, supports_selection_clipboard: true,
                 wakeup_cb: { _ in Task { @MainActor in GhosttyMirrorAppService.shared.tick() } },
                 action_cb: { _, target, action in
                     guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
@@ -66,10 +65,10 @@
                     // A mirror's selection must never reach the pasteboard from here: it would be
                     // viewport-clipped (it only knows what this mirror can see), whereas a copy reads the
                     // pane's replay through `RemoteGhosttySessionHost.copySelectionToPasteboard`, which
-                    // reaches rows above the viewport. Ghostty's own copy-on-select defaults to `none` on
-                    // macOS and the generated config never enables it, so no such write is expected; any
-                    // that does arrive is reported as GHOSTTY_CLIPBOARD_SELECTION
-                    // (`supports_selection_clipboard` above) and dropped.
+                    // reaches rows above the viewport. Ghostty's own copy-on-select defaults to `primary`
+                    // on macOS and the generated config leaves it at that, so every mirror selection
+                    // arrives here as GHOSTTY_CLIPBOARD_SELECTION (`supports_selection_clipboard` above)
+                    // and is dropped.
                     guard kind != GHOSTTY_CLIPBOARD_SELECTION else { return }
                     GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len))
                 },

@@ -14,7 +14,7 @@ SPACES_LINUX_BUILDER_APT_PACKAGES="curl git xz-utils python3 pkg-config libsqlit
 
 # Zig builds libghostty-vt. It is baked into the image rather than downloaded per build, so a
 # fresh worktree does not re-fetch the toolchain and no build writes it to the bind mount.
-SPACES_LINUX_ZIG_VERSION="0.17.0"
+SPACES_LINUX_ZIG_VERSION="0.17.1"
 
 # Zig runs only in the builder image of the Docker host's own architecture: Zig 0.17's x86_64
 # Linux binary cannot run under Rosetta, so an emulated amd64 container on Apple Silicon cannot
