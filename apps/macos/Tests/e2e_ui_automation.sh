@@ -180,12 +180,67 @@ APPLESCRIPT
 # are stale offers this step regardless of the lane's own isolated HOME. Skip is preferred over
 # Continue because Continue installs hook configs into that real home; Skip leaves the machine
 # untouched. Falling back to Continue only covers a build where Skip is unavailable.
+#
+# One accessibility traversal both finds and presses the button: when the step is not offered (the
+# common case) the check is a single walk of the app's tree, which costs seconds on a populated
+# window, so it must not be repeated per identifier or per action.
 drive_coding_agents_setup_step_if_offered() {
-  if ui_identifier_exists "setup-coding-agents-skip"; then
-    ui_click_identifier "setup-coding-agents-skip" || true
-  elif ui_identifier_exists "setup-coding-agents-continue"; then
-    ui_click_identifier "setup-coding-agents-continue" || true
-  fi
+  osascript - "$SPACES_PID" "setup-coding-agents-skip" "setup-coding-agents-continue" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+property continueButton : missing value
+
+on elementIdentifier(targetElement)
+  tell application "System Events"
+    try
+      return (value of attribute "AXIdentifier" of targetElement) as text
+    end try
+  end tell
+  return ""
+end elementIdentifier
+
+on press(targetElement)
+  tell application "System Events"
+    try
+      perform action "AXPress" of targetElement
+    on error
+      click targetElement
+    end try
+  end tell
+end press
+
+-- Presses Skip as soon as it is seen and returns true. Continue is only remembered, so Skip wins
+-- whichever of the two the walk reaches first.
+on walk(targetElement, skipID, continueID)
+  set identifier to my elementIdentifier(targetElement)
+  if identifier is skipID then
+    my press(targetElement)
+    return true
+  else if identifier is continueID then
+    set my continueButton to targetElement
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my walk(childElement, skipID, continueID) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end walk
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set skipID to item 2 of argv
+  set continueID to item 3 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        if my walk(targetWindow, skipID, continueID) then return
+      end repeat
+    end repeat
+  end tell
+  if continueButton is not missing value then my press(continueButton)
+end run
+APPLESCRIPT
 }
 # Reads one element's accessibility description (the AppKit accessibility label) by identifier.
 # Used to assert what a status row says without scraping pixels or depending on row geometry.

@@ -179,6 +179,7 @@ import json
 import math
 import os
 import re
+import signal
 import sqlite3
 import statistics
 import subprocess
@@ -239,8 +240,10 @@ def run(command: list[str], timeout: float = 30) -> subprocess.CompletedProcess[
     return subprocess.run(command, env=base_env, capture_output=True, text=True, timeout=timeout, check=True)
 
 
-def drive_coding_agents_setup_step_if_offered() -> None:
-    subprocess.run(
+def start_coding_agents_setup_step_check() -> subprocess.Popen[bytes]:
+    # The check walks the app's accessibility tree, which takes seconds. It runs beside the caller's
+    # polling instead of inside it, so a slow walk cannot starve the poll loop's deadline.
+    return subprocess.Popen(
         [
             "bash",
             "-c",
@@ -249,11 +252,29 @@ def drive_coding_agents_setup_step_if_offered() -> None:
             os.environ["SPACES_E2E_UI_AUTOMATION"],
             os.environ["SPACES_E2E_APP_PID"],
         ],
-        check=False,
-        timeout=10,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        # Own process group, so stopping the check also stops the osascript walk the shell spawned.
+        start_new_session=True,
     )
+
+
+def stop_coding_agents_setup_step_check(check: subprocess.Popen[bytes]) -> None:
+    # The group id equals the leader's pid, and stays valid while osascript lives after the shell
+    # exits, so signal by pid rather than by looking the group up on a possibly reaped leader.
+    # macOS answers EPERM, not ESRCH, when the group's only member is the unreaped leader zombie,
+    # so both mean nothing in the group is left running.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(check.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        if sig == signal.SIGTERM:
+            try:
+                check.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+    check.wait()
 
 
 def register_workspace_dir() -> str:
@@ -579,20 +600,26 @@ def request_terminal_window(session_id: str) -> None:
     deadline = time.monotonic() + 20
     next_request_at = 0.0
     last_state = None
-    while time.monotonic() < deadline:
-        if time.monotonic() >= next_request_at:
-            run([spacese2e, "focus-terminal-session-window", "--session-id", session_id], timeout=5)
-            next_request_at = time.monotonic() + 1
-        last_state = dump_state(session_id, "focused")
-        if last_state.get("found") and renderer_is_ghostty(last_state):
-            time.sleep(0.3)
-            return
-        # A fresh profile launch can offer the coding-agents setup step in the main window, and
-        # no terminal window is summoned while it is up, so each poll drives it through its Skip
-        # action.
-        drive_coding_agents_setup_step_if_offered()
-        time.sleep(0.02)
-    raise TimeoutError(f"timed out waiting for terminal window; last={last_state}")
+    setup_check: subprocess.Popen[bytes] | None = None
+    try:
+        while time.monotonic() < deadline:
+            if time.monotonic() >= next_request_at:
+                run([spacese2e, "focus-terminal-session-window", "--session-id", session_id], timeout=5)
+                next_request_at = time.monotonic() + 1
+            last_state = dump_state(session_id, "focused")
+            if last_state.get("found") and renderer_is_ghostty(last_state):
+                time.sleep(0.3)
+                return
+            # A fresh profile launch can offer the coding-agents setup step in the main window, and
+            # no terminal window is summoned while it is up, so the check drives it through its Skip
+            # action. One check runs at a time, in the background, while the pane is polled.
+            if setup_check is None or setup_check.poll() is not None:
+                setup_check = start_coding_agents_setup_step_check()
+            time.sleep(0.02)
+        raise TimeoutError(f"timed out waiting for terminal window; last={last_state}")
+    finally:
+        if setup_check is not None:
+            stop_coding_agents_setup_step_check(setup_check)
 
 
 def start_terminal(title: str, command: str | None) -> str:

@@ -248,6 +248,15 @@ final class SpacesMobileUITests: XCTestCase {
         for opened in e2eEventDetails(configuration: configuration, kind: "open_link") {
             XCTAssertEqual(opened, linkText, "The terminal opened a link that was never on screen whole")
         }
+        // A tapped file link asks before anything is fetched; the sheet is titled with the file's name.
+        let confirmationTitle = configuration.expectedLinkPreviewTitle
+        // Queried from the app root because the dialog is an action sheet on iPhone and a popover on iPad.
+        let openLink = app.buttons["Open Link"]
+        XCTAssertTrue(openLink.waitForExistence(timeout: 10), "The link confirmation dialog did not appear for \(linkText)")
+        XCTAssertTrue(
+            app.staticTexts[confirmationTitle].exists, "The link confirmation dialog is not titled with \(confirmationTitle): \(app.debugDescription)"
+        )
+        openLink.tap()
         XCTAssertTrue(
             waitForLinkPreview(in: app, configuration: configuration, title: configuration.expectedLinkPreviewTitle, timeout: 20),
             "The terminal link preview did not appear for \(linkText). \(previewStateDescription(configuration: configuration))")
