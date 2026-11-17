@@ -20,6 +20,7 @@ jobs:
     outputs:
       code: ${{ steps.classify.outputs.code }}
       web: ${{ steps.classify.outputs.web }}
+      codepane: ${{ steps.classify.outputs.codepane }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -39,6 +40,7 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ] || ! files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"; then
             echo "code=true" >>"$GITHUB_OUTPUT"
             echo "web=true" >>"$GITHUB_OUTPUT"
+            echo "codepane=true" >>"$GITHUB_OUTPUT"
             echo "Not a pull request (or no usable diff); running every lane."
             exit 0
           fi
@@ -50,8 +52,12 @@ jobs:
           # what the site build produces even though it lives outside apps/web.
           if printf '%s\n' "$files" | grep -qE '^(apps/web/|scripts/stage-web-releases\.sh$)'; then web=true; else web=false; fi
           echo "code=$code" >>"$GITHUB_OUTPUT"
+          # The Editor web app lane compares the source against the checked-in bundle, so a change
+          # to either side (or to the lane script itself) must run it.
+          if printf '%s\n' "$files" | grep -qE '^(apps/macos/CodePaneWeb/|apps/macos/Sources/spacesui/Resources/CodePane/|apps/macos/scripts/codepane-web-lane\.sh$)'; then codepane=true; else codepane=false; fi
           echo "web=$web" >>"$GITHUB_OUTPUT"
-          echo "code=$code web=$web"
+          echo "codepane=$codepane" >>"$GITHUB_OUTPUT"
+          echo "code=$code web=$web codepane=$codepane"
 
   publish-ghostty-artifacts:
     needs: changes
@@ -225,6 +231,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npm run build
 
+  # Its own job, on Linux: it only runs node, and a failure here names the Editor web app instead
+  # of hiding inside the macOS verify job.
+  codepane-web:
+    needs: changes
+    if: ${{ needs.changes.outputs.codepane == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/macos/CodePaneWeb/package-lock.json
+
+      - name: Run Editor web app lane
+        run: apps/macos/scripts/codepane-web-lane.sh
+
   linux-spacesd-artifact:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
@@ -290,7 +316,7 @@ jobs:
   # results: succeeded or deliberately skipped is fine, anything else is not. Requiring one context
   # also means renaming or adding a job cannot silently un-require coverage.
   gate:
-    needs: [changes, publish-ghostty-artifacts, verify, ios-tests, website, linux-spacesd-artifact]
+    needs: [changes, publish-ghostty-artifacts, verify, ios-tests, website, codepane-web, linux-spacesd-artifact]
     if: always()
     runs-on: ubuntu-latest
     steps:
