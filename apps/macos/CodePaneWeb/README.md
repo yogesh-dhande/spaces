@@ -40,8 +40,9 @@ npm run icons       # regenerate the file-type icon sprite from vscode-icons (ne
 `npm run build` empties and rewrites `apps/macos/Sources/spacesui/Resources/CodePane/`, a `.copy`
 resource of the `spacesui` SwiftPM target. That output is checked in, so Swift builds and tests
 never need node. A change to this bundle ships only when the rebuilt output is committed with it.
-Neither `scripts/verify.sh` nor CI runs this package's tests, typecheck, or build, so run
-`npm run test` and `npm run build` locally before committing a change here.
+CI (the `codepane-web` job, `apps/macos/scripts/codepane-web-lane.sh`) runs this package's tests,
+typecheck, and build, and fails when the checked-in bundle differs from what the source builds.
+`scripts/verify.sh` does not run it, so run that script and rebuild before committing a change here.
 
 `npm run dev` runs against `MockSpacesBridge` (`src/bridge/mockBridge.ts`) with a fixture diff
 (`src/bridge/fixtures.ts`) covering every entry kind: modified, renamed, added, deleted, untracked,
