@@ -1018,9 +1018,17 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                         return
                     }
                     complete(true)
-                }, DispatchQueue.global(qos: .userInitiated))
+                }, verifyQueue)
             return NWParameters(tls: tlsOptions, tcp: SpacesTCPKeepalive.makeTCPOptions())
         }
+
+        /// Runs every pin verification. A queue of our own rather than `DispatchQueue.global`: a global
+        /// queue is non-overcommit, so once blocking work (semaphore waits, synchronous I/O) occupies the
+        /// worker pool its blocks wait for a free worker, and the handshake that is waiting on this
+        /// verdict stalls until the caller's timeout with no network delay at all. A queue created here
+        /// is overcommit and always gets a thread. Verification is a hash and a compare, so sharing one
+        /// serial queue across connections costs nothing.
+        private static let verifyQueue = DispatchQueue(label: "spaces.pinned.tls.verify", qos: .userInitiated)
     }
 
     public final class TerminalServicePinnedTLSRequestSessionClient: @unchecked Sendable {

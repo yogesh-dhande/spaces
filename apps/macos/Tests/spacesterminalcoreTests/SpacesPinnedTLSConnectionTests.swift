@@ -73,6 +73,26 @@ import XCTest
             }
         }
 
+        /// The pin verdict must not wait for a free GCD worker. Verifying on the global queue let blocking
+        /// work elsewhere in the process starve the handshake until the dial timed out, with no network
+        /// delay at all (`allCandidatesUnreachable` against a healthy loopback listener).
+        func testDialCompletesWhileTheGlobalWorkerPoolIsSaturated() throws {
+            let root = try temporaryRoot()
+            let server = try makeServer(identityRoot: root) { _ in TerminalServiceResponse(ok: true, message: "pong") }
+            defer { server.stop() }
+
+            let release = DispatchSemaphore(value: 0)
+            let blockedCount = 300
+            for _ in 0..<blockedCount { DispatchQueue.global(qos: .userInitiated).async { _ = release.wait(timeout: .now() + 30) } }
+            defer { for _ in 0..<blockedCount { release.signal() } }
+            // Let the blockers claim every worker the pool will give them before dialing.
+            Thread.sleep(forTimeInterval: 0.5)
+
+            let connection = try SpacesPinnedTLSConnector.connect(
+                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: server.certificateFingerprint, timeout: 5)
+            connection.cancel()
+        }
+
         func testTransfersLineLargerThanReceiveChunk() throws {
             let root = try temporaryRoot()
             let largeMessage = String(repeating: "x", count: 2_000_000)
@@ -105,8 +125,7 @@ import XCTest
                 onLine: { line in
                     lineBox.append(line)
                     receivedLines.fulfill()
-                },
-                onBytesReceived: { _ = byteReads.increment() },
+                }, onBytesReceived: { _ = byteReads.increment() },
                 onClosed: { error in
                     XCTAssertNil(error)
                     closed.fulfill()
