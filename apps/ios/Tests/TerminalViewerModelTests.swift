@@ -5586,6 +5586,11 @@
                     try Self.framedState(text: "fresh", sessionRevision: 50, ownerEpoch: 1, emittedAt: "2026-06-04T14:24:10Z")))
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
                 await recorder.append(request)
+                // Only `.state` reads go to the responder. The viewer also fetches a transcript page for its
+                // local scrollback as the first frames land, concurrently with the first resync read; if
+                // that request reached the responder first it would take the held first answer, and the
+                // resync read would be answered immediately instead of being held.
+                guard case .state = request.command else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
                 return await responder.answer()
             }
             // An owner-interactive model, so the only `.state` requests this test can produce are the

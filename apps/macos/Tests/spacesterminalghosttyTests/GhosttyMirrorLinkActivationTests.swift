@@ -40,23 +40,23 @@ import spacesterminalcore
     /// Nothing is tracking the mouse: cmd alone activates the link, and adding shift does not, because
     /// shift is then just another modifier the link's own requirement does not match.
     func testIdleTerminalActivatesLinkOnCommandClickOnly() throws {
-        XCTAssertEqual(try openedLinks(mouseReportingActive: false, modifierFlags: [.command]), [Self.url])
-        XCTAssertEqual(try openedLinks(mouseReportingActive: false, modifierFlags: [.command, .shift]), [])
+        try assertOpenedLinks([Self.url], mouseReportingActive: false, modifierFlags: [.command])
+        try assertOpenedLinks([], mouseReportingActive: false, modifierFlags: [.command, .shift])
     }
 
     /// An application is tracking the mouse: cmd alone finds no link because Ghostty suppresses link
     /// hover under a tracking terminal, and cmd+shift releases the pointer from the application long
     /// enough for the link to resolve.
     func testTrackingTerminalActivatesLinkOnlyWhenShiftReleasesThePointer() throws {
-        XCTAssertEqual(try openedLinks(mouseReportingActive: true, modifierFlags: [.command]), [])
-        XCTAssertEqual(try openedLinks(mouseReportingActive: true, modifierFlags: [.command, .shift]), [Self.url])
+        try assertOpenedLinks([], mouseReportingActive: true, modifierFlags: [.command])
+        try assertOpenedLinks([Self.url], mouseReportingActive: true, modifierFlags: [.command, .shift])
     }
 
     /// The Linux daemon and ended-session replay both export this frame through libghostty-vt. The
     /// mirror must retain its row metadata through the render-update codec so Ghostty's local link
     /// detector joins the visual rows before opening the URL.
     func testSoftWrappedLinkFromVTSnapshotActivatesAsCompleteURL() throws {
-        XCTAssertEqual(try openedLinks(snapshot: Self.softWrappedVTSnapshot(), modifierFlags: [.command]), [Self.url])
+        try assertOpenedLinks([Self.url], snapshot: Self.softWrappedVTSnapshot(), modifierFlags: [.command])
     }
 
     /// A hyperlink whose label is not its target: the link table carries the target, and the click
@@ -64,15 +64,15 @@ import spacesterminalcore
     /// as a URL in the text decide which modifiers activate it.
     func testIdleTerminalActivatesOSC8LabelOnCommandClickOnly() throws {
         let snapshot = Self.osc8Snapshot(mouseReportingActive: false)
-        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: [.command]), [Self.osc8Target])
-        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: []), [], "a plain click on a link label opens nothing")
-        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: [.command, .shift]), [])
+        try assertOpenedLinks([Self.osc8Target], snapshot: snapshot, modifierFlags: [.command])
+        try assertOpenedLinks([], snapshot: snapshot, modifierFlags: [], "a plain click on a link label opens nothing")
+        try assertOpenedLinks([], snapshot: snapshot, modifierFlags: [.command, .shift])
     }
 
     func testTrackingTerminalActivatesOSC8LabelOnlyWhenShiftReleasesThePointer() throws {
         let snapshot = Self.osc8Snapshot(mouseReportingActive: true)
-        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: [.command]), [])
-        XCTAssertEqual(try openedLinks(snapshot: snapshot, modifierFlags: [.command, .shift]), [Self.osc8Target])
+        try assertOpenedLinks([], snapshot: snapshot, modifierFlags: [.command])
+        try assertOpenedLinks([Self.osc8Target], snapshot: snapshot, modifierFlags: [.command, .shift])
     }
 
     /// The click arrives tagged as an OSC 8 open, which is what puts the target under the untrusted-link
@@ -83,6 +83,7 @@ import spacesterminalcore
         var kinds: [GhosttyActionEvent.OpenURLKind] = []
         view.onOpenLink = { _, kind in kinds.append(kind) }
         click(view, modifierFlags: [.command])
+        waitUntil("the click's open-link action") { !kinds.isEmpty }
         XCTAssertEqual(kinds, [.osc8])
     }
 
@@ -93,7 +94,7 @@ import spacesterminalcore
         XCTAssertNil(view.debugLinkTooltip)
 
         view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: window?.windowNumber ?? 0, modifierFlags: [.command]))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        waitUntil("the hover to report the label's target") { view.hoveredLinkDisplayString == Self.osc8Target }
 
         XCTAssertEqual(view.hoveredLinkDisplayString, Self.osc8Target)
         XCTAssertEqual(view.debugLinkTooltip?.text, Self.osc8Target)
@@ -110,16 +111,16 @@ import spacesterminalcore
         XCTAssertTrue(window?.firstResponder !== view, "the hovered pane is not focused")
 
         view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: windowNumber, modifierFlags: []))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        settleForAbsence()
         XCTAssertNil(view.hoveredLinkDisplayString, "without Cmd the label is plain text")
 
         NSApplication.shared.sendEvent(flagsChangedEvent(windowNumber: windowNumber, modifierFlags: [.command]))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        waitUntil("Cmd to highlight the label") { view.hoveredLinkDisplayString == Self.osc8Target }
         XCTAssertEqual(view.hoveredLinkDisplayString, Self.osc8Target)
         XCTAssertEqual(view.debugLinkTooltip?.text, Self.osc8Target)
 
         NSApplication.shared.sendEvent(flagsChangedEvent(windowNumber: windowNumber, modifierFlags: []))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        waitUntil("releasing Cmd to clear the highlight") { view.hoveredLinkDisplayString == nil }
         XCTAssertNil(view.hoveredLinkDisplayString)
         XCTAssertNil(view.debugLinkTooltip, "the tooltip goes as soon as the hover clears")
     }
@@ -137,7 +138,7 @@ import spacesterminalcore
                     with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: windowNumber, context: nil, eventNumber: 2,
                     trackingNumber: 0, userData: nil)))
         NSApplication.shared.sendEvent(flagsChangedEvent(windowNumber: windowNumber, modifierFlags: [.command]))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        settleForAbsence()
 
         XCTAssertNil(view.hoveredLinkDisplayString)
     }
@@ -172,8 +173,25 @@ import spacesterminalcore
         view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: windowNumber, modifierFlags: modifierFlags))
         view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: windowNumber, modifierFlags: modifierFlags))
         view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: windowNumber, modifierFlags: modifierFlags))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
     }
+
+    /// Link hover and link opens reach the view as Ghostty actions, which `GhosttyMirrorAppService`
+    /// hops onto the main actor in two steps after the event that raised them, so a test reads the
+    /// outcome only once it has arrived. The wait is on the outcome itself; the timeout only bounds a
+    /// failing run.
+    private func waitUntil(_ outcome: String, timeout: TimeInterval = 30, _ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line)
+    {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("timed out waiting for \(outcome)", file: file, line: line) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+    }
+
+    /// For an assertion that nothing happened: an event that never fires cannot be awaited, so this
+    /// gives one a generous window to arrive. A late delivery can only hide a regression here, never
+    /// fail a correct run.
+    private func settleForAbsence() { RunLoop.main.run(until: Date().addingTimeInterval(0.3)) }
 
     private func flagsChangedEvent(windowNumber: Int, modifierFlags: NSEvent.ModifierFlags) -> NSEvent {
         try! XCTUnwrap(
@@ -182,11 +200,26 @@ import spacesterminalcore
                 characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 55))
     }
 
-    private func openedLinks(mouseReportingActive: Bool, modifierFlags: NSEvent.ModifierFlags) throws -> [String] {
-        try openedLinks(snapshot: Self.snapshot(text: Self.url, mouseReportingActive: mouseReportingActive), modifierFlags: modifierFlags)
+    private func assertOpenedLinks(
+        _ expected: [String], mouseReportingActive: Bool, modifierFlags: NSEvent.ModifierFlags, _ message: String = "",
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        try assertOpenedLinks(
+            expected, snapshot: Self.snapshot(text: Self.url, mouseReportingActive: mouseReportingActive), modifierFlags: modifierFlags, message,
+            file: file, line: line)
     }
 
-    private func openedLinks(snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags) throws -> [String] {
+    private func assertOpenedLinks(
+        _ expected: [String], snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags, _ message: String = "",
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let opened = try openedLinks(expecting: expected.count, snapshot: snapshot, modifierFlags: modifierFlags)
+        XCTAssertEqual(opened, expected, message, file: file, line: line)
+    }
+
+    /// The links a click opened. A click expected to open `count` links is read once that many have
+    /// arrived; one expected to open none is read after `settleForAbsence`.
+    private func openedLinks(expecting count: Int, snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags) throws -> [String] {
         let view = makeAttachedView(sessionID: "link-\(snapshot.columns)x\(snapshot.rows)-\(modifierFlags.rawValue)")
         defer { view.removeFromSuperview() }
         view.update(snapshot: snapshot, renderStateKey: "link|\(snapshot.columns)x\(snapshot.rows)|\(modifierFlags.rawValue)")
@@ -195,6 +228,7 @@ import spacesterminalcore
         var opened: [String] = []
         view.onOpenLink = { link, _ in opened.append(link) }
         click(view, modifierFlags: modifierFlags)
+        if count > 0 { waitUntil("the click to open \(count) link(s)") { opened.count >= count } } else { settleForAbsence() }
         return opened
     }
 

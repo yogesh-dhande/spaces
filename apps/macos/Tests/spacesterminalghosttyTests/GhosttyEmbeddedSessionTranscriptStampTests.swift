@@ -154,35 +154,42 @@ final class GhosttyEmbeddedSessionTranscriptStampTests: XCTestCase {
     /// predicts the same base and the partial last line, and the epoch never moves, since pruning does not
     /// renumber rows. Once the flood ends, replaying the file up to the final frame's offset reproduces
     /// that frame's grid.
+    ///
+    /// The frames are taken at checkpoints the test controls, not sampled while the flood runs: how many
+    /// frames a free-running flood is observed through depends on how the engine actor interleaves the
+    /// parser's batches with a poller, and under load it can be a handful. The child writes
+    /// `chunkLines` lines plus the first nine bytes of the next one, then blocks reading a line from
+    /// its stdin until the test releases it. Parsing then converges on one exact offset, so each
+    /// checkpoint is a fixed frame at a mid-line position, and the number of frames checked is fixed
+    /// by the test.
+    ///
+    /// The child writes its own CR LF with the tty's output processing off. With `onlcr` on, the kernel
+    /// occasionally emits the CR it adds for a newline twice when the child's output backs up behind the
+    /// reader (reproducible with a bare PTY and no Ghostty), which shifts every later offset by a byte
+    /// and so breaks the exact offsets this test relies on.
     func testFloodFramesNameTheirAbsoluteRowsAndTranscriptPrefixes() async throws {
         try Self.requireGhosttyAvailable()
         let paths = try Self.makeTemporaryPaths()
         defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
         let totalLines = 80_000
+        let chunkLines = 8_000
+        let partialBytes = 9
         let awk =
-            "BEGIN{pad=\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; for(i=0;i<\(totalLines);i++){h=sprintf(\"marker-%06d-\",i); print h substr(pad,1,40-length(h))}}"
-        let core = try await startCore(command: "stty -echo; awk '\(awk)'; cat", paths: paths)
+            "BEGIN{ORS=\"\\r\\n\"; pad=\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; for(i=0;i<\(totalLines);i++){h=sprintf(\"marker-%06d-\",i); s=h substr(pad,1,40-length(h)); if(i>0&&i%\(chunkLines)==0){printf \"%s\",substr(s,1,\(partialBytes)); fflush(); getline go < \"/dev/stdin\"; print substr(s,\(partialBytes + 1))} else print s}}"
+        let core = try await startCore(command: "stty -echo -opost; awk '\(awk)'; cat", paths: paths)
         defer { terminate(core) }
 
         let wireWidth = TranscriptReplayVT.wireWidth
-        var framesChecked = 0
         var sawPruning = false
-        // The first frames can straddle the session's startup resize, which legitimately renumbers rows;
-        // the epoch is held to a single value from the first frame well past it and short of any pruning.
+        // The epoch is held to a single value from the first checkpoint on, which is well past the
+        // session's startup resize (that legitimately renumbers rows) and short of any pruning.
         var epoch: UInt64?
-        var finalFrame: TranscriptFrame?
-        let deadline = Date().addingTimeInterval(240)
-        while Date() < deadline, finalFrame == nil {
-            guard let frame = TerminalEngineActor.runSynchronously({ Self.frame(of: core) }) else {
-                try await Task.sleep(for: .milliseconds(5))
-                continue
-            }
+
+        func check(_ frame: TranscriptFrame) {
             let rows = TranscriptReplayVT.rowTexts(frame)
-            if Int(frame.transcriptByteOffset) >= 2_000 * wireWidth {
-                if let epoch { XCTAssertEqual(frame.historyEpoch, epoch, "pruning must not change the epoch") }
-                epoch = epoch ?? frame.historyEpoch
-            }
+            if let epoch { XCTAssertEqual(frame.historyEpoch, epoch, "pruning must not change the epoch") }
+            epoch = epoch ?? frame.historyEpoch
             if frame.historyRowBase > UInt64(frame.scrollbarOffset) { sawPruning = true }
 
             // Row 0 and every complete marker row below it name their own absolute row.
@@ -194,18 +201,22 @@ final class GhosttyEmbeddedSessionTranscriptStampTests: XCTestCase {
             // The offset fixes the parser's position: n whole lines and a partial line n on the bottom row.
             let consumed = Int(frame.transcriptByteOffset)
             let completeLines = consumed / wireWidth
-            if completeLines >= frame.rows {
-                let partial = min(consumed % wireWidth, TranscriptReplayVT.markerWidth)
-                let expectedBottom = String(TranscriptReplayVT.marker(completeLines).prefix(partial)).replacingOccurrences(
-                    of: "\\s+$", with: "", options: .regularExpression)
-                XCTAssertEqual(rows.last, expectedBottom, "bottom row at offset \(consumed)")
-                XCTAssertEqual(frame.historyRowBase, UInt64(completeLines - (frame.rows - 1)), "base at offset \(consumed)")
-                framesChecked += 1
-            }
-            if consumed >= totalLines * wireWidth { finalFrame = frame }
+            let partial = min(consumed % wireWidth, TranscriptReplayVT.markerWidth)
+            let expectedBottom = String(TranscriptReplayVT.marker(completeLines).prefix(partial)).replacingOccurrences(
+                of: "\\s+$", with: "", options: .regularExpression)
+            XCTAssertEqual(rows.last, expectedBottom, "bottom row at offset \(consumed)")
+            XCTAssertEqual(frame.historyRowBase, UInt64(completeLines - (frame.rows - 1)), "base at offset \(consumed)")
         }
-        let final = try XCTUnwrap(finalFrame, "the flood did not finish")
-        XCTAssertGreaterThan(framesChecked, 10)
+
+        for chunk in 1..<(totalLines / chunkLines) {
+            let expectedOffset = chunk * chunkLines * wireWidth + partialBytes
+            let frame = try await waitForFrame(of: core, timeout: 120) { Int($0.transcriptByteOffset) >= expectedOffset }
+            XCTAssertEqual(Int(frame.transcriptByteOffset), expectedOffset, "the child is blocked at the checkpoint, so nothing is parsed past it")
+            check(frame)
+            sendThroughCat("\n", to: core)
+        }
+        let final = try await waitForFrame(of: core, timeout: 120) { Int($0.transcriptByteOffset) >= totalLines * wireWidth }
+        check(final)
         XCTAssertTrue(sawPruning, "the flood must overrun the scrollback limit so rows are pruned")
         XCTAssertEqual(final.transcriptFileIdentity, TranscriptReplayVT.fileIdentity(ofFileAt: paths.outputPath))
 

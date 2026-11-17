@@ -273,20 +273,23 @@ extension ProcessProfileEnvironmentSuites {
         /// alone only reacts to a notice that arrives after the step is up, so a stale offer with no later
         /// notice would sit blocking the workspace UI forever. `showRestoreSessionsStep` runs one re-check
         /// immediately, so this one needs no notification at all to close.
-        @Test func showingTheStepReChecksImmediatelyWithNoNotificationNeeded() async throws {
+        @Test(.timeLimit(.minutes(1))) func showingTheStepReChecksImmediatelyWithNoNotificationNeeded() async throws {
             let controller = makeController()
             let flow = SetupFlowController(host: controller, database: try? controller.clientDatabase(), sessionRestore: controller.sessionRestore)
             var completed = false
-            flow.onComplete = { completed = true }
+            let (completions, signalCompletion) = AsyncStream<Void>.makeStream()
+            flow.onComplete = {
+                completed = true
+                signalCompletion.yield()
+            }
             controller.sessionRestore.daemonStatusProbeOverrideForTesting = { _ in self.status(restorables: 0) }
 
             flow.showRestoreSessionsStep(offer: offer(rowCount: 1))
 
-            // The immediate re-check runs on its own task, landing at some point after this call returns.
-            // Poll for it rather than assuming a fixed delay, bounded so a genuine regression fails fast
-            // instead of hanging.
-            let deadline = Date().addingTimeInterval(2)
-            while Date() < deadline, !completed { await Task.yield() }
+            // The immediate re-check runs on its own task, landing at some point after this call returns,
+            // so this waits for the step to close rather than for any length of time. A regression that
+            // never closes it is cut off by this test's time limit, which cancels the wait.
+            for await _ in completions { break }
 
             #expect(completed, "the step's own initial re-check catches an offer already stale by the time it appears")
         }
@@ -327,23 +330,30 @@ extension ProcessProfileEnvironmentSuites {
 
         /// The step's own answer clears the record too, so a status arriving mid-answer reading "no
         /// record" must not race it: finishing here would drop the pane retargeting the answer still owes
-        /// before `onComplete`. Pairs the offer's device with a listener that accepts the TCP connection
-        /// but never completes the TLS handshake, so `answer()`'s own network call (on its detached task)
-        /// stays genuinely in flight for as long as the test needs to make its assertion, not a timing
-        /// assumption. The call's own eventual failure is never awaited: like
-        /// `DeviceTerminalSessionStateModelConnectTests`, the connect is left to fail on its own real
-        /// timeout in the background rather than the test paying for it, since nothing here depends on how
-        /// `answer()` finishes.
-        @Test func aNoRecordStatusWhileAnsweringDoesNotEndTheStep() async throws {
+        /// before `onComplete`. Pairs the offer's device with a real server whose pairing store holds every
+        /// authorization until the test releases it, so `answer()`'s own network call (on its detached
+        /// task) stays genuinely in flight for as long as the test needs to make its assertion, not a
+        /// timing assumption. At the end the store refuses the held request, which fails the call at once,
+        /// and the test awaits the answer: `answer()` reads its `unowned` host as it finishes, so a
+        /// controller freed while the answer is still in flight would abort the whole test process. (A
+        /// connect stalled below the request, such as a listener that never speaks TLS, cannot be ended
+        /// that way: a reset leaves the connection waiting until its own timeout, about a minute.)
+        @Test(.timeLimit(.minutes(1))) func aNoRecordStatusWhileAnsweringDoesNotEndTheStep() async throws {
             let controller = makeController()
-            let listener = try StallingTLSHandshakeListener()
-            defer { listener.close() }
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root.appendingPathComponent("tls-identity", isDirectory: true))
+            let pairingStore = HoldingOfferPairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer {
+                pairingStore.release()
+                server.stop()
+            }
             let deviceID = "remote-stalling-\(UUID().uuidString)"
             try controller.clientDatabase().upsert(
                 device: SpacesPairedDeviceRecord(
-                    id: deviceID, name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: listener.port,
-                    certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64), createdAt: "2026-01-01T00:00:00Z",
-                    updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: "2026-01-01T00:00:00Z"))
+                    id: deviceID, name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
+                    certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+                    lastSelectedAt: "2026-01-01T00:00:00Z"))
             let offer = remoteOffer(deviceID: deviceID)
             let flow = SetupFlowController(host: controller, database: try? controller.clientDatabase(), sessionRestore: controller.sessionRestore)
             var completed = false
@@ -355,11 +365,11 @@ extension ProcessProfileEnvironmentSuites {
             controller.sessionRestore.daemonStatusProbeOverrideForTesting = { _ in self.status(restorables: 1) }
             flow.showRestoreSessionsStep(offer: offer)
 
-            Task { await controller.sessionRestore.answer(.skip, offer: offer, panePlacement: .persistedLayouts) }
+            let answerTask = Task { await controller.sessionRestore.answer(.skip, offer: offer, panePlacement: .persistedLayouts) }
             // Waits only until `answer()` has set its own in-flight marker (a single synchronous line at
-            // the top of the call), never a fixed delay: by then it is blocked on the stalling connect and
-            // will stay there until the listener closes.
-            while !controller.sessionRestore.isAnswering { await Task.yield() }
+            // the top of the call), never a fixed delay: by then it is on its way to the server, where the
+            // pairing store holds it until the test releases it.
+            while !controller.sessionRestore.isAnswering, !Task.isCancelled { await Task.yield() }
 
             // Only now does the override report "no record": the same status answers both `answer()`'s own
             // reachability check and this test's later re-check, which must not act on it while `answer()`
@@ -368,6 +378,9 @@ extension ProcessProfileEnvironmentSuites {
 
             await flow.recheckRestoreOfferForSupersession()
             #expect(!completed, "the step must not finish while its own offer is still being answered")
+
+            pairingStore.release()
+            _ = await answerTask.value
         }
 
         /// A lost reply can report an answer as failed even after the daemon cleared the record it named:
@@ -378,7 +391,7 @@ extension ProcessProfileEnvironmentSuites {
         /// listening server whose certificate does not match the pin: the handshake rejects it immediately,
         /// standing in for a reply lost in transport, while the probe override reports "no record" throughout,
         /// standing in for the daemon having already cleared it.
-        @Test func aFailedAnswerReChecksAndCanCloseTheStep() async throws {
+        @Test(.timeLimit(.minutes(1))) func aFailedAnswerReChecksAndCanCloseTheStep() async throws {
             let controller = makeController()
             let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root.appendingPathComponent("tls-identity", isDirectory: true))
             let server = SpacesDeviceAPIServer(
@@ -395,20 +408,40 @@ extension ProcessProfileEnvironmentSuites {
             let offer = remoteOffer(deviceID: deviceID)
             let flow = SetupFlowController(host: controller, database: try? controller.clientDatabase(), sessionRestore: controller.sessionRestore)
             var completed = false
-            flow.onComplete = { completed = true }
+            let (completions, signalCompletion) = AsyncStream<Void>.makeStream()
+            flow.onComplete = {
+                completed = true
+                signalCompletion.yield()
+            }
             // Matches the offer's own generation, so the step's initial re-check (fired from
             // `showRestoreSessionsStep`) is a no-op and settles before the override below changes anything,
             // leaving only the post-answer re-check this test is for to explain a later `completed`.
-            controller.sessionRestore.daemonStatusProbeOverrideForTesting = { _ in self.status(restorables: 1) }
+            var initialRecheckProbes = 0
+            controller.sessionRestore.daemonStatusProbeOverrideForTesting = { _ in
+                initialRecheckProbes += 1
+                return self.status(restorables: 1)
+            }
             flow.showRestoreSessionsStep(offer: offer)
-            for _ in 0..<50 { await Task.yield() }
+            // The override answers without suspending, so the re-check that made this read has also
+            // finished by the time the test sees it, and only the post-answer re-check is left to close
+            // the step.
+            while initialRecheckProbes == 0, !Task.isCancelled { await Task.yield() }
 
             controller.sessionRestore.daemonStatusProbeOverrideForTesting = { _ in self.status(restorables: 0) }
             let button = try #require(flow.view.firstDescendantButton(identifier: "setup-restore-sessions-restore"))
             button.performClick(nil)
 
-            let deadline = Date().addingTimeInterval(5)
-            while Date() < deadline, !completed { await Task.yield() }
+            // The step closes only after the answer's failed network call returns and the re-check runs, and
+            // how long that takes is the network stack's, so this waits for the close itself. A regression
+            // that never closes it is cut off by this test's time limit, which cancels the wait.
+            for await _ in completions { break }
+
+            // The answer reads its host (`unowned`) as it settles. When the wait above ended without the
+            // step closing, the answer can still be in flight, and returning would free `controller` under
+            // it and abort the whole test process instead of reporting this failure. A closed step means
+            // the answer already finished.
+            if !completed { while controller.sessionRestore.isAnswering { await Task.yield() } }
+            // (This settle loop deliberately ignores cancellation: leaving early is the abort it prevents.)
 
             #expect(completed, "a failed answer re-checks once it settles, so a record cleared underneath it still closes the step")
         }
@@ -470,58 +503,35 @@ private final class AlwaysAuthorizedOfferPairingStore: SpacesDevicePairingStoreP
     func validate(clientApp _: SpacesDeviceClientApp) throws {}
 }
 
-/// A listener that accepts a TCP connection but never speaks TLS, so a pinned-TLS connect against it
-/// genuinely stalls in the handshake instead of failing fast, the same technique
-/// `DeviceTerminalSessionStateModelConnectTests` uses to prove a connect never blocks the main actor. Here
-/// it proves the opposite: that `SessionRestoreController.answer`'s own network call, dialed from a
-/// detached task, is what keeps `isAnswering` true for as long as the test needs, with no timing
-/// assumption: a closed port would fail with ECONNREFUSED fast enough to race the assertion instead.
-private final class StallingTLSHandshakeListener {
-    let port: Int
-    private let fd: Int32
+/// A pairing store that holds every authorization until `release()`, then refuses it. A request to a server
+/// built on it genuinely stays in flight, past the TLS handshake, for as long as a test needs, and ends
+/// at once when the test releases it. `authorize` runs on the server's own thread, never the caller's.
+private final class HoldingOfferPairingStore: SpacesDevicePairingStoreProtocol, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var isReleased = false
 
-    init() throws {
-        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
-        guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-
-        var reuseAddress: Int32 = 1
-        setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &reuseAddress, socklen_t(MemoryLayout<Int32>.size))
-
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        address.sin_port = 0  // Ask the kernel for an ephemeral port.
-
-        let bindResult = withUnsafePointer(to: &address) { addressPointer -> Int32 in
-            addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
-                bind(socketFD, rebound, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            Darwin.close(socketFD)
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-
-        guard listen(socketFD, 1) == 0 else {
-            Darwin.close(socketFD)
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-
-        var boundAddress = sockaddr_in()
-        var boundAddressLength = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let getsocknameResult = withUnsafeMutablePointer(to: &boundAddress) { addressPointer -> Int32 in
-            addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in getsockname(socketFD, rebound, &boundAddressLength) }
-        }
-        guard getsocknameResult == 0 else {
-            Darwin.close(socketFD)
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-
-        fd = socketFD
-        port = Int(UInt16(bigEndian: boundAddress.sin_port))
+    func release() {
+        condition.lock()
+        isReleased = true
+        condition.broadcast()
+        condition.unlock()
     }
 
-    /// Closes the listening socket so a still-stalled connect is reset quickly instead of dragging out
-    /// for its full timeout.
-    func close() { Darwin.close(fd) }
+    func authorize(clientApp _: SpacesDeviceClientApp?, authToken _: String?) throws {
+        condition.lock()
+        while !isReleased { condition.wait() }
+        condition.unlock()
+        throw HeldRequestReleased()
+    }
+
+    private struct HeldRequestReleased: LocalizedError { var errorDescription: String? { "The held request was released by the test." } }
+
+    func issueToken(for _: SpacesDeviceClientApp, presentedToken _: String?) throws -> String { "held-offer-token" }
+    func listDevices() throws -> [SpacesDevicePairedClient] { [] }
+    func revoke(installationID _: String) throws {}
+    func removeAll() throws {}
+    func pushRegistrations() throws -> [String: SpacesDevicePushRegistration] { [:] }
+    func setPushRegistration(_: SpacesDevicePushRegistration, forInstallationID _: String) throws {}
+    func clearPushRegistration(forInstallationID _: String, matchingCapability _: String?) throws -> SpacesDevicePushRegistration? { nil }
+    func validate(clientApp _: SpacesDeviceClientApp) throws {}
 }
