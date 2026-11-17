@@ -4,6 +4,12 @@ import type { ContextMenu, ContextMenuRequest } from "../src/app/contextMenu";
 import { DiffView } from "../src/app/diffView";
 import type { DiffCommentHooks } from "../src/app/diffView";
 import type { DiffFileEntry } from "../src/bridge/types";
+import { untilMutated, untilRendered } from "./pierreRenderSignal";
+
+vi.mock("@pierre/diffs", async (importOriginal) => {
+  const { withRenderSignal } = await import("./pierreRenderSignal");
+  return withRenderSignal(await importOriginal<typeof import("@pierre/diffs")>());
+});
 
 registerCustomCSSVariableTheme("spaces", {}, true);
 
@@ -162,7 +168,7 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", hooks(onRequestEdit), menu);
 
     view.setFiles([file()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
 
     const fileContainer = container.querySelector("diffs-container");
     expect(fileContainer?.shadowRoot).toBeDefined();
@@ -188,10 +194,10 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", hooks(() => {}), menu);
 
     view.setFiles([file()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     view.beginEdit("src/example.txt", "const value = newValue;\n");
 
-    await vi.waitFor(() => {
+    await untilRendered(() => {
       const editor = queryOpenShadowRoots(container, '[role="textbox"]')[0];
       expect(editor?.id).toBe("code-pane-diff-edit-input");
       const rendered = container.querySelector("diffs-container")!.shadowRoot!;
@@ -207,20 +213,20 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", hooks(() => {}), menu);
 
     view.setFiles([file()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     view.beginEdit("src/example.txt", "const value = newValue;\n");
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+    await untilRendered(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
 
     view.endEdit("src/example.txt");
-    await vi.waitFor(() => {
+    await untilRendered(() => {
       expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(0);
       expect(queryOpenShadowRoots(container, ".diff-edit-header")).toHaveLength(0);
     });
 
     view.beginEdit("src/example.txt", "const value = newValue;\n");
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+    await untilRendered(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
     view.setEditConflict("src/example.txt", { kind: "changed", diskContent: "const value = diskValue;\n" });
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(0));
+    await untilRendered(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(0));
     // Pierre completes the read-only renderer asynchronously; a delayed post-render must not
     // restore the Spaces-owned identifier to a reused contenteditable.
     await new Promise((resolve) => setTimeout(resolve, 75));
@@ -236,13 +242,13 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", hooks(() => {}, onRequestNewComment), menu);
 
     view.setFiles([file()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     const shadowRoot = container.querySelector("diffs-container")!.shadowRoot!;
     const newLine = shadowRoot.querySelector<HTMLElement>('[data-line-type="change-addition"]')!;
     const pointerMove = new Event("pointermove", { bubbles: true, composed: true });
     Object.defineProperty(pointerMove, "pointerType", { value: "mouse" });
     newLine.dispatchEvent(pointerMove);
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, '[data-utility-button]')[0]?.id).toBe("code-pane-add-comment-src%2Fexample.txt"));
+    await untilMutated(shadowRoot, () => expect(queryOpenShadowRoots(container, '[data-utility-button]')[0]?.id).toBe("code-pane-add-comment-src%2Fexample.txt"));
     const button = queryOpenShadowRoots(container, '[data-utility-button]')[0] as HTMLButtonElement;
     const pointerDown = new Event("pointerdown", { bubbles: true, composed: true });
     Object.assign(pointerDown, { pointerId: 1, pointerType: "mouse", button: 0 });
@@ -267,7 +273,7 @@ describe("DiffView with the real Pierre renderer", () => {
 
     view.setFiles([file()], false);
     expect(view.beginEdit("src/example.txt", "const value = newValue;\n")).toBe(true);
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+    await untilRendered(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
 
     const editingRoots = queryOpenShadowRoots(container, "[data-code-pane-editing]");
     expect(editingRoots).toHaveLength(1);
@@ -283,7 +289,7 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", hooks(() => {}, onRequestNewComment), menu);
 
     view.setFiles([twoLineFile()], false);
-    await vi.waitFor(() => {
+    await untilRendered(() => {
       const shadowRoot = container.querySelector("diffs-container")?.shadowRoot;
       expect(shadowRoot?.querySelectorAll('[data-line-type="change-addition"]').length).toBeGreaterThanOrEqual(2);
     });
@@ -314,7 +320,7 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", { ...hooks(() => {}), onRequestOpenInEditor }, menu);
 
     view.setFiles([divergingFile()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     const shadowRoot = container.querySelector("diffs-container")!.shadowRoot!;
     const removed = [...shadowRoot.querySelectorAll<HTMLElement>('[data-line-type="change-deletion"]')].find(
       (line) => line.dataset.line === "3",
@@ -344,7 +350,7 @@ describe("DiffView with the real Pierre renderer", () => {
       const view = new DiffView(container, layout, { ...hooks(() => {}), onRequestOpenInEditor }, menu);
 
       view.setFiles([divergingFile()], false);
-      await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+      await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
       const shadowRoot = container.querySelector("diffs-container")!.shadowRoot!;
       const cell = shadowRoot.querySelector<HTMLElement>(selector);
       expect(cell, `${layout} gutter cell`).not.toBeNull();
@@ -370,7 +376,7 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", { ...hooks(() => {}), onRequestOpenInEditor }, menu);
 
     view.setFiles([divergingFile()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     const shadowRoot = container.querySelector("diffs-container")!.shadowRoot!;
     const added = [...shadowRoot.querySelectorAll<HTMLElement>('[data-line-type="change-addition"]')].find(
       (line) => line.dataset.line === "3",
@@ -398,7 +404,7 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", hooks(() => {}), menu);
 
     view.setFiles([divergingFile()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     const shadowRoot = container.querySelector("diffs-container")!.shadowRoot!;
     const added = [...shadowRoot.querySelectorAll<HTMLElement>('[data-line-type="change-addition"]')].find(
       (line) => line.dataset.line === "3",
@@ -414,7 +420,7 @@ describe("DiffView with the real Pierre renderer", () => {
     expect(menu.isOpen()).toBe(false);
 
     view.setFiles([divergingFile()], false);
-    await vi.waitFor(() => expect(shadowRootOf(container).querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(shadowRootOf(container).querySelector("pre")?.children.length).toBeGreaterThan(0));
     const readded = [...shadowRootOf(container).querySelectorAll<HTMLElement>('[data-line-type="change-addition"]')].find(
       (line) => line.dataset.line === "3",
     );
@@ -433,9 +439,9 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", { ...hooks(() => {}), onRequestOpenInEditor }, menu);
 
     view.setFiles([divergingFile()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     view.beginEdit("src/example.txt", "alpha\ndelta\nepsilon\n");
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, '[role="textbox"]')[0]?.id).toBe("code-pane-diff-edit-input"));
+    await untilRendered(() => expect(queryOpenShadowRoots(container, '[role="textbox"]')[0]?.id).toBe("code-pane-diff-edit-input"));
 
     const shadowRoot = container.querySelector("diffs-container")!.shadowRoot!;
     const added = [...shadowRoot.querySelectorAll<HTMLElement>('[data-line-type="change-addition"]')].find(
@@ -450,7 +456,7 @@ describe("DiffView with the real Pierre renderer", () => {
 
     // The edit's conflict view compares disk against the buffer; its rows are not the diff's rows.
     view.setEditConflict("src/example.txt", { kind: "changed", diskContent: "alpha\ndelta\nzeta\n" });
-    await vi.waitFor(() => {
+    await untilRendered(() => {
       const rows = queryOpenShadowRoots(container, "[data-diff-path]");
       expect(rows.length).toBeGreaterThan(0);
       const conflictEvent = new MouseEvent("contextmenu", { bubbles: true, composed: true, cancelable: true });
@@ -469,7 +475,7 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "split", hooks(() => {}), menu);
 
     view.setFiles([{ ...file(), isBinary: true, patch: undefined }], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
 
     const line = queryOpenShadowRoots(container, "[data-line]")[0];
     const pointerMove = new Event("pointermove", { bubbles: true, composed: true });
@@ -490,9 +496,9 @@ describe("DiffView with the real Pierre renderer", () => {
     const view = new DiffView(container, "unified", { ...hooks(() => {}), onDiffEditChange }, menu);
 
     view.setFiles([twoLineFile()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     view.beginEdit("src/example.txt", "const value = newValue;\nconst other = newValue;\n");
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+    await untilRendered(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
     const editorElement = queryOpenShadowRoots(container, "#code-pane-diff-edit-input")[0]!;
 
     const editor = (view as unknown as {
@@ -515,7 +521,7 @@ describe("DiffView with the real Pierre renderer", () => {
     });
     editorElement.dispatchEvent(paste);
 
-    await vi.waitFor(() => expect(onDiffEditChange).toHaveBeenCalledWith("src/example.txt", "PASTED\n"));
+    expect(onDiffEditChange).toHaveBeenCalledWith("src/example.txt", "PASTED\n");
     await settleRender();
     // Unified layout keeps both deletion rows, and the pasted text replaces every addition row.
     expect([...editorElement.children].map((line) => line.textContent)).toEqual([
@@ -534,15 +540,15 @@ it("adopts disk content into the inline editor without reporting it as an unsave
     const view = new DiffView(container, "unified", { ...hooks(() => {}), onDiffEditChange }, menu);
 
     view.setFiles([twoLineFile()], false);
-    await vi.waitFor(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
+    await untilRendered(() => expect(container.querySelector("diffs-container")?.shadowRoot?.querySelector("pre")?.children.length).toBeGreaterThan(0));
     view.beginEdit("src/example.txt", "const value = newValue;\nconst other = newValue;\n");
-    await vi.waitFor(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
+    await untilRendered(() => expect(queryOpenShadowRoots(container, "#code-pane-diff-edit-input")).toHaveLength(1));
     onDiffEditChange.mockClear();
 
     const disk = "const value = diskValue;\nconst other = diskValue;\n";
     view.replaceEditContent("src/example.txt", disk, false);
 
-    await vi.waitFor(() => {
+    await untilRendered(() => {
       const surface = queryOpenShadowRoots(container, "#code-pane-diff-edit-input")[0];
       expect(surface === undefined ? [] : [...surface.children].map((line) => line.textContent)).toEqual([
         "const value = oldValue;",
@@ -576,7 +582,7 @@ it("adopts disk content into the inline editor without reporting it as an unsave
       value: { getData: (type: string) => (type === "text" ? "TYPED\n" : undefined) },
     });
     editorElement.dispatchEvent(paste);
-    await vi.waitFor(() => expect(onDiffEditChange).toHaveBeenCalledWith("src/example.txt", "TYPED\n"));
+    expect(onDiffEditChange).toHaveBeenCalledWith("src/example.txt", "TYPED\n");
 
     container.remove();
   });

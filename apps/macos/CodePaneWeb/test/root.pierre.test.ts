@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCustomCSSVariableTheme } from "@pierre/diffs";
 import { mountRoot } from "../src/app/root";
 import type { CodePaneInitPayload, DiffFileEntry } from "../src/bridge/types";
+import { untilMutated } from "./pierreRenderSignal";
 
 /**
  * The pane's keyboard shortcuts against the real `@pierre/diffs` renderer rather than the stubbed
@@ -182,14 +183,14 @@ describe("mountRoot's editing shortcuts against the real Pierre editor", () => {
     hoisted.workspaceFileRead.mockResolvedValue({ content: "const value = newValue;\n", sha256: "sha-before", size: 24 });
     mounted.push(await mountRoot(container));
 
-    const addedLine = await vi.waitFor(() => {
+    const addedLine = await untilMutated(container, () => {
       const line = container.querySelector("diffs-container")?.shadowRoot?.querySelector<HTMLElement>('[data-line-type="change-addition"]');
       expect(line).toBeInstanceOf(HTMLElement);
       return line!;
     });
     addedLine.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
 
-    const editor = await vi.waitFor(() => {
+    const editor = await untilMutated(container, () => {
       const found = queryOpenShadowRoots(container, "#code-pane-diff-edit-input")[0];
       expect(found).toBeInstanceOf(HTMLElement);
       return found!;
@@ -201,8 +202,6 @@ describe("mountRoot's editing shortcuts against the real Pierre editor", () => {
     // editor, so a bubble-phase pane listener sees it already claimed and does nothing.
     editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true, cancelable: true }));
 
-    await vi.waitFor(() =>
-      expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toBeNull(),
-    );
+    expect(JSON.parse(window.__spacesCollectWorkspaceState?.() ?? "{}").diffEditorState).toBeNull();
   });
 });

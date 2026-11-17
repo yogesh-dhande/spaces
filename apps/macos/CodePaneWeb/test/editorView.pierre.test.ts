@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCustomCSSVariableTheme } from "@pierre/diffs";
 import { EditorView } from "../src/app/editorView";
 import type { FileSignatureEvent, SpacesBridge, WorkspaceFileReadResult } from "../src/bridge/types";
+import { untilMutated } from "./pierreRenderSignal";
 
 registerCustomCSSVariableTheme("spaces", {}, true);
 
@@ -145,7 +146,7 @@ async function settleRender(frames = 3): Promise<void> {
 /** Opens `path` and resolves once Pierre's editable surface carries its automation identifier. */
 async function openAndWaitForEditor(container: HTMLElement, view: EditorView, path: string): Promise<HTMLElement> {
   view.open(path);
-  await vi.waitFor(() => {
+  await untilMutated(container, () => {
     const editor = queryOpenShadowRoots(container, '[role="textbox"][aria-multiline="true"]')[0];
     expect(editor?.id).toBe("code-pane-editor-input");
   });
@@ -201,7 +202,7 @@ describe("EditorView with the real Pierre renderer", () => {
 
     view.open("src/example.txt");
 
-    await vi.waitFor(() => {
+    await untilMutated(container, () => {
       const editor = queryOpenShadowRoots(container, '[role="textbox"][aria-multiline="true"]')[0];
       expect(editor?.id).toBe("code-pane-editor-input");
     });
@@ -219,7 +220,10 @@ describe("EditorView with the real Pierre renderer", () => {
     const line = queryOpenShadowRoots(container, "[data-line]").find((candidate) => candidate.dataset.line === "1");
     expect(line).not.toBeUndefined();
     view.restorePosition(null, 4);
-    await vi.waitFor(() => expect(view.focusedLineNumber()).toBe(4));
+    // The restore runs in the next animation frame (the editor is already attached), and a frame
+    // requested after it runs after it.
+    await settleRender(1);
+    expect(view.focusedLineNumber()).toBe(4);
     expect(editor.getViewState().selections?.at(-1)?.end.line).toBe(3);
 
     container.remove();
@@ -235,7 +239,7 @@ describe("EditorView with the real Pierre renderer", () => {
     editor.setSelections([{ start: { line: 0, character: 0 }, end: { line: 6, character: 0 }, direction: "forward" }]);
     pasteOverWholeDocument(editorElement, "PASTED\n");
 
-    await vi.waitFor(() => expect(latestContent(view)).toBe("PASTED\n"));
+    expect(latestContent(view)).toBe("PASTED\n");
     await settleRender();
     expect(renderedLines(editorElement)).toEqual(["PASTED", ""]);
 
@@ -257,7 +261,7 @@ describe("EditorView with the real Pierre renderer", () => {
     editorElement.dispatchEvent(backspace);
 
     const joined = "state line 001state line 002\nstate line 003\nstate line 004\nstate line 005\nstate line 006\n";
-    await vi.waitFor(() => expect(latestContent(view)).toBe(joined));
+    expect(latestContent(view)).toBe(joined);
     await settleRender();
     expect(renderedLines(editorElement)[0]).toBe("state line 001state line 002");
     expect(renderedLines(editorElement).length).toBe(lineCountBefore - 1);
@@ -276,7 +280,7 @@ it("adopts a file that changed on disk into the rendered document and leaves the
 
     fireFileSignature({ path: "notes.txt", sha256: "sha-2", missing: false });
 
-    await vi.waitFor(() => {
+    await untilMutated(container, () => {
       const surface = queryOpenShadowRoots(container, '[role="textbox"][aria-multiline="true"]')[0];
       expect(surface === undefined ? [] : renderedLines(surface)).toEqual(["reloaded line 1", "reloaded line 2", ""]);
     });
@@ -295,7 +299,7 @@ it("adopts a file that changed on disk into the rendered document and leaves the
       { start: { line: 0, character: 0 }, end: { line: 2, character: 0 }, direction: "forward" },
     ]);
     pasteOverWholeDocument(editorElement, "TYPED\n");
-    await vi.waitFor(() => expect(latestContent(view)).toBe("TYPED\n"));
+    expect(latestContent(view)).toBe("TYPED\n");
     expect(isDirty(view)).toBe(true);
 
     container.remove();

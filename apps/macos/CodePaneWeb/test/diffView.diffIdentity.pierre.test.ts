@@ -1,10 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerCustomCSSVariableTheme } from "@pierre/diffs";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { preloadHighlighter, registerCustomCSSVariableTheme } from "@pierre/diffs";
 import { createContextMenu } from "../src/app/contextMenu";
 import type { ContextMenu } from "../src/app/contextMenu";
 import { DiffView } from "../src/app/diffView";
 import type { DiffCommentHooks } from "../src/app/diffView";
 import type { DiffFileEntry } from "../src/bridge/types";
+import { untilRendered } from "./pierreRenderSignal";
+
+vi.mock("@pierre/diffs", async (importOriginal) => {
+  const { withRenderSignal } = await import("./pierreRenderSignal");
+  return withRenderSignal(await importOriginal<typeof import("@pierre/diffs")>());
+});
 
 registerCustomCSSVariableTheme("spaces", {}, true);
 
@@ -101,6 +107,13 @@ async function settleRender(frames = 3): Promise<void> {
  * highlighter, and each test file gets its own module registry (and so its own highlighter).
  */
 describe("DiffView diff object identity", () => {
+  // Loads Shiki's engine and the theme up front so the first test does not pay that one-time cost
+  // inside its own time limit. No language is requested: the highlight still has to attach the
+  // file's language asynchronously, which is the window the first test exercises.
+  beforeAll(async () => {
+    await preloadHighlighter({ themes: ["spaces"], langs: [] });
+  });
+
   beforeEach(() => {
     // jsdom has no layout, so Pierre's caret reveal would throw on the element it scrolls to.
     Element.prototype.scrollIntoView = function scrollIntoView(): void {};
@@ -158,7 +171,7 @@ describe("DiffView diff object identity", () => {
     // Either the highlight lands and paints highlighted tokens, or Pierre reports the mismatch
     // instead of painting them. Waiting on that choice keeps the assertions below from passing
     // vacuously before Pierre has done the render that would otherwise throw.
-    await vi.waitFor(() => {
+    await untilRendered(() => {
       expect(errors.length > 0 || queryOpenShadowRoots(container, "span[style]").length > 0).toBe(true);
     });
     expect(errors).toEqual([]);
@@ -182,12 +195,12 @@ describe("DiffView diff object identity", () => {
     const view = new DiffView(container, "split", hooks(), testContextMenu());
 
     view.setFiles([file()], false);
-    await vi.waitFor(() => expect(allShadowText(container)).toContain("alphaValue"));
+    await untilRendered(() => expect(allShadowText(container)).toContain("alphaValue"));
     await settleRender();
 
     view.updateFile(refreshedFile());
 
-    await vi.waitFor(() => expect(allShadowText(container)).toContain("betaValue"));
+    await untilRendered(() => expect(allShadowText(container)).toContain("betaValue"));
     await settleRender();
     expect(allShadowText(container)).not.toContain("alphaValue");
     expect(errors).toEqual([]);
