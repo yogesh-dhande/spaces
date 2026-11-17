@@ -258,8 +258,8 @@ public enum TerminalSessionGarbageCollector {
     /// For interactive-state sessions the attachment check stays, including its fail-closed `return true`
     /// on a read error, the same way the caller's `isReferencedByProduct` check does: an unreadable snapshot
     /// must not be mistaken for "no attachments" and purge a session a client still holds through a daemon
-    /// restart. `TerminalSessionAttachmentSnapshot.liveAttachments` is the same lease-aware rule the reaper
-    /// and clients use, so an expired remote viewer never keeps a session pinned. A false "shown" only
+    /// restart. `TerminalSessionAttachmentSnapshot.liveAttachments` is the same lease-aware rule
+    /// clients use, so an expired remote viewer never keeps a session pinned. A false "shown" only
     /// defers collection to the next sweep, which costs nothing.
     static func isSessionShown(runtimeState: TerminalSessionRuntimeState, paths: TerminalSessionPaths, now: Date) -> Bool {
         if TerminalSessionCatalog.isInteractiveServiceAlive(for: runtimeState) { return true }

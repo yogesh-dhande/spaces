@@ -3560,30 +3560,13 @@ enum SpacesDaemonErrorClassification {
             // Skipped during a handoff like the automation timer: the exec image replaces this process
             // and the new daemon starts its own checks.
             if let self, !self.handoffInProgress { self.selfUpdateService?.tick() }
-            // `reapInactiveSessions` and `garbageCollectRemovedSessionsIfDue` are both engine-isolated
-            // (they read `sessionCores`), so this hops onto the engine actor directly rather than the main
-            // actor the timer callback fires on.
+            // `garbageCollectRemovedSessionsIfDue` is engine-isolated (it reads `sessionCores`), so this
+            // hops onto the engine actor directly rather than the main actor the timer callback fires on.
             Task { @TerminalEngineActor [weak self] in
-                self?.reapInactiveSessions()
                 self?.garbageCollectRemovedSessionsIfDue()
             }
         }
         if let lifecycleTimer { RunLoop.main.add(lifecycleTimer, forMode: .common) }
-    }
-
-    /// Reaps `.whileAttached` sessions once nothing still holds them, read from each core's in-memory
-    /// attachment authority (`hasLiveAttachments`) rather than the durable mirror. A core is the sole writer
-    /// of its own attachment rows, but the mirror write it enqueues for a just-applied attach can still be
-    /// queued behind a contended write lock (see `TerminalCorePersistenceQueue`); a DB read here would race
-    /// that queued write and could reap a session with a live owner. `.whileAttached` has no in-product
-    /// creator today (nothing in the repo passes it; it is reachable only through a hand-crafted create
-    /// request), so this loop is latent until that policy is used.
-    @TerminalEngineActor private func reapInactiveSessions() {
-        for (sessionID, sessionCore) in sessionCores {
-            guard sessionCore.launchConfiguration.lifetimePolicy == .whileAttached else { continue }
-            guard !sessionCore.hasLiveAttachments() else { continue }
-            _ = terminateSession(id: sessionID)
-        }
     }
 
     /// Reclaims the directory, transcript, and rows of sessions the product no longer shows, on a coarse

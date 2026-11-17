@@ -185,8 +185,8 @@
         /// Optional: nil means "not yet seeded" or "the last reseed attempt found nothing to read." A failed
         /// disk read must never collapse into an empty snapshot here: at `resumeFromHandoff` durable
         /// attachment rows already exist, and caching an empty snapshot over a transient read failure would
-        /// silently and permanently forget every attached client, with no later reseed left to correct it (a
-        /// `.whileAttached` session could then be reaped despite live durable attachments). `seedAttachmentSnapshot`
+        /// silently and permanently forget every attached client, with no later reseed left to correct it (tracked-window
+        /// pruning could then drop a window despite live durable attachments). `seedAttachmentSnapshot`
         /// stores nil on a failed read instead, and `currentAttachmentSnapshot()` retries the disk read lazily
         /// on the next access, caching only a successful one. Readers that need a concrete snapshot fall back
         /// to an empty one locally, without ever writing that fallback back into this property, so the next
@@ -972,7 +972,7 @@
         /// is still attached, enqueueing the durable mirror at most once per coalescing window.
         ///
         /// The attached answer comes from memory, which is where this core decides attachment anyway; the
-        /// durable lease is read only off-device (the daemon's inactive-session reaper, the session garbage
+        /// durable lease is read only off-device (the session garbage
         /// collector, a fresh core reseeding after handoff), and lease expiry runs on a multi-second scale, so
         /// the coalesced write's lag is invisible to them.
         @discardableResult private func touchClientLease(clientID: String) -> Bool {
@@ -1494,14 +1494,14 @@
 
         /// Whether the in-memory attachment authority (`currentAttachmentSnapshot()`) currently has any live
         /// attachment, per `TerminalSessionAttachmentSnapshot.liveAttachments` (active AND lease-fresh for the
-        /// client kinds a lease governs). The daemon's `.whileAttached` reaper calls this instead of reading the
+        /// client kinds a lease governs). The daemon's tracked-window pruning calls this instead of reading the
         /// durable mirror: this core is the single writer of its own attachment rows, so memory is always at
         /// least as current as the database, and a DB read can observe an attach whose durable mirror is still
-        /// queued behind a contended write lock as "no attachment" and reap a session with a live owner.
+        /// queued behind a contended write lock as "no attachment" and prune a window a client holds.
         ///
         /// A nil snapshot means the cache was empty AND the reseeding disk read failed (see
         /// `currentAttachmentSnapshot`), i.e. attachment state is genuinely unknown. Answering `true` in that
-        /// case means an unreadable database never causes the reaper to treat a live session as attachment-free.
+        /// case means an unreadable database never causes a live session to be treated as attachment-free.
         public func hasLiveAttachments(now: Date = Date()) -> Bool {
             guard let snapshot = currentAttachmentSnapshot() else { return true }
             return !snapshot.liveAttachments(now: now).isEmpty
