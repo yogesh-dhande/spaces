@@ -51,7 +51,8 @@ PATH="$stub_dir:$PATH" spaces_release_create_dmg "$staging" "Spaces-dmg-retry-te
     || fail "DMG creation did not recover from a Resource busy failure"
 # At least 2: the real hdiutil behind the stub can hit contention of its own, which the helper also retries.
 (( $(call_count) >= 2 )) || fail "expected a retry after one contention failure, got $(call_count) hdiutil calls"
-/usr/bin/hdiutil verify "$dmg_path" >/dev/null || fail "retried DMG did not verify"
+# verify hits the same shared-host contention as create (#945), so it goes through the same retry.
+spaces_release_hdiutil_retrying "" verify "$dmg_path" >/dev/null || fail "retried DMG did not verify"
 
 # Case 2: a deterministic failure is not retried.
 write_stub "hdiutil: create failed - No space left on device" always
