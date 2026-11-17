@@ -286,7 +286,7 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 - A terminal pane can move into a panel window: a separate window not tied to one workspace, whose splits may mix sessions from any workspace or device. It holds one tab's worth of panes and has no tabs of its own.
 - Moving a session to a panel window moves it, never copies it. A tab moves with all of its panes; a single pane can move out of a split on its own. The Editor is never moved this way, since recreating it would lose its unsaved buffer.
 - Closing a panel window's last pane closes the window. Sidebar clicks, numbered shortcuts, and the palette focus a session wherever its pane lives.
-- Panel windows and their frames persist across relaunch and reopen once their devices connect, dropping panes whose sessions are gone; a window with nothing left does not reopen. A saved panel window that held several tabs reopens as one window per tab, losing no pane.
+- Panel windows and their frames persist across relaunch and reopen once their devices connect, dropping panes whose sessions are gone; a window with nothing left does not reopen.
 
 ### Panes and tabs across a stop or restart
 - Stopping or deleting a workspace from the Mac closes its terminal panes and its tracked browser-session tabs once the owning daemon confirms. Tabs are matched by the workspace's session URLs, so no other tab or window is touched. The Editor stays open through a stop or restart of the workspace it shows.

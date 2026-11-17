@@ -20,7 +20,6 @@ import workspacecore
     private let pushScheduler: any SpacesDevicePushScheduler
 
     private var server: SpacesDeviceAPIServer?
-    private var advertiser: (any SpacesDeviceAPIBonjourAdvertising)?
     private var controlServer: SpacesDeviceAPIControlServer?
     private var restartTimer: Timer?
     private var isStopped = false
@@ -85,8 +84,6 @@ import workspacecore
         restartTimer = nil
         controlServer?.stop()
         controlServer = nil
-        advertiser?.stop()
-        advertiser = nil
         server?.stop()
         server = nil
     }
@@ -118,8 +115,6 @@ import workspacecore
 
     private func startDeviceAPIIfNeeded() {
         if let existingServer = server, !existingServer.isRunning {
-            advertiser?.stop()
-            advertiser = nil
             // Tear the dead server down before dropping the reference: its connections, stream
             // relays, and observers stay alive otherwise, so every restart would leak another set
             // of sockets and timers into the daemon.
@@ -132,12 +127,7 @@ import workspacecore
             let settings = try settingsStore.loadOrCreate()
             let createdServer = try startDeviceAPIServer(settings: settings)
             let serviceName = try SpacesDeviceAPISettingsStore.bonjourServiceName()
-            let createdAdvertiser = SpacesDeviceAPIBonjourAdvertiser(
-                serviceName: serviceName, port: createdServer.listeningPort,
-                txtRecord: ["kind": "spaces-device-api", "bundle": SpacesDeviceFirstPartyPolicy.allowedBundleID])
-            createdAdvertiser.publish()
             server = createdServer
-            advertiser = createdAdvertiser
             lastFailureDescription = nil
             log("Device API listening host=\(settings.host) port=\(createdServer.listeningPort) service=\"\(serviceName)\"")
         } catch {
@@ -222,8 +212,6 @@ import workspacecore
                 let identityRoot = try TerminalServiceTLSIdentityStore.rootDirectory()
                 if FileManager.default.fileExists(atPath: identityRoot.path) { try FileManager.default.removeItem(at: identityRoot) }
                 _ = try TerminalServiceTLSIdentityStore.loadOrCreate()
-                advertiser?.stop()
-                advertiser = nil
                 server = nil
                 return SpacesDeviceAPIControlResponse(ok: true, message: "Reset all device pairings.", result: .devices([]))
             }
@@ -284,42 +272,3 @@ import workspacecore
 }
 
 private final class SpacesDeviceAPIMainActorSyncBox<T>: @unchecked Sendable { var value: T? }
-
-@MainActor private protocol SpacesDeviceAPIBonjourAdvertising: AnyObject {
-    func publish()
-    func stop()
-}
-
-#if canImport(Darwin)
-    @MainActor private final class SpacesDeviceAPIBonjourAdvertiser: SpacesDeviceAPIBonjourAdvertising {
-        private let serviceName: String
-        private let port: Int
-        private let txtRecord: [String: String]
-        private var service: NetService?
-
-        init(serviceName: String, port: Int, txtRecord: [String: String]) {
-            self.serviceName = serviceName
-            self.port = port
-            self.txtRecord = txtRecord
-        }
-
-        func publish() {
-            let service = NetService(domain: "local.", type: SpacesDeviceAPIDefaults.bonjourServiceType, name: serviceName, port: Int32(port))
-            let txtData = NetService.data(fromTXTRecord: txtRecord.mapValues { Data($0.utf8) })
-            service.setTXTRecord(txtData)
-            service.publish()
-            self.service = service
-        }
-
-        func stop() {
-            service?.stop()
-            service = nil
-        }
-    }
-#else
-    @MainActor private final class SpacesDeviceAPIBonjourAdvertiser: SpacesDeviceAPIBonjourAdvertising {
-        init(serviceName: String, port: Int, txtRecord: [String: String]) {}
-        func publish() {}
-        func stop() {}
-    }
-#endif

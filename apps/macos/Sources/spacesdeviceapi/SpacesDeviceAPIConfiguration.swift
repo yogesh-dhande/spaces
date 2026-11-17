@@ -13,8 +13,6 @@ public enum SpacesDeviceAPIDefaults {
     public static let loopbackHost = SpacesDeviceAPIEndpointDefaults.loopbackHost
     public static let port = SpacesDeviceAPIEndpointDefaults.port
     public static let bonjourServiceType = SpacesDeviceAPIEndpointDefaults.bonjourServiceType
-    public static let bonjourBrowserServiceType = SpacesDeviceAPIEndpointDefaults.bonjourBrowserServiceType
-
     /// Ports development profiles assign themselves from. The canonical `port` belongs to the installed
     /// profile alone and is excluded by construction — the range starts one above it — so an assigned
     /// development port can never collide with the installed daemon a client already paired with.

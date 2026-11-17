@@ -2436,7 +2436,6 @@
         @discardableResult private func ensureOutputHandle() throws -> FileHandle {
             if let outputHandle { return outputHandle }
             FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
-            FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
             let createdHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             try createdHandle.seekToEnd()
             outputHandle = createdHandle
@@ -2454,9 +2453,6 @@
         private func openOutputHandlePreservingTranscript() throws {
             guard outputHandle == nil else { return }
             if !FileManager.default.fileExists(atPath: paths.outputPath) { FileManager.default.createFile(atPath: paths.outputPath, contents: nil) }
-            if !FileManager.default.fileExists(atPath: paths.serviceLogPath) {
-                FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
-            }
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             try handle.seekToEnd()
             outputHandle = handle

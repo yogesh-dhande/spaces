@@ -254,16 +254,10 @@ enum PanelLayoutEngine {
 
     /// Builds a standalone single-tab layout around an already-existing tab, keeping its pane ids, split
     /// structure, and remembered focus unchanged — used to seed a fresh global window when a whole tab
-    /// (via `removeTab`) or a legacy multi-tab window's tab (via `splitIntoSoloTabLayouts`) moves into one.
+    /// (via `removeTab`) moves into one.
     static func layout(soloTab tab: PanelTab) -> PanelLayout {
         PanelLayout(tabs: [tab], selectedTabID: tab.id, focusedPaneID: selectedPane(in: tab)?.id)
     }
-
-    /// Splits a layout into one single-tab layout per tab, preserving each tab's pane ids, split
-    /// structure, and remembered focus. Global windows are tabless going forward, so this is used only
-    /// once, at restore time, to unfold a legacy persisted global window that still has multiple tabs
-    /// into that many separate windows instead of collapsing or dropping any of them.
-    static func splitIntoSoloTabLayouts(_ layout: PanelLayout) -> [PanelLayout] { layout.tabs.map { self.layout(soloTab: $0) } }
 
     static func selectTab(tabID: String, in layout: PanelLayout) -> PanelLayout {
         guard let tab = layout.tabs.first(where: { $0.id == tabID }) else { return layout }

@@ -962,7 +962,7 @@ public enum TerminalSessionPersistence {
     }
 
     /// Reclaims a removed session's persisted footprint: every `terminal_*` row keyed by its root
-    /// directory, plus the on-disk session directory (`output.log`, `service.log`). Control/subscription
+    /// directory, plus the on-disk session directory (`output.log`). Control/subscription
     /// sockets live outside this directory and are already removed at terminate; this drops what
     /// terminate deliberately keeps for ended-pane replay, and is therefore only safe once the session is
     /// no longer shown by the product (see `TerminalSessionGarbageCollector`). Removing every table's row

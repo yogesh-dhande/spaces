@@ -1114,40 +1114,6 @@ extension ProcessProfileEnvironmentSuites {
                 "no editor-eligible workspace exists anywhere, so the persisted row is discarded rather than restored onto the home workspace")
         }
 
-        // MARK: - Legacy multi-tab global window restore (decision: global windows carry no tabs)
-
-        /// A global panel window persisted before global windows dropped tabs can still have more than
-        /// one tab in its saved layout. Restoring it must not collapse or drop any of them: each tab
-        /// becomes its own single-tab window, the original record's id and frame staying with its first
-        /// tab. The split result is persisted immediately so this is a one-time migration.
-        @Test func reopenPersistedPanelWindowsSplitsALegacyMultiTabWindowIntoOneWindowPerTab() throws {
-            let controller = makeController()
-            let deviceID = controller.deviceModel.localDeviceID
-            controller.deviceModel.deviceSections = [twoWorkspaceSection(deviceID: deviceID)]
-            controller.rebuildFlatSidebarData()
-            var legacyLayout = PanelLayoutEngine.appendTab(
-                tabID: "tab-1", pane: Pane(id: "code-1", content: .codePane(deviceID: deviceID, workspaceID: "workspace-1")), to: PanelLayout())
-            legacyLayout = PanelLayoutEngine.appendUnselectedTab(
-                tabID: "tab-2", pane: Pane(id: "code-2", content: .codePane(deviceID: deviceID, workspaceID: "workspace-2")), to: legacyLayout)
-            let json = String(decoding: try JSONEncoder().encode(legacyLayout), as: UTF8.self)
-            try controller.clientDatabase().upsertPanelWindow(
-                SpacesClientDatabase.PanelWindowRecord(id: "legacy-1", layoutJSON: json, frame: (x: 10, y: 20, width: 300, height: 200)))
-
-            controller.reopenPersistedPanelWindowsIfPossible()
-
-            let originalScope = PanelScope.globalWindow(panelWindowID: "legacy-1")
-            #expect(
-                PanelLayoutEngine.allPanes(in: controller.panelCoordinator.layout(for: originalScope)).map(\.id) == ["code-1"],
-                "the original record keeps its id and its first tab only")
-            let persistedRows = try controller.clientDatabase().panelWindows()
-            #expect(persistedRows.count == 2, "the split result is persisted as two rows, not left as one multi-tab row")
-            let splitOffRow = try #require(persistedRows.first { $0.id != "legacy-1" })
-            let splitOffLayout = try JSONDecoder().decode(PanelLayout.self, from: Data(splitOffRow.layoutJSON.utf8))
-            #expect(splitOffLayout.tabs.map(\.id) == ["tab-2"], "the second tab becomes its own window, with no tab lost or collapsed")
-            #expect(PanelLayoutEngine.allPanes(in: splitOffLayout).map(\.id) == ["code-2"])
-            #expect(splitOffRow.frame?.x == 34, "the split-off window's frame is cascaded off the original rather than stacking exactly on it")
-        }
-
         // MARK: - Termination edits flush fan-out
 
         /// Reads the token `flushAllCodePaneEditsForTermination` dispatched to one pane, so the test can
