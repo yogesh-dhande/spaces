@@ -222,7 +222,7 @@ public enum TerminalSessionGarbageCollector {
         return directorySizeInBytes(paths.rootDirectory, fileManager: fileManager) + (payloadBytesByRoot[root] ?? 0)
     }
 
-    /// Total bytes of the regular files under a session directory (`output.log`, `service.log`, per-session
+    /// Total bytes of the regular files under a session directory (`output.log`, per-session
     /// sqlite files, plus any sidecars). Uses a shallow-to-deep enumerator so a session dir with subdirs is
     /// still summed correctly; directory entries themselves are skipped so only file payload is counted.
     private static func directorySizeInBytes(_ directory: String, fileManager: FileManager) -> Int64 {

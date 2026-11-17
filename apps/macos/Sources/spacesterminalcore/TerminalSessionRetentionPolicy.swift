@@ -1,7 +1,7 @@
 import Foundation
 
 /// The tunable bounds that govern how long an ended terminal session's on-disk footprint
-/// (`output.log`, `service.log`, per-session sqlite rows, directory) is retained before the
+/// (`output.log`, per-session sqlite rows, directory) is retained before the
 /// daemon garbage collector reclaims it. All retention knobs live in one type so the daemon has
 /// a single place to reason about — and a single place to override in tests — the lifetime of a
 /// session's footprint.

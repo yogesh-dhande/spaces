@@ -2187,7 +2187,6 @@ public final class WorkspaceOrchestrator {
                 // generated name lives in the launch configuration, which is where readers take it from.
                 state: .starting, updatedAt: createdAt, workingDirectory: workingDirectory), paths: paths)
         _ = FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
-        _ = FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
         let existing = try store.windows(workspaceID: workspace.id)
         let nextOrder = Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200)
         let windowRecordID = UUID().uuidString

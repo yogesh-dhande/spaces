@@ -96,7 +96,6 @@ extension OrchestratorTests {
         XCTAssertEqual(launchConfiguration.title, reservation.title)
         XCTAssertGreaterThan(runtimeState.servicePID, 0)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.outputPath)).count, 0)
-        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.serviceLogPath)).count, 0)
         let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == reservation.windowRecordID })
         XCTAssertEqual(terminalWindow.role, "terminal")
         XCTAssertEqual(terminalWindow.terminalTrackingID, reservation.sessionID)

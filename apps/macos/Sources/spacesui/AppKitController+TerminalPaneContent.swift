@@ -324,34 +324,13 @@ extension AppKitController {
                         .init(id: record.id, layoutJSON: String(decoding: data, as: UTF8.self), frame: record.frame))
                 }
                 let frame = record.frame.map { NSRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }
-                reopenPersistedPanelWindow(record: record, layout: layout, frame: frame)
+                // A global window's saved layout holds exactly one tab: releases since v0.11.1 split older
+                // multi-tab windows on launch. A profile untouched since before then is accepted risk and
+                // restores as saved, with no tab selector to reach the extra tabs.
+                panelCoordinator.restorePanelWindow(panelWindowID: record.id, layout: layout, frame: frame)
             }
         }
         pendingPanelWindowRestores = remaining
-    }
-
-    /// Restores one `.open` decision's window, splitting a legacy multi-tab global window (from
-    /// before global windows dropped tabs) into one single-tab window per tab so no tab is lost or
-    /// silently collapsed into another. The record's own id and frame stay with its first tab; every
-    /// other tab gets a freshly minted, persisted row of its own, cascaded off the original frame so
-    /// the split-off windows don't stack exactly on top of one another. Persisting the split result
-    /// (rather than leaving the original multi-tab JSON on disk) makes this a one-time migration: the
-    /// next launch finds only single-tab rows and takes the ordinary, non-splitting branch below.
-    private func reopenPersistedPanelWindow(record: SpacesClientDatabase.PanelWindowRecord, layout: PanelLayout, frame: NSRect?) {
-        guard layout.tabs.count > 1 else {
-            panelCoordinator.restorePanelWindow(panelWindowID: record.id, layout: layout, frame: frame)
-            return
-        }
-        let soloLayouts = PanelLayoutEngine.splitIntoSoloTabLayouts(layout)
-        panelCoordinator.restorePanelWindow(panelWindowID: record.id, layout: soloLayouts[0], frame: frame)
-        persistPanelLayout(scope: .globalWindow(panelWindowID: record.id), layout: soloLayouts[0])
-        for (offset, soloLayout) in soloLayouts.dropFirst().enumerated() {
-            let newPanelWindowID = UUID().uuidString
-            let cascadedOffset = CGFloat(offset + 1) * 24
-            let newFrame = frame.map { $0.offsetBy(dx: cascadedOffset, dy: -cascadedOffset) }
-            panelCoordinator.restorePanelWindow(panelWindowID: newPanelWindowID, layout: soloLayout, frame: newFrame)
-            persistPanelLayout(scope: .globalWindow(panelWindowID: newPanelWindowID), layout: soloLayout)
-        }
     }
 }
 

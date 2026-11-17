@@ -5,7 +5,6 @@ public struct TerminalSessionPaths: Sendable, Equatable {
     public let outputPath: String
     public let controlSocketPath: String
     public let subscriptionSocketPath: String
-    public let serviceLogPath: String
 
     public init(rootDirectory: String) { self.init(rootDirectory: rootDirectory, controlSocketPath: nil, subscriptionSocketPath: nil) }
 
@@ -18,7 +17,6 @@ public struct TerminalSessionPaths: Sendable, Equatable {
         outputPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("output.log").path
         self.controlSocketPath = controlSocketPath ?? URL(fileURLWithPath: rootDirectory).appendingPathComponent("control.sock").path
         self.subscriptionSocketPath = subscriptionSocketPath ?? URL(fileURLWithPath: rootDirectory).appendingPathComponent("subscription.sock").path
-        serviceLogPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("service.log").path
     }
 
     /// Paths for a session this profile owns, with the root derived under the profile's runtime

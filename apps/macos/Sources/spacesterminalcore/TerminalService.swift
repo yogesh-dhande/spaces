@@ -679,7 +679,6 @@ import Foundation
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
-            FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: nil)
 
             let runtimeState =
