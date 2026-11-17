@@ -19,6 +19,11 @@ public struct ClientCodePaneWorkspaceStateStore: Sendable {
         }
     }
 
+    /// Every workspace id with a stored document for this device.
+    public func workspaceIDs() throws -> [String] {
+        try SpacesClientDatabase.withDefaultDatabase { try $0.codePaneWorkspaceIDs(deviceID: deviceID) }
+    }
+
     /// Removes the whole document when a workspace is deleted. Save and Discard update the document
     /// without a dirty editor buffer so its view state remains restorable. This is intentionally not
     /// used for hibernation, workspace switching, or closing the global Editor.

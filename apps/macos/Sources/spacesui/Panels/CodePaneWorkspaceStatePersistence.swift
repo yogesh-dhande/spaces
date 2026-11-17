@@ -1,42 +1,17 @@
 import Dispatch
 import Foundation
 
-/// Coordinates queued recovery writes with workspace deletion. Holding this lock across the tiny
-/// SQLite mutation means a queued write can never recreate a document after an authoritative
-/// overview has removed its workspace.
-private final class CodePaneWorkspaceStateDeletionGate: @unchecked Sendable {
-    static let shared = CodePaneWorkspaceStateDeletionGate()
-
-    private let lock = NSLock()
-    private var deletedKeys: Set<String> = []
-
-    func writeIfWorkspaceExists(storageKey: String, workspaceID: String, _ write: () -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !deletedKeys.contains(key(storageKey: storageKey, workspaceID: workspaceID)) else { return }
-        write()
-    }
-
-    func delete(storageKey: String, workspaceID: String, _ delete: () -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
-        deletedKeys.insert(key(storageKey: storageKey, workspaceID: workspaceID))
-        delete()
-    }
-
-    func isDeleted(storageKey: String, workspaceID: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return deletedKeys.contains(key(storageKey: storageKey, workspaceID: workspaceID))
-    }
-
-    private func key(storageKey: String, workspaceID: String) -> String { "\(storageKey)\u{1f}\(workspaceID)" }
-}
-
 /// The one ordered write-behind path for Editor recovery documents. Controllers are short-lived and
 /// can overlap while a global Editor retargets A → B → A, so coordinating per controller would let
 /// their independent queues race the same durable document. This coordinator serializes the actual
 /// write, while retaining only the latest self-contained snapshot for each workspace.
+///
+/// Workspace deletion goes through the same serial queue, so the SQLite delete is ordered after every
+/// write already running or queued ahead of it and the caller never waits on a write. `lock` guards
+/// only in-memory bookkeeping and is never held across SQLite work, so the main actor never blocks
+/// behind a multi-megabyte write. A deleted key stays fenced for the rest of the launch: `enqueue`
+/// drops its writes and `deletedKeys` rejects them, so no write can recreate the document after the
+/// delete.
 private final class CodePaneWorkspaceStatePersistenceCoordinator: @unchecked Sendable {
     private struct PendingWrite: Sendable {
         let state: CodePaneWorkspaceState
@@ -52,6 +27,11 @@ private final class CodePaneWorkspaceStatePersistenceCoordinator: @unchecked Sen
     private var pendingWrites: [String: PendingWrite] = [:]
     private var pendingOrder: [String] = []
     private var draining = false
+    private var deletedKeys: Set<String> = []
+    /// The newest authoritative live set per storage home. Only ids fenced at call time are deleted
+    /// without re-checking it: a workspace id is minted once and an authoritative overview that drops
+    /// it fences it for the launch, so a fenced id never legitimately becomes live again.
+    private var latestLiveWorkspaceIDs: [String: Set<String>] = [:]
 
     func enqueue(
         _ state: CodePaneWorkspaceState, storageKey: String, workspaceID: String,
@@ -59,6 +39,10 @@ private final class CodePaneWorkspaceStatePersistenceCoordinator: @unchecked Sen
     ) {
         let writeKey = key(storageKey: storageKey, workspaceID: workspaceID)
         lock.lock()
+        guard !deletedKeys.contains(writeKey) else {
+            lock.unlock()
+            return
+        }
         if pendingWrites[writeKey] == nil { pendingOrder.append(writeKey) }
         pendingWrites[writeKey] = PendingWrite(state: state, storageKey: storageKey, workspaceID: workspaceID, write: write)
         guard !draining else {
@@ -74,22 +58,59 @@ private final class CodePaneWorkspaceStatePersistenceCoordinator: @unchecked Sen
         queue.sync {}
     }
 
-    /// Returns every workspace that still has a queued write for this storage home. An authoritative
-    /// workspace deletion includes these ids in its fence even when a queued write has not reached
-    /// SQLite yet, so it cannot create an orphaned recovery document after the overview is applied.
-    func pendingWorkspaceIDs(storageKey: String) -> Set<String> {
+    /// Resumes once every write and delete queued before this call has finished. Unlike
+    /// `drainForTermination`, the caller suspends instead of blocking its thread.
+    func waitForQueuedWork() async {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume() }
+        }
+    }
+
+    func isDeleted(storageKey: String, workspaceID: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return Set(pendingWrites.values.lazy.filter { $0.storageKey == storageKey }.map(\.workspaceID))
+        return deletedKeys.contains(key(storageKey: storageKey, workspaceID: workspaceID))
+    }
+
+    /// Fences and then deletes the recovery documents of every workspace in `candidateIDs` (plus any
+    /// with a queued write) that the authoritative overview no longer lists. The fence and the
+    /// removal of queued writes happen synchronously under `lock`, so nothing enqueued afterwards can
+    /// survive. The SQLite work runs on the serial queue behind any write already in flight, which is
+    /// also where durable documents unknown to the caller (left by an earlier launch) are discovered:
+    /// reading them off-main keeps the caller from waiting on the database connection a write holds.
+    /// A workspace with no cached snapshot, no queued write and no place in the previous overview
+    /// cannot have been written this launch, so discovering it on the queue leaves no gap.
+    func deleteMissingWorkspaces(
+        storageKey: String, candidateIDs: Set<String>, liveWorkspaceIDs: Set<String>,
+        persistedWorkspaceIDs: @escaping @Sendable () -> [String], delete: @escaping @Sendable (String) -> Void
+    ) {
+        lock.lock()
+        let queued = pendingWrites.values.lazy.filter { $0.storageKey == storageKey }.map(\.workspaceID)
+        latestLiveWorkspaceIDs[storageKey] = liveWorkspaceIDs
+        let fenced = candidateIDs.union(queued).subtracting(liveWorkspaceIDs)
+        for workspaceID in fenced {
+            let deletedKey = key(storageKey: storageKey, workspaceID: workspaceID)
+            deletedKeys.insert(deletedKey)
+            if pendingWrites.removeValue(forKey: deletedKey) != nil { pendingOrder.removeAll { $0 == deletedKey } }
+        }
+        lock.unlock()
+        queue.async { [self] in
+            let persisted = Set(persistedWorkspaceIDs())
+            lock.lock()
+            // Judged against the newest overview, not the one this call carried: a workspace a newer
+            // overview introduced may have written its document while this block waited in the queue.
+            let discovered = persisted.subtracting(latestLiveWorkspaceIDs[storageKey] ?? liveWorkspaceIDs).subtracting(fenced)
+            for workspaceID in discovered { deletedKeys.insert(key(storageKey: storageKey, workspaceID: workspaceID)) }
+            lock.unlock()
+            for workspaceID in fenced.union(discovered) { delete(workspaceID) }
+        }
     }
 
     private func drain() {
         while let pending = takePendingWrite() {
             autoreleasepool {
                 guard let data = try? JSONEncoder().encode(pending.state), let stateJSON = String(data: data, encoding: .utf8) else { return }
-                CodePaneWorkspaceStateDeletionGate.shared.writeIfWorkspaceExists(storageKey: pending.storageKey, workspaceID: pending.workspaceID) {
-                    pending.write(stateJSON, pending.workspaceID)
-                }
+                pending.write(stateJSON, pending.workspaceID)
             }
         }
     }
@@ -136,6 +157,11 @@ final class CodePaneWorkspaceStatePersistence: @unchecked Sendable {
         CodePaneWorkspaceStatePersistenceCoordinator.shared.drainForTermination()
     }
 
+    /// Suspends until every write and delete queued so far has finished, without blocking the caller.
+    static func waitForQueuedWork() async {
+        await CodePaneWorkspaceStatePersistenceCoordinator.shared.waitForQueuedWork()
+    }
+
     /// The app-wide termination fence. A pane can be removed from `PanelCoordinator` while its
     /// close collector is still live, so termination must wait on the global collector registry,
     /// then drain the one shared write-behind queue exactly once.
@@ -158,7 +184,7 @@ final class CodePaneWorkspaceStatePersistence: @unchecked Sendable {
     }
 
     static func store(_ state: CodePaneWorkspaceState, storageKey: String, workspaceID: String) {
-        guard !CodePaneWorkspaceStateDeletionGate.shared.isDeleted(storageKey: storageKey, workspaceID: workspaceID) else { return }
+        guard !CodePaneWorkspaceStatePersistenceCoordinator.shared.isDeleted(storageKey: storageKey, workspaceID: workspaceID) else { return }
         states[key(storageKey: storageKey, workspaceID: workspaceID)] = state
     }
 
@@ -174,30 +200,26 @@ final class CodePaneWorkspaceStatePersistence: @unchecked Sendable {
         })
     }
 
-    /// Deletes one recovery document under the same gate every writer uses. Once this returns, a
-    /// controller or queued write from the deleted workspace cannot reinsert it during this launch.
-    private static func deletePersistedState(storageKey: String, workspaceID: String, _ delete: () -> Void) {
-        CodePaneWorkspaceStateDeletionGate.shared.delete(storageKey: storageKey, workspaceID: workspaceID, delete)
-        remove(storageKey: storageKey, workspaceID: workspaceID)
-    }
-
     /// Reconciles recovery documents against one device's authoritative workspace overview. The
-    /// candidate set includes durable documents, in-process snapshots, pending off-main writes, and
-    /// workspace ids from the prior overview: the last category closes the interval where a pane had
-    /// collected state but its write had not reached either cache or SQLite yet.
+    /// fenced set includes in-process snapshots, pending off-main writes, and workspace ids from the
+    /// prior overview: the last category closes the interval where a pane had collected state but its
+    /// write had not reached either cache or SQLite yet. Durable documents are discovered and every
+    /// delete runs on the persistence queue, so this returns without waiting on SQLite; once it
+    /// returns, no controller or queued write from a deleted workspace can reinsert its document
+    /// during this launch.
     static func deleteStateForMissingWorkspaces(
         storageKey: String,
         liveWorkspaceIDs: Set<String>,
         previousWorkspaceIDs: Set<String>,
-        persistedWorkspaceIDs: () -> [String],
-        delete: (String) -> Void
+        persistedWorkspaceIDs: @escaping @Sendable () -> [String],
+        delete: @escaping @Sendable (String) -> Void
     ) {
-        let candidates = Set(persistedWorkspaceIDs())
-            .union(workspaceIDs(storageKey: storageKey))
-            .union(CodePaneWorkspaceStatePersistenceCoordinator.shared.pendingWorkspaceIDs(storageKey: storageKey))
-            .union(previousWorkspaceIDs)
+        let candidates = workspaceIDs(storageKey: storageKey).union(previousWorkspaceIDs)
+        CodePaneWorkspaceStatePersistenceCoordinator.shared.deleteMissingWorkspaces(
+            storageKey: storageKey, candidateIDs: candidates, liveWorkspaceIDs: liveWorkspaceIDs,
+            persistedWorkspaceIDs: persistedWorkspaceIDs, delete: delete)
         for workspaceID in candidates where !liveWorkspaceIDs.contains(workspaceID) {
-            deletePersistedState(storageKey: storageKey, workspaceID: workspaceID) { delete(workspaceID) }
+            remove(storageKey: storageKey, workspaceID: workspaceID)
         }
     }
 

@@ -3654,12 +3654,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// overview is the authority for whether an Editor recovery document still has a workspace to
     /// belong to; this shared reconciliation also fences any queued write that has not reached SQLite.
     func removeCodePaneRecoveryStateForDeletedWorkspaces(deviceID: String, liveWorkspaceIDs: Set<String>, previousWorkspaceIDs: Set<String>) {
-        guard let database = try? clientDatabase() else { return }
         let storageKey = ClientCodePaneWorkspaceStateStorage.storageKey(deviceID: deviceID)
+        let store = ClientCodePaneWorkspaceStateStore(deviceID: deviceID)
         CodePaneWorkspaceStateCache.deleteStateForMissingWorkspaces(
             storageKey: storageKey, liveWorkspaceIDs: liveWorkspaceIDs, previousWorkspaceIDs: previousWorkspaceIDs,
-            persistedWorkspaceIDs: { (try? database.codePaneWorkspaceIDs(deviceID: deviceID)) ?? [] },
-            delete: { workspaceID in try? database.deleteCodePaneWorkspaceState(deviceID: deviceID, workspaceID: workspaceID) })
+            persistedWorkspaceIDs: { (try? store.workspaceIDs()) ?? [] }, delete: { workspaceID in try? store.clear(workspaceID: workspaceID) })
     }
 
     private func applyDeviceOverview(

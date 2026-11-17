@@ -224,20 +224,31 @@ private final class RecordingWorkspaceStateWriter: @unchecked Sendable {
     }
 }
 
-/// A durable-write stand-in that pauses after the shared deletion gate has admitted its first
-/// write. The deletion regression uses it to prove the authoritative overview cannot leave a queued
-/// recovery document behind after it removes the workspace.
+/// A durable-write stand-in whose first write stays open until the test releases it, so an in-flight
+/// write is deterministic. The deletion regressions use it to prove the authoritative overview cannot
+/// leave a recovery document behind, nor wait on the write.
 private final class BlockingWorkspaceStateWriter: @unchecked Sendable {
     private let lock = NSLock()
     private let firstWriteStarted = DispatchSemaphore(value: 0)
     private let allowFirstWrite = DispatchSemaphore(value: 0)
+    private let blocksFirstWrite: Bool
     private var hasBlocked = false
     private var values: [String: String] = [:]
+    private var writes = 0
+
+    init(blocksFirstWrite: Bool = true) { self.blocksFirstWrite = blocksFirstWrite }
+
+    var writeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return writes
+    }
 
     func write(_ value: String, workspaceID: String) {
         lock.lock()
-        let shouldBlock = !hasBlocked
+        let shouldBlock = blocksFirstWrite && !hasBlocked
         if shouldBlock { hasBlocked = true }
+        writes += 1
         lock.unlock()
         if shouldBlock {
             firstWriteStarted.signal()
@@ -248,7 +259,7 @@ private final class BlockingWorkspaceStateWriter: @unchecked Sendable {
         lock.unlock()
     }
 
-    func waitForFirstWrite(timeout: DispatchTimeInterval) -> Bool { firstWriteStarted.wait(timeout: .now() + timeout) == .success }
+    func waitForFirstWrite() { firstWriteStarted.wait() }
 
     func releaseFirstWrite() { allowFirstWrite.signal() }
 
@@ -258,10 +269,33 @@ private final class BlockingWorkspaceStateWriter: @unchecked Sendable {
         lock.unlock()
     }
 
+    var storedWorkspaceIDs: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(values.keys)
+    }
+
     func value(workspaceID: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
         return values[workspaceID]
+    }
+}
+
+private final class DeletedWorkspaceIDs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: Set<String> = []
+
+    func record(_ id: String) {
+        lock.lock()
+        recorded.insert(id)
+        lock.unlock()
+    }
+
+    var ids: Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
     }
 }
 
@@ -285,11 +319,69 @@ private final class FakeFileListSignatureStreamHandle: CodePaneFileListSignature
     func stop() { stopCount += 1 }
 }
 
+/// The one waiter mechanism behind every gateway `waitFor…Count` helper. A wait ends when its count
+/// is reached or when the waiting task is cancelled (the suite's time limit cancels a test that waits
+/// on a count that never arrives). `lock` makes registration and cancellation mutually exclusive so
+/// a continuation is resumed exactly once, including a cancel that lands before registration.
+private final class ArrivalWaiters: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    private var nextID: UInt64 = 0
+    private var arrivals: UInt64 = 0
+
+    /// `reached` runs on the caller's actor. The arrival counter is read before the predicate and
+    /// compared again at registration, so an arrival that lands in between is never missed no matter
+    /// where the suspend helper executes; relying on actor isolation to keep them atomic is not
+    /// enough, because a nonisolated async helper can hop executors between the check and the register.
+    func wait(until reached: () -> Bool, isolation: isolated (any Actor)? = #isolation) async {
+        while true {
+            let seenArrivals = lock.withLock { arrivals }
+            if reached() || Task.isCancelled { return }
+            await suspendUntilResumed(afterArrivals: seenArrivals)
+        }
+    }
+
+    func resumeAll() {
+        let continuations = lock.withLock {
+            arrivals += 1
+            let all = Array(waiting.values)
+            waiting.removeAll()
+            return all
+        }
+        for continuation in continuations { continuation.resume() }
+    }
+
+    private func suspendUntilResumed(afterArrivals seenArrivals: UInt64) async {
+        let id = lock.withLock {
+            nextID += 1
+            return nextID
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if Task.isCancelled || arrivals != seenArrivals {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                waiting[id] = continuation
+                lock.unlock()
+            }
+        } onCancel: {
+            lock.lock()
+            let continuation = waiting.removeValue(forKey: id)
+            lock.unlock()
+            continuation?.resume()
+        }
+    }
+}
+
 /// Gates `workspaceDiff` on demand and records every `subscribeWorkspaceDiffSignature` call, so tests
 /// can reproduce lifecycle races: an in-flight diff completing after the
 /// pane hibernates, two overlapping diffs completing out of order, and a stream disconnect racing a
 /// newer resubscribe. An `actor` because these calls are exercised from the controller's own
 /// unstructured `Task`s, concurrently with the test's assertions.
+
 private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     // Keyed by a stable arrival index (assigned once, never reused) rather than raw array position:
     // `completeDiffCall` removes entries as they complete, so a test that completes an earlier call
@@ -299,7 +391,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var pendingDiffCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceWorkspaceDiffManifestChunkResult, any Error>)] =
         []
     private var diffCallArrivalCount = 0
-    private var diffArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let diffArrivalWaiters = ArrivalWaiters()
     /// The `lastCommit` argument of each `workspaceDiff` call, in arrival order — parallels
     /// `pendingDiffCalls`'s arrival indexing so a test can confirm which scope a dispatched
     /// `workspaceDiff` actually resolved to.
@@ -308,10 +400,10 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var subscribedLastCommits: [Bool] = []
     private var subscribedDisconnectHandlers: [@Sendable (Error?) -> Void] = []
     private var subscribedFrameHandlers: [@Sendable (SpacesDeviceWorkspaceDiffSignatureFrame) -> Void] = []
-    private var subscribeArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let subscribeArrivalWaiters = ArrivalWaiters()
     private var subscribeFailuresRemaining = 0
     private var subscribeAttempts = 0
-    private var subscribeAttemptWaiters: [CheckedContinuation<Void, Never>] = []
+    private let subscribeAttemptWaiters = ArrivalWaiters()
     /// Held `subscribeWorkspaceDiffSignature` calls for stale-generation tests: keyed by the same
     /// kind of stable arrival index `pendingDiffCalls` uses, so a test can let later attempts resolve
     /// (or fail) while an earlier one stays outstanding, then choose when the earlier one finally
@@ -459,24 +551,18 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
     /// Suspends until at least `count` subscribe attempts (successful or injected-failure) have arrived.
     func waitForSubscribeAttemptCount(_ count: Int) async {
-        while subscribeAttempts < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in subscribeAttemptWaiters.append(continuation) }
-        }
+        await subscribeAttemptWaiters.wait(until: { subscribeAttempts >= count })
     }
 
     /// Suspends until at least `count` `workspaceDiff` calls have arrived in total (cumulative — a
     /// completed call still counts), regardless of how many are still outstanding.
     func waitForDiffCallCount(_ count: Int) async {
-        while diffCallArrivalCount < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in diffArrivalWaiters.append(continuation) }
-        }
+        await diffArrivalWaiters.wait(until: { diffCallArrivalCount >= count })
     }
 
     /// Suspends until at least `count` `subscribeWorkspaceDiffSignature` calls have arrived.
     func waitForSubscribeCallCount(_ count: Int) async {
-        while subscribedRefNames.count < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in subscribeArrivalWaiters.append(continuation) }
-        }
+        await subscribeArrivalWaiters.wait(until: { subscribedRefNames.count >= count })
     }
 
     /// Completes the `workspaceDiffManifestChunk` call at `index` (0-based, arrival order — stable even once an
@@ -521,33 +607,21 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             SpacesDeviceWorkspaceDiffSignatureFrame(workspaceID: "workspace-1", scopeSignature: scopeSignature, liveRefreshError: liveRefreshError))
     }
 
-    private func drainDiffArrivalWaiters() {
-        let waiters = diffArrivalWaiters
-        diffArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
+    private func drainDiffArrivalWaiters() { diffArrivalWaiters.resumeAll() }
 
-    private func drainSubscribeArrivalWaiters() {
-        let waiters = subscribeArrivalWaiters
-        subscribeArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
+    private func drainSubscribeArrivalWaiters() { subscribeArrivalWaiters.resumeAll() }
 
-    private func drainSubscribeAttemptWaiters() {
-        let waiters = subscribeAttemptWaiters
-        subscribeAttemptWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
+    private func drainSubscribeAttemptWaiters() { subscribeAttemptWaiters.resumeAll() }
 
     // MARK: - File read / file-signature subscription (mirrors the workspaceDiff/diff-signature seam above)
 
     private var pendingFileReadCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceWorkspaceFileReadResult, any Error>)] = []
     private var fileReadCallArrivalCount = 0
-    private var fileReadArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let fileReadArrivalWaiters = ArrivalWaiters()
     private var subscribedFilePaths: [String] = []
     private var subscribedFileDisconnectHandlers: [@Sendable (Error?) -> Void] = []
     private var subscribedFileFrameHandlers: [@Sendable (SpacesDeviceWorkspaceFileSignatureFrame) -> Void] = []
-    private var subscribeFileArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let subscribeFileArrivalWaiters = ArrivalWaiters()
     private var subscribeFileFailuresRemaining = 0
     private(set) var revisionFileReadCalls: [(workspaceID: String, revision: String, relativePath: String, oldPath: String?)] = []
     private var revisionFileReadResult = SpacesDeviceWorkspaceRevisionFileReadResult(
@@ -587,13 +661,13 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var holdNextFileListCallCount = 0
     private var pendingFileListCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceWorkspaceFileListResult, any Error>)] = []
     private var fileListCallArrivalCount = 0
-    private var fileListArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let fileListArrivalWaiters = ArrivalWaiters()
     private var fileListSignatureSubscribeCount = 0
     private var fileListSignatureSubscribeAttempts = 0
     private var subscribedFileListDisconnectHandlers: [@Sendable (Error?) -> Void] = []
     private var subscribedFileListFrameHandlers: [@Sendable (SpacesDeviceWorkspaceFileListSignatureFrame) -> Void] = []
-    private var subscribeFileListArrivalWaiters: [CheckedContinuation<Void, Never>] = []
-    private var subscribeFileListAttemptWaiters: [CheckedContinuation<Void, Never>] = []
+    private let subscribeFileListArrivalWaiters = ArrivalWaiters()
+    private let subscribeFileListAttemptWaiters = ArrivalWaiters()
     private var subscribeFileListFailuresRemaining = 0
     private var holdNextFileListSignatureSubscribeAttempts = 0
     private var pendingFileListSignatureSubscribeCalls:
@@ -620,9 +694,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     }
 
     func waitForFileListCallCount(_ count: Int) async {
-        while fileListCallArrivalCount < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in fileListArrivalWaiters.append(continuation) }
-        }
+        await fileListArrivalWaiters.wait(until: { fileListCallArrivalCount >= count })
     }
 
     func completeFileListCall(at index: Int, result: SpacesDeviceWorkspaceFileListResult) {
@@ -661,15 +733,11 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     func holdNextFileListSignatureSubscribeAttempts(_ count: Int) { holdNextFileListSignatureSubscribeAttempts = count }
 
     func waitForFileListSignatureSubscribeCount(_ count: Int) async {
-        while fileListSignatureSubscribeCount < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in subscribeFileListArrivalWaiters.append(continuation) }
-        }
+        await subscribeFileListArrivalWaiters.wait(until: { fileListSignatureSubscribeCount >= count })
     }
 
     func waitForFileListSignatureSubscribeAttemptCount(_ count: Int) async {
-        while fileListSignatureSubscribeAttempts < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in subscribeFileListAttemptWaiters.append(continuation) }
-        }
+        await subscribeFileListAttemptWaiters.wait(until: { fileListSignatureSubscribeAttempts >= count })
     }
 
     func subscribedFileListSignatureCallCount() -> Int { fileListSignatureSubscribeCount }
@@ -698,11 +766,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             SpacesDeviceWorkspaceFileListSignatureFrame(workspaceID: "workspace-1", fileListSignature: signature, liveRefreshError: liveRefreshError))
     }
 
-    private func drainFileListArrivalWaiters() {
-        let waiters = fileListArrivalWaiters
-        fileListArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
+    private func drainFileListArrivalWaiters() { fileListArrivalWaiters.resumeAll() }
 
     // MARK: - Ref list
     //
@@ -762,16 +826,12 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     /// Suspends until at least `count` `workspaceFileRead` calls have arrived in total (cumulative — a
     /// completed call still counts), regardless of how many are still outstanding.
     func waitForFileReadCallCount(_ count: Int) async {
-        while fileReadCallArrivalCount < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in fileReadArrivalWaiters.append(continuation) }
-        }
+        await fileReadArrivalWaiters.wait(until: { fileReadCallArrivalCount >= count })
     }
 
     /// Suspends until at least `count` `subscribeWorkspaceFileSignature` calls have succeeded.
     func waitForFileSubscribeCallCount(_ count: Int) async {
-        while subscribedFilePaths.count < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in subscribeFileArrivalWaiters.append(continuation) }
-        }
+        await subscribeFileArrivalWaiters.wait(until: { subscribedFilePaths.count >= count })
     }
 
     func subscribedFilePath(at index: Int) -> String { subscribedFilePaths[index] }
@@ -793,29 +853,13 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
             SpacesDeviceWorkspaceFileSignatureFrame(workspaceID: "workspace-1", path: path, sha256: sha256, missing: missing))
     }
 
-    private func drainFileReadArrivalWaiters() {
-        let waiters = fileReadArrivalWaiters
-        fileReadArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
+    private func drainFileReadArrivalWaiters() { fileReadArrivalWaiters.resumeAll() }
 
-    private func drainSubscribeFileArrivalWaiters() {
-        let waiters = subscribeFileArrivalWaiters
-        subscribeFileArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
+    private func drainSubscribeFileArrivalWaiters() { subscribeFileArrivalWaiters.resumeAll() }
 
-    private func drainSubscribeFileListArrivalWaiters() {
-        let waiters = subscribeFileListArrivalWaiters
-        subscribeFileListArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
+    private func drainSubscribeFileListArrivalWaiters() { subscribeFileListArrivalWaiters.resumeAll() }
 
-    private func drainSubscribeFileListAttemptWaiters() {
-        let waiters = subscribeFileListAttemptWaiters
-        subscribeFileListAttemptWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
+    private func drainSubscribeFileListAttemptWaiters() { subscribeFileListAttemptWaiters.resumeAll() }
 
     // MARK: - File write
 
@@ -826,7 +870,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var holdNextFileWriteAttempts = 0
     private var pendingFileWriteCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceWorkspaceFileWriteResult, any Error>)] = []
     private var fileWriteCallArrivalCount = 0
-    private var fileWriteArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let fileWriteArrivalWaiters = ArrivalWaiters()
 
     func setFileWriteResult(_ result: Result<SpacesDeviceWorkspaceFileWriteResult, any Error>) { fileWriteResult = result }
 
@@ -835,9 +879,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         device: SpacesPairedDeviceRecord
     ) async throws -> SpacesDeviceWorkspaceFileWriteResult {
         fileWriteCalls.append((workspaceID, relativePath, base64Data, expectedSHA256))
-        let writeWaiters = fileWriteArrivalWaiters
-        fileWriteArrivalWaiters.removeAll()
-        for waiter in writeWaiters { waiter.resume() }
+        fileWriteArrivalWaiters.resumeAll()
         if holdNextFileWriteAttempts > 0 {
             holdNextFileWriteAttempts -= 1
             let arrivalIndex = fileWriteCallArrivalCount
@@ -856,9 +898,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     func holdNextFileWriteAttempts(_ count: Int) { holdNextFileWriteAttempts = count }
 
     func waitForFileWriteCallCount(_ count: Int) async {
-        while fileWriteCallArrivalCount < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in fileWriteArrivalWaiters.append(continuation) }
-        }
+        await fileWriteArrivalWaiters.wait(until: { fileWriteCallArrivalCount >= count })
     }
 
     /// Resolves the held `workspaceFileWrite` call at `index` (0-based, arrival order among held calls
@@ -902,7 +942,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     /// `close()`.
     private var holdNextFileRenameAttempts = 0
     private var pendingFileRenameCalls: [CheckedContinuation<Void, any Error>] = []
-    private var fileRenameArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let fileRenameArrivalWaiters = ArrivalWaiters()
 
     func setFileRenameResult(_ result: Result<Void, any Error>) { fileRenameResult = result }
 
@@ -910,9 +950,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         async throws
     {
         fileRenameCalls.append((workspaceID, relativePath, destinationRelativePath))
-        let waiters = fileRenameArrivalWaiters
-        fileRenameArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
+        fileRenameArrivalWaiters.resumeAll()
         if holdNextFileRenameAttempts > 0 {
             holdNextFileRenameAttempts -= 1
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -927,9 +965,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     func holdNextFileRenameAttempts(_ count: Int) { holdNextFileRenameAttempts = count }
 
     func waitForFileRenameCallCount(_ count: Int) async {
-        while fileRenameCalls.count < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in fileRenameArrivalWaiters.append(continuation) }
-        }
+        await fileRenameArrivalWaiters.wait(until: { fileRenameCalls.count >= count })
     }
 
     /// Answers the oldest held `workspaceFileRename` call successfully.
@@ -977,7 +1013,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var holdNextUpsertAttempts = 0
     private var pendingUpsertCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceReviewComment, any Error>)] = []
     private var upsertCallArrivalCount = 0
-    private var upsertArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let upsertArrivalWaiters = ArrivalWaiters()
 
     private(set) var reviewCommentDeleteCalls: [(workspaceID: String, id: String)] = []
     private var reviewCommentDeleteResult: Result<SpacesDeviceAPIResponse, any Error> = .success(
@@ -1007,9 +1043,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         device: SpacesPairedDeviceRecord
     ) async throws -> SpacesDeviceReviewComment {
         reviewCommentUpsertCalls.append((workspaceID, id, filePath, side, lineNumber, lineText, body))
-        let waiters = upsertArrivalWaiters
-        upsertArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
+        upsertArrivalWaiters.resumeAll()
         if holdNextUpsertAttempts > 0 {
             holdNextUpsertAttempts -= 1
             let arrivalIndex = upsertCallArrivalCount
@@ -1032,9 +1066,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     func holdNextUpsertAttempts(_ count: Int) { holdNextUpsertAttempts = count }
 
     func waitForUpsertCallCount(_ count: Int) async {
-        while upsertCallArrivalCount < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in upsertArrivalWaiters.append(continuation) }
-        }
+        await upsertArrivalWaiters.wait(until: { upsertCallArrivalCount >= count })
     }
 
     /// Resolves the held `workspaceReviewCommentUpsert` call at `index` (0-based, arrival order among
@@ -1104,7 +1136,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     private var holdNextWorkspaceCommandStartAttempts = 0
     private var pendingWorkspaceCommandStartCalls: [(arrivalIndex: Int, continuation: CheckedContinuation<SpacesDeviceAPIResponse, any Error>)] = []
     private var workspaceCommandStartArrivalCount = 0
-    private var workspaceCommandStartArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private let workspaceCommandStartArrivalWaiters = ArrivalWaiters()
     private var workspaceCommandStartSnapshots: [Result<CodePaneAgentStartSnapshot, any Error>] = []
 
     func setWorkspaceCommandStartResult(_ result: Result<SpacesDeviceAPIResponse, any Error>) { workspaceCommandStartResult = result }
@@ -1112,11 +1144,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
     func holdNextWorkspaceCommandStartAttempts(_ count: Int) { holdNextWorkspaceCommandStartAttempts = count }
 
     func waitForWorkspaceCommandStartCallCount(_ count: Int) async {
-        while workspaceCommandStartArrivalCount < count {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                workspaceCommandStartArrivalWaiters.append(continuation)
-            }
-        }
+        await workspaceCommandStartArrivalWaiters.wait(until: { workspaceCommandStartArrivalCount >= count })
     }
 
     func completeHeldWorkspaceCommandStartCall(at index: Int, result: SpacesDeviceAPIResponse) {
@@ -1134,9 +1162,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         workspaceCommandStartCalls.append((workspaceID, command))
         let arrivalIndex = workspaceCommandStartArrivalCount
         workspaceCommandStartArrivalCount += 1
-        let waiters = workspaceCommandStartArrivalWaiters
-        workspaceCommandStartArrivalWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
+        workspaceCommandStartArrivalWaiters.resumeAll()
         if holdNextWorkspaceCommandStartAttempts > 0 {
             holdNextWorkspaceCommandStartAttempts -= 1
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SpacesDeviceAPIResponse, any Error>) in
@@ -1196,9 +1222,9 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         CodePaneWorkspaceStatePersistence(label: "test", storageKey: "drain", write: { _, _ in }).drainForTermination()
     }
 
-    /// The bounded counterpart to the gateway's own `waitFor…` helpers, which suspend forever on a
-    /// count that never arrives. A test asserting that something DOES happen uses this instead, so a
-    /// regression reports a failure rather than hanging the run.
+    /// The bounded counterpart to the gateway's own `waitFor…` helpers, which wait for as long as the
+    /// test runs and end only when the suite's time limit cancels it. A test asserting that something
+    /// DOES happen uses this instead, so a regression reports a failure within seconds.
     private func waitUntilAsync(timeout: Duration = .seconds(5), sourceLocation: SourceLocation = #_sourceLocation, _ predicate: () async -> Bool)
         async
     {
@@ -4640,27 +4666,87 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(retainedEvaluator == nil, "the concrete evaluator is released after the final collection settles")
     }
 
-    @Test func authoritativeWorkspaceDeletionCannotLeaveAQueuedRecoveryWriteBehind() async {
+    @Test func authoritativeWorkspaceDeletionNeitherWaitsForNorLosesToAnInFlightRecoveryWrite() async {
         let writer = BlockingWorkspaceStateWriter()
+        // The held write sits on the process-wide queue; an early exit must not leave it blocking later tests.
+        defer { writer.releaseFirstWrite() }
         let storageKey = "deletion-fence-\(UUID().uuidString)"
         let persistence = CodePaneWorkspaceStatePersistence(
             label: "test", storageKey: storageKey, write: { value, workspaceID in writer.write(value, workspaceID: workspaceID) })
         let state = CodePaneWorkspaceState(mode: .diff, editorState: nil, pendingReviewComments: nil)
 
         persistence.enqueue(state, workspaceID: "workspace-1")
-        let firstWriteStarted = await Task.detached { writer.waitForFirstWrite(timeout: .seconds(1)) }.value
-        #expect(firstWriteStarted, "precondition: the first persistence write entered the shared deletion gate")
+        await Task.detached { writer.waitForFirstWrite() }.value
         persistence.enqueue(state, workspaceID: "workspace-1")
-        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(10)) { writer.releaseFirstWrite() }
+
+        // The first write is still held open: the deletion must return anyway, and the queued successor
+        // must already be gone.
+        CodePaneWorkspaceStateCache.deleteStateForMissingWorkspaces(
+            storageKey: storageKey, liveWorkspaceIDs: [], previousWorkspaceIDs: ["workspace-1"], persistedWorkspaceIDs: { [] },
+            delete: { workspaceID in writer.delete(workspaceID: workspaceID) })
+        writer.releaseFirstWrite()
+        await CodePaneWorkspaceStatePersistence.waitForQueuedWork()
+
+        #expect(writer.value(workspaceID: "workspace-1") == nil, "the delete must be ordered after the write that was in flight")
+        #expect(writer.writeCount == 1, "the queued successor must be dropped rather than written after the delete")
+    }
+
+    /// An older reconciliation waits in the queue behind an in-flight write while a newer overview
+    /// introduces workspace B and B's document is written. The older block must judge durable
+    /// documents against the newest overview, or it would delete and permanently fence B.
+    @Test func anOlderReconciliationNeverDeletesAWorkspaceIntroducedByANewerOverview() async {
+        let writer = BlockingWorkspaceStateWriter()
+        defer { writer.releaseFirstWrite() }
+        let storageKey = "deletion-fence-\(UUID().uuidString)"
+        let persistence = CodePaneWorkspaceStatePersistence(
+            label: "test", storageKey: storageKey, write: { value, workspaceID in writer.write(value, workspaceID: workspaceID) })
+        let state = CodePaneWorkspaceState(mode: .diff, editorState: nil, pendingReviewComments: nil)
+        func reconcile(live: Set<String>) {
+            CodePaneWorkspaceStateCache.deleteStateForMissingWorkspaces(
+                storageKey: storageKey, liveWorkspaceIDs: live, previousWorkspaceIDs: [],
+                persistedWorkspaceIDs: { writer.storedWorkspaceIDs }, delete: { writer.delete(workspaceID: $0) })
+        }
+
+        persistence.enqueue(state, workspaceID: "workspace-A")
+        await Task.detached { writer.waitForFirstWrite() }.value
+        reconcile(live: ["workspace-A"])
+        reconcile(live: ["workspace-A", "workspace-B"])
+        persistence.enqueue(state, workspaceID: "workspace-B")
+        writer.releaseFirstWrite()
+        await CodePaneWorkspaceStatePersistence.waitForQueuedWork()
+
+        #expect(writer.value(workspaceID: "workspace-B") != nil, "the older reconciliation must not delete a workspace the newest overview lists")
+        persistence.enqueue(state, workspaceID: "workspace-B")
+        await CodePaneWorkspaceStatePersistence.waitForQueuedWork()
+        #expect(writer.writeCount == 3, "workspace B must stay writable instead of being fenced")
+    }
+
+    @Test func writesEnqueuedAfterAWorkspaceDeletionNeverRecreateItsDocument() async {
+        let writer = BlockingWorkspaceStateWriter(blocksFirstWrite: false)
+        let storageKey = "deletion-fence-\(UUID().uuidString)"
+        let persistence = CodePaneWorkspaceStatePersistence(
+            label: "test", storageKey: storageKey, write: { value, workspaceID in writer.write(value, workspaceID: workspaceID) })
+        let state = CodePaneWorkspaceState(mode: .diff, editorState: nil, pendingReviewComments: nil)
 
         CodePaneWorkspaceStateCache.deleteStateForMissingWorkspaces(
             storageKey: storageKey, liveWorkspaceIDs: [], previousWorkspaceIDs: ["workspace-1"], persistedWorkspaceIDs: { [] },
             delete: { workspaceID in writer.delete(workspaceID: workspaceID) })
-        persistence.drainForTermination()
+        persistence.enqueue(state, workspaceID: "workspace-1")
+        await CodePaneWorkspaceStatePersistence.waitForQueuedWork()
 
-        #expect(
-            writer.value(workspaceID: "workspace-1") == nil,
-            "the deletion fence must remove a write that was in flight and reject the queued successor")
+        #expect(writer.writeCount == 0, "a deleted workspace's late write must be rejected")
+    }
+
+    @Test func authoritativeWorkspaceDeletionRemovesDurableDocumentsFromEarlierLaunches() async {
+        let deleted = DeletedWorkspaceIDs()
+        let storageKey = "deletion-fence-\(UUID().uuidString)"
+
+        CodePaneWorkspaceStateCache.deleteStateForMissingWorkspaces(
+            storageKey: storageKey, liveWorkspaceIDs: ["live"], previousWorkspaceIDs: [], persistedWorkspaceIDs: { ["live", "gone"] },
+            delete: { deleted.record($0) })
+        await CodePaneWorkspaceStatePersistence.waitForQueuedWork()
+
+        #expect(deleted.ids == ["gone"])
     }
 
     @Test func closeRetainsTheControllerUntilOutstandingFileWritesSettle() async throws {
@@ -5078,13 +5164,14 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
         #expect(recovered.diffEditorState?.dirty == true)
     }
 
-    @Test func persistenceCoalescesLargeSnapshotsWithoutBlockingTheMainActor() throws {
+    @Test func persistenceCoalescesLargeSnapshotsWithoutBlockingTheMainActor() async throws {
         let writer = RecordingWorkspaceStateWriter(blockFirstWrite: true)
+        defer { writer.release() }
         let persistence = CodePaneWorkspaceStatePersistence(
             label: "test.workspace-state.persistence", storageKey: "test-storage-key", write: { writer.write($0, workspaceID: $1) })
         let first = CodePaneWorkspaceState(mode: .diff, editorState: nil, pendingReviewComments: nil)
         persistence.enqueue(first, workspaceID: "workspace-1")
-        writer.waitForFirstWrite()
+        await Task.detached { writer.waitForFirstWrite() }.value
 
         let latest = CodePaneWorkspaceState(
             mode: .editor,
@@ -5099,7 +5186,7 @@ private actor RecordingCodePaneDeviceGateway: CodePaneDeviceGateway {
 
         #expect(elapsed < .milliseconds(100), "enqueue must not encode or synchronously write the multi-megabyte snapshot on the main actor")
         writer.release()
-        persistence.drainForTermination()
+        await CodePaneWorkspaceStatePersistence.waitForQueuedWork()
 
         let values = writer.recordedValues()
         #expect(values.count == 2, "the blocked initial write and only the latest queued complete document should reach storage")

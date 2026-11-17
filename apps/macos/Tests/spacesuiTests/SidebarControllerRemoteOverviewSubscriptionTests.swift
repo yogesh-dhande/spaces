@@ -555,7 +555,7 @@ extension ProcessProfileEnvironmentSuites {
                 "the code pane's liveness prune ran despite the stale epoch, since it has no session for a replacement race to protect")
         }
 
-        @Test func aRemoteAuthoritativeWorkspaceDeletionErasesItsEditorRecoveryDocument() throws {
+        @Test func aRemoteAuthoritativeWorkspaceDeletionErasesItsEditorRecoveryDocument() async throws {
             let controller = makeController()
             controller.deviceModel.deviceSections = [section(processSessionID: "predecessor")]
             try controller.clientDatabase().writeCodePaneWorkspaceState(deviceID: deviceID, workspaceID: "workspace-1", stateJSON: "{\"dirty\":true}")
@@ -567,6 +567,8 @@ extension ProcessProfileEnvironmentSuites {
                     SidebarController.RemoteDeviceLoad(
                         overview: SpacesDeviceOverview(device: device(), overview: deletedOverview), daemonStatus: nil, compatibility: nil)),
                 epoch: controller.panelCoordinator.paneReplacementEpoch)
+            // The delete runs on the persistence queue behind any write ahead of it.
+            await CodePaneWorkspaceStatePersistence.waitForQueuedWork()
 
             #expect(
                 try controller.clientDatabase().codePaneWorkspaceState(deviceID: deviceID, workspaceID: "workspace-1") == nil,
