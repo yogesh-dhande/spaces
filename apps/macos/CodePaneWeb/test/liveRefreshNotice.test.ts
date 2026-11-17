@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { settled } from "./settled";
 import { createLiveRefreshNotice } from "../src/app/liveRefreshNotice";
 
 // Read via Node's `node:fs`/`node:url`, not a Vite `?raw` import: this repo's vitest.config.ts
@@ -122,10 +123,10 @@ describe("createLiveRefreshNotice", () => {
       expect(notice.el.hidden).toBe(false);
 
       transientBanner.style.display = "flex";
-      await vi.waitFor(() => expect(notice.el.hidden).toBe(true));
+      await settled(() => expect(notice.el.hidden).toBe(true));
 
       transientBanner.style.display = "none";
-      await vi.waitFor(() => expect(notice.el.hidden).toBe(false));
+      await settled(() => expect(notice.el.hidden).toBe(false));
     });
 
     it("re-attaching to a different container stops watching the old one and starts watching the new one", async () => {
@@ -149,7 +150,7 @@ describe("createLiveRefreshNotice", () => {
 
       // The new container's banner does.
       newBanner.style.display = "flex";
-      await vi.waitFor(() => expect(notice.el.hidden).toBe(true));
+      await settled(() => expect(notice.el.hidden).toBe(true));
     });
 
     it("hide() while a transient banner is up stays hidden once the banner clears", async () => {

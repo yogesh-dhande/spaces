@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { settled } from "./settled";
 import { MarkdownPreview, MarkdownPreviewCallbacks, MAX_DOCUMENT_IMAGE_BYTES, MAX_PREVIEW_SOURCE_CHARS } from "../src/app/markdownPreview";
 
 function makeCallbacks(overrides: Partial<MarkdownPreviewCallbacks> = {}): MarkdownPreviewCallbacks {
@@ -47,7 +48,7 @@ describe("MarkdownPreview: images", () => {
 
     expect(loadImage).toHaveBeenCalledTimes(1);
     expect(loadImage).toHaveBeenCalledWith("docs/img/shot.png");
-    await vi.waitFor(() => {
+    await settled(() => {
       expect(preview.element.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,AAA");
     });
   });
@@ -58,7 +59,7 @@ describe("MarkdownPreview: images", () => {
     const source = "![shot](./img/shot.png)";
 
     preview.render("docs/notes.md", source);
-    await vi.waitFor(() => expect(preview.element.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,AAA"));
+    await settled(() => expect(preview.element.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,AAA"));
 
     preview.render("docs/notes.md", source + "\n"); // same file, buffer changed by a keystroke
     // Set inline while building the HTML this time, not via the async callback, so it's already
@@ -73,7 +74,7 @@ describe("MarkdownPreview: images", () => {
     const source = "![shot](./img/shot.png)";
 
     preview.render("docs/notes.md", source);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
 
     preview.render("docs/notes.md", source + "\n");
     expect(loadImage).toHaveBeenCalledTimes(1);
@@ -163,9 +164,9 @@ describe("MarkdownPreview: image load bounds", () => {
     expect(paths).toEqual(["docs/img/shot-0.png", "docs/img/shot-1.png", "docs/img/shot-2.png", "docs/img/shot-3.png"]);
 
     await resolveAll();
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(10));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(10));
     expect(paths).toEqual(Array.from({ length: 10 }, (_, index) => `docs/img/shot-${index}.png`));
-    await vi.waitFor(() => {
+    await settled(() => {
       const images = [...preview.element.querySelectorAll("img")];
       expect(images).toHaveLength(10);
       expect(images.every((img) => img.getAttribute("src") === "data:image/png;base64,AAA")).toBe(true);
@@ -178,7 +179,7 @@ describe("MarkdownPreview: image load bounds", () => {
 
     preview.render("docs/notes.md", documentCiting(250));
 
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(200));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(200));
     const body = preview.element.querySelector(".markdown-body")!;
     expect(body.querySelectorAll("img")).toHaveLength(200);
     const alts = [...body.querySelectorAll(".markdown-image-alt")];
@@ -270,7 +271,7 @@ describe("MarkdownPreview: image load bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![one](./img/one.png)");
-    await vi.waitFor(() => expect(preview.element.querySelector(".markdown-image-alt")?.textContent).toBe("one"));
+    await settled(() => expect(preview.element.querySelector(".markdown-image-alt")?.textContent).toBe("one"));
 
     // "one" alone already crossed the budget and closed it; "two" must render as alt text
     // immediately and never be fetched, exactly like an image past the 200-count cap.
@@ -290,8 +291,8 @@ describe("MarkdownPreview: image load bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![one](./img/one.png)");
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(preview.element.querySelector(".markdown-image-alt")?.textContent).toBe("one"));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(preview.element.querySelector(".markdown-image-alt")?.textContent).toBe("one"));
 
     preview.render("docs/notes.md", "![one](./img/one.png)\n\n![two](./img/two.png)");
     await Promise.resolve();
@@ -303,9 +304,9 @@ describe("MarkdownPreview: image load bounds", () => {
 
     // A fresh document's budget is open again: "three" is fetched and, being far under the cap on
     // its own, renders as an image rather than being refused by a flag left over from "one".
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(2));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(2));
     expect(loadImage).toHaveBeenLastCalledWith("docs/img/three.png");
-    await vi.waitFor(() => expect(preview.element.querySelector("img")?.getAttribute("src")).toBe(small));
+    await settled(() => expect(preview.element.querySelector("img")?.getAttribute("src")).toBe(small));
   });
 
   it("discards the cache when a different file is opened, so reopening the first one reads again", async () => {
@@ -314,14 +315,14 @@ describe("MarkdownPreview: image load bounds", () => {
     const source = "![shot](./img/shot.png)";
 
     preview.render("docs/notes.md", source);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
 
     preview.render("docs/other.md", source);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(2));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(2));
     expect(loadImage).toHaveBeenLastCalledWith("docs/img/shot.png");
 
     preview.render("docs/notes.md", source);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(3));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(3));
   });
 
   it("drops the rendered images when another document takes the surface without ever calling render for it", async () => {
@@ -334,7 +335,7 @@ describe("MarkdownPreview: image load bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![shot](./img/shot.png)");
-    await vi.waitFor(() => expect(preview.element.querySelector("img")).not.toBeNull());
+    await settled(() => expect(preview.element.querySelector("img")).not.toBeNull());
 
     preview.beginDocument("docs/data.json");
 
@@ -361,7 +362,7 @@ describe("MarkdownPreview: image load bounds", () => {
     const source = "![shot](./img/shot.png)";
 
     preview.render("docs/notes.md", source);
-    await vi.waitFor(() => expect(preview.element.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,AAA"));
+    await settled(() => expect(preview.element.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,AAA"));
 
     preview.clear();
     preview.render("docs/notes.md", source);
@@ -387,7 +388,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![huge](./img/huge.png)");
-    await vi.waitFor(() => expect(preview.element.querySelector("img")).not.toBeNull());
+    await settled(() => expect(preview.element.querySelector("img")).not.toBeNull());
 
     const img = preview.element.querySelector<HTMLImageElement>("img")!;
     settleWithNaturalSize(img, 9000, 9000); // 81 megapixels, over MAX_DOCUMENT_IMAGE_PIXELS alone
@@ -402,7 +403,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![one](./img/one.png)\n\n![two](./img/two.png)");
-    await vi.waitFor(() => expect(preview.element.querySelectorAll("img")).toHaveLength(2));
+    await settled(() => expect(preview.element.querySelectorAll("img")).toHaveLength(2));
 
     const [imgOne, imgTwo] = [...preview.element.querySelectorAll<HTMLImageElement>("img")];
     settleWithNaturalSize(imgOne!, 6000, 6000); // 36 megapixels, under the budget on its own
@@ -418,7 +419,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![huge](./img/huge.png)");
-    await vi.waitFor(() => expect(preview.element.querySelector("img")).not.toBeNull());
+    await settled(() => expect(preview.element.querySelector("img")).not.toBeNull());
     settleWithNaturalSize(preview.element.querySelector<HTMLImageElement>("img")!, 9000, 9000);
     expect(preview.element.querySelector(".markdown-image-alt")?.textContent).toBe("huge");
 
@@ -427,7 +428,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
 
     // A fresh document's pixel budget is open again: "small" is fetched and, being far under the
     // cap on its own, renders as an image rather than being refused by a flag left over from "huge".
-    await vi.waitFor(() => expect(preview.element.querySelector("img")).not.toBeNull());
+    await settled(() => expect(preview.element.querySelector("img")).not.toBeNull());
     const secondImg = preview.element.querySelector<HTMLImageElement>("img")!;
     settleWithNaturalSize(secondImg, 100, 100);
     expect(preview.element.querySelector(".markdown-image-alt")).toBeNull();
@@ -440,7 +441,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![huge](./img/huge.png)");
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
 
     // The user switches to Source before the read settles: the preview's DOM is cleared, so
     // `settleImageLoad` finds no <img> to attach its pixel-settling listener to.
@@ -473,7 +474,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![one](./img/one.png)");
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
 
     // Settles hidden, exactly as the previous test: cached, but not yet charged.
     preview.clear();
@@ -509,7 +510,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![one](./img/one.png)\n\n![one](./img/one.png)\n\n![one](./img/one.png)");
-    await vi.waitFor(() => expect(preview.element.querySelectorAll("img")).toHaveLength(3));
+    await settled(() => expect(preview.element.querySelectorAll("img")).toHaveLength(3));
     expect(loadImage).toHaveBeenCalledTimes(1); // one distinct path, one read, however many times it's cited
 
     // Each citation is its own <img> element sharing the one cached data URL, and each decodes (and
@@ -531,7 +532,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
       "docs/notes.md",
       "![one](./img/one.png)\n\n![one](./img/one.png)\n\n![one](./img/one.png)\n\n![two](./img/two.png)",
     );
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledWith("docs/img/two.png"));
+    await settled(() => expect(loadImage).toHaveBeenCalledWith("docs/img/two.png"));
     expect(preview.element.querySelector<HTMLImageElement>('img[alt="two"]')).not.toBeNull();
   });
 
@@ -540,7 +541,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
     const preview = new MarkdownPreview(makeCallbacks({ loadImage }));
 
     preview.render("docs/notes.md", "![one](./img/one.png)");
-    await vi.waitFor(() => expect(preview.element.querySelector("img")).not.toBeNull());
+    await settled(() => expect(preview.element.querySelector("img")).not.toBeNull());
     const firstImg = preview.element.querySelector<HTMLImageElement>("img")!;
     expect(firstImg.getAttribute("src")).toBe("data:image/png;base64,AAA"); // the read has already settled
 
@@ -565,7 +566,7 @@ describe("MarkdownPreview: image pixel bounds", () => {
     // Decisive proof, the same shape as the repeated-path test above: a further image is still
     // admitted, which a second 36 MP charge (72 MP total, over budget) would have refused outright.
     preview.render("docs/notes.md", "![one](./img/one.png)\n\n![two](./img/two.png)");
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledWith("docs/img/two.png"));
+    await settled(() => expect(loadImage).toHaveBeenCalledWith("docs/img/two.png"));
     expect(preview.element.querySelector<HTMLImageElement>('img[alt="two"]')).not.toBeNull();
   });
 });
