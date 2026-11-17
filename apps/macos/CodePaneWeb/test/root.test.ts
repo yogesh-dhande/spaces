@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTwoFilesPatch } from "diff";
 import { DIFF_EDIT_INPUT_ID, DiffView } from "../src/app/diffView";
 import { mountRoot as mountRootDirect } from "../src/app/root";
+import { makeArrivals } from "./arrivals";
 import type { CodePaneRootHandle } from "../src/app/root";
 import {
   CodePaneDiffEditorState,
@@ -768,13 +769,14 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
     hoisted.subscribeDiffSignature.mockClear();
     hoisted.diffSignatureCallbacks.length = 0;
     let resolveChunk: ((result: WorkspaceDiffFileChunkResult) => void) | undefined;
+    const chunkArrived = makeArrivals();
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
-      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; }),
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; chunkArrived.arrive(); }),
     );
     const mounted = mountRoot(container);
     await vi.advanceTimersByTimeAsync(0);
     resolveDiff(0, [file], "initial-stream-sig");
-    await vi.waitFor(() => expect(resolveChunk).toBeDefined());
+    await chunkArrived.next();
 
     // The initial manifest/sidebar is visible, but its first file is still streaming. A worktree
     // update in this interval must not vanish merely because startup has not yet reached its old
@@ -797,8 +799,9 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
   it("does not clean up a completion paint from a superseded stream", async () => {
     const file = makeFile("superseded-stream.ts");
     let resolveChunk: ((result: WorkspaceDiffFileChunkResult) => void) | undefined;
+    const chunkArrived = makeArrivals();
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
-      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; }),
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; chunkArrived.arrive(); }),
     );
     const finishRestoredStream = vi.spyOn(DiffView.prototype, "finishRestoredStream");
     const originalRequestAnimationFrame = window.requestAnimationFrame;
@@ -807,7 +810,7 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
       const mounted = mountRoot(container);
       await vi.advanceTimersByTimeAsync(0);
       resolveDiff(0, [file], "superseded-stream-sig");
-      await vi.waitFor(() => expect(resolveChunk).toBeDefined());
+      await chunkArrived.next();
 
       // Hold the completion paint so a newer signature can invalidate the stream before its
       // callback runs. The stale callback must not clear restoration state for the new generation.
@@ -928,15 +931,16 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
       revision: 0,
     };
     let resolveChunk: ((result: WorkspaceDiffFileChunkResult) => void) | undefined;
+    const chunkArrived = makeArrivals();
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
-      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; }),
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { resolveChunk = resolve; chunkArrived.arrive(); }),
     );
     hoisted.reviewCommentList.mockReset().mockResolvedValue([serverDraft]);
 
     const mounted = mountRoot(container);
     await vi.advanceTimersByTimeAsync(0);
     resolveDiff(0, [queuedFile], "comments-streaming-sig");
-    await vi.waitFor(() => expect(resolveChunk).toBeDefined());
+    await chunkArrived.next();
 
     // The manifest has named the file, so comments can retain that queued anchor and populate the
     // tray before the slow file patch completes. Waiting for the full stream hides real drafts.
@@ -1029,15 +1033,16 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
   it("reveals a selected queued file when its promoted patch arrives and repairs order once after streaming", async () => {
     const files = [makeFile("1.ts"), makeFile("2.ts"), makeFile("50.ts")];
     let releaseFirst: ((value: WorkspaceDiffFileChunkResult) => void) | undefined;
+    const firstChunkArrived = makeArrivals();
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
-      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseFirst = resolve; }),
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseFirst = resolve; firstChunkArrived.arrive(); }),
     );
     const scrollToFile = vi.spyOn(DiffView.prototype, "scrollToFile");
     const finalizeOrder = vi.spyOn(DiffView.prototype, "finalizeStreamOrder");
     const mounted = mountRoot(container);
     await vi.advanceTimersByTimeAsync(0);
     resolveDiff(0, files, "sig-priority");
-    await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+    await firstChunkArrived.next();
 
     (container.querySelector<HTMLElement>('[data-path="50.ts"]'))!.click();
     releaseFirst!({ scopeSignature: "sig-priority", file: files[0]! });
@@ -1055,15 +1060,16 @@ describe("mountRoot's progressive patch scheduler — interrupted chunk recovery
     const files = [makeFile("1.ts"), makeFile("2.ts"), makeFile("50.ts")];
     hoisted.workspaceFileList.mockResolvedValue({ paths: files.map((file) => file.path), truncated: false, submodules: [], emptyDirectories: [] });
     let releaseFirst: ((value: WorkspaceDiffFileChunkResult) => void) | undefined;
+    const firstChunkArrived = makeArrivals();
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
-      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseFirst = resolve; }),
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseFirst = resolve; firstChunkArrived.arrive(); }),
     );
     const scrollToFile = vi.spyOn(DiffView.prototype, "scrollToFile");
     const finalizeOrder = vi.spyOn(DiffView.prototype, "finalizeStreamOrder");
     const mounted = mountRoot(container);
     await vi.advanceTimersByTimeAsync(0);
     resolveDiff(0, files, "sig-quick-open-priority");
-    await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+    await firstChunkArrived.next();
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true }));
     const input = container.querySelector<HTMLInputElement>("#code-pane-quick-open-input")!;
@@ -1131,6 +1137,7 @@ describe("mountRoot's persisted diff position recovery", () => {
       patch: patchCoveringLine("restored.ts", 7),
     };
     let resolveChunk: ((result: WorkspaceDiffFileChunkResult) => void) | undefined;
+    const chunkArrived = makeArrivals();
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
       () => new Promise((resolve) => {
         resolveChunk = resolve;
@@ -1195,6 +1202,7 @@ describe("mountRoot's persisted diff position recovery", () => {
       patch: patchCoveringLine("restored.ts", 203),
     };
     let resolveChunk: ((result: WorkspaceDiffFileChunkResult) => void) | undefined;
+    const chunkArrived = makeArrivals();
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
       () => new Promise((resolve) => { resolveChunk = resolve; }),
     );
@@ -1349,13 +1357,14 @@ describe("mountRoot's queued live diff refresh position recovery", () => {
     capturedCodeViewOptions.selectedLineCalls = [];
 
     let releaseReplacementPatch!: (value: WorkspaceDiffFileChunkResult) => void;
+    const replacementPatchArrived = makeArrivals();
     hoisted.workspaceDiffFileChunk.mockImplementationOnce(
-      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseReplacementPatch = resolve; }),
+      () => new Promise<WorkspaceDiffFileChunkResult>((resolve) => { releaseReplacementPatch = resolve; replacementPatchArrived.arrive(); }),
     );
     fireDiffSignature();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [file], "live-second");
-    await vi.waitFor(() => expect(releaseReplacementPatch).toBeTypeOf("function"));
+    await replacementPatchArrived.next();
 
     // The refreshed manifest is metadata-only while its patch is in flight. Its replacement
     // CodeView has no line to sample, but teardown/state collection must keep the old location.
@@ -2427,8 +2436,9 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     };
     INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" }, diffEditorState: saved } };
     const pendingReads: Array<(result: { content: string; sha256: string; size: number; isWorktreeEquivalentToRevision: boolean; comparisonOldContent: string | null }) => void> = [];
+    const readArrived = makeArrivals();
     hoisted.workspaceRevisionFileRead.mockImplementation(
-      () => new Promise((resolve) => pendingReads.push(resolve)),
+      () => new Promise((resolve) => { pendingReads.push(resolve); readArrived.arrive(); }),
     );
     const beginPreparedSpy = vi.spyOn(DiffView.prototype, "beginPreparedEdit");
     const first: DiffFileEntry = { ...editableFile, targetRevision: "f".repeat(40) };
@@ -2438,11 +2448,11 @@ describe("mountRoot's inline diff edit ownership and CAS races", () => {
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(1));
     resolveDiff(0, [first], "last-commit-first-sig");
     await mounted;
-    await vi.waitFor(() => expect(pendingReads).toHaveLength(1));
+    await readArrived.next();
     fireDiffSignature();
     await vi.waitFor(() => expect(hoisted.workspaceDiff).toHaveBeenCalledTimes(2));
     resolveDiff(1, [second], "last-commit-second-sig");
-    await vi.waitFor(() => expect(pendingReads).toHaveLength(2));
+    await readArrived.next();
 
     pendingReads[0]!({ content: "disk before\n", sha256: "sha-old", size: 12, isWorktreeEquivalentToRevision: true, comparisonOldContent: "before\n" });
     await Promise.resolve();
@@ -7281,12 +7291,13 @@ describe("mountRoot's diff line context menu", () => {
     const otherFile: DiffFileEntry = { ...contextFile, path: "src/lib.ts", patch: contextFile.patch!.replaceAll("src/app.ts", "src/lib.ts") };
     const revision = "d".repeat(40);
     let finishCheck: ((value: unknown) => void) | undefined;
-    hoisted.workspaceRevisionFileRead.mockImplementation(() => new Promise((resolve) => { finishCheck = resolve; }));
+    const checkArrived = makeArrivals();
+    hoisted.workspaceRevisionFileRead.mockImplementation(() => new Promise((resolve) => { finishCheck = resolve; checkArrived.arrive(); }));
     await mountWith({ ...contextFile, targetRevision: revision }, { ...otherFile, targetRevision: revision });
 
     rightClick(stampLine("new", 3));
     (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(finishCheck).toBeDefined());
+    await checkArrived.next();
     container.querySelector<HTMLElement>(`[data-path="${otherFile.path}"]`)!.click();
     finishCheck!({ content: "alpha\ndelta\nepsilon\n", sha256: "sha-app", size: 22, isWorktreeEquivalentToRevision: true, comparisonOldContent: null });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -7299,12 +7310,13 @@ describe("mountRoot's diff line context menu", () => {
     INIT_PAYLOAD = { ...INIT_PAYLOAD, workspaceState: { ...INIT_PAYLOAD.workspaceState, scope: { kind: "lastCommit" } } };
     const revision = "d".repeat(40);
     let finishCheck: ((value: unknown) => void) | undefined;
-    hoisted.workspaceRevisionFileRead.mockImplementation(() => new Promise((resolve) => { finishCheck = resolve; }));
+    const checkArrived = makeArrivals();
+    hoisted.workspaceRevisionFileRead.mockImplementation(() => new Promise((resolve) => { finishCheck = resolve; checkArrived.arrive(); }));
     await mountWith({ ...contextFile, targetRevision: revision });
 
     rightClick(stampLine("new", 3));
     (container.querySelector(".ctx-menu .item") as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(finishCheck).toBeDefined());
+    await checkArrived.next();
     const unified = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Unified");
     expect(unified).toBeDefined();
     unified!.click();

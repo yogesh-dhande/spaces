@@ -11,6 +11,7 @@ import {
   SpacesBridgeError,
   SpacesReviewComment,
 } from "../src/bridge/types";
+import { makeArrivals } from "./arrivals";
 
 /**
  * `CommentsController` only calls the four `reviewComment*` RPCs, so every other `SpacesBridge`
@@ -39,27 +40,41 @@ function makeBridge(): SpacesBridge & {
    *  upsert call within the same test resolves normally unless this is set again). */
   holdNextUpsert: boolean;
   releaseHeldUpsert: (() => void) | undefined;
+  /** Resolves once a held upsert is parked (immediately if one already is). Each held call is
+   *  consumed by exactly one `nextHeld*` await; the same applies to the three below. */
+  nextHeldUpsert(): Promise<void>;
   /** Same mechanism as `holdNextUpsert`, for `reviewCommentList`, to hold
    *  `loadInitial`'s RPC open while a provisional draft is created locally. */
   holdNextList: boolean;
   releaseHeldList: (() => void) | undefined;
+  nextHeldList(): Promise<void>;
   /** Same one-shot mechanism as `holdNextUpsert`, for `reviewCommentDelete`, to hold a
    *  blur-time auto-discard's delete RPC open while `sendBatch` is invoked. */
   holdNextDelete: boolean;
   releaseHeldDelete: (() => void) | undefined;
+  nextHeldDelete(): Promise<void>;
   /** Same one-shot mechanism as `holdNextUpsert`, for `reviewCommentsSend`, to
    *  hold a send open while simulating text typed into the card after the click (`sendOne`)
    *  or into a still-focused card mid-batch (`sendBatch`). */
   holdNextSend: boolean;
   releaseHeldSend: (() => void) | undefined;
+  nextHeldSend(): Promise<void>;
 } {
   let nextId = 0;
   const drafts = new Map<string, SpacesReviewComment>();
   const sendCalls: Array<{ sessionId: string; text: string; comments: ReviewCommentSendEntry[] }> = [];
   const notUsed = () => Promise.reject(new Error("not used in this test"));
+  const upsertArrivals = makeArrivals();
+  const listArrivals = makeArrivals();
+  const deleteArrivals = makeArrivals();
+  const sendArrivals = makeArrivals();
   const bridge = {
     drafts,
     sendCalls,
+    nextHeldUpsert: () => upsertArrivals.next(),
+    nextHeldList: () => listArrivals.next(),
+    nextHeldDelete: () => deleteArrivals.next(),
+    nextHeldSend: () => sendArrivals.next(),
     failNextSend: undefined as SpacesBridgeError | undefined,
     failNextUpsert: undefined as SpacesBridgeError | undefined,
     failNextDelete: undefined as SpacesBridgeError | undefined,
@@ -109,6 +124,7 @@ function makeBridge(): SpacesBridge & {
         bridge.holdNextList = false;
         await new Promise<void>((resolve) => {
           bridge.releaseHeldList = resolve;
+          listArrivals.arrive();
         });
       }
       return [...drafts.values()];
@@ -124,6 +140,7 @@ function makeBridge(): SpacesBridge & {
         bridge.holdNextUpsert = false;
         await new Promise<void>((resolve) => {
           bridge.releaseHeldUpsert = resolve;
+          upsertArrivals.arrive();
         });
       }
       // Mirrors the real daemon (see `reviewCommentUpsert`'s JSDoc in ../src/bridge/types.ts): an
@@ -162,6 +179,7 @@ function makeBridge(): SpacesBridge & {
         bridge.holdNextDelete = false;
         await new Promise<void>((resolve) => {
           bridge.releaseHeldDelete = resolve;
+          deleteArrivals.arrive();
         });
       }
       if (!drafts.delete(id)) throw new SpacesBridgeError("notFound", `no such draft: ${id}`);
@@ -176,6 +194,7 @@ function makeBridge(): SpacesBridge & {
         bridge.holdNextSend = false;
         await new Promise<void>((resolve) => {
           bridge.releaseHeldSend = resolve;
+          sendArrivals.arrive();
         });
       }
       sendCalls.push({ sessionId, text, comments });
@@ -530,7 +549,7 @@ describe("CommentsController — Fix 1 (P2): text typed into a card while its se
     const sendBtn = [...persistedCard.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
     sendBtn.click(); // sendOne reads "first text" live at click time, then issues the (held) send
 
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
 
     // Simulate refocusing the card and typing more while the send is still in flight.
     persistedTextarea.value = "first text plus more";
@@ -577,7 +596,7 @@ describe("CommentsController — Fix 1 (P2): text typed into a card while its se
     const sendBtn = [...persistedCard.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
     sendBtn.click();
 
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
     bridge.releaseHeldSend?.();
     await vi.waitFor(() => expect(bridge.sendCalls).toHaveLength(1));
 
@@ -624,7 +643,7 @@ describe("CommentsController — Fix 1 (P2): text typed into a card while its se
     const sendPromise = controller.sendBatch();
     // The commit loop persists B's live text and the held send is issued with it BEFORE this resolves
     // — releaseHeldSend only appears once reviewCommentsSend has actually been called.
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
     expect(bridge.upsertCallCount).toBe(3); // A's initial create, B's initial create, B's commit
     expect(bridge.drafts.get(b.id)?.body).toBe("persisted B plus more"); // committed before the send
 
@@ -719,7 +738,7 @@ describe("CommentsController — Fix 1: card actions serialize against a blur's 
     const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
     sendBtn.click(); // sendOne races the still-unresolved blur persist
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     expect(bridge.upsertCallCount).toBe(1); // sendOne is awaiting the blur's call, not issuing its own
 
     bridge.releaseHeldUpsert?.();
@@ -748,7 +767,7 @@ describe("CommentsController — Fix 1: card actions serialize against a blur's 
     const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
     deleteBtn.click(); // deleteDraft races the still-unresolved blur persist
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     bridge.releaseHeldUpsert?.();
 
     // The blur's persist lands, creating a server row; deleteDraft — having awaited that persist —
@@ -801,7 +820,7 @@ describe("CommentsController — Fix 1 (round-2): persistBody re-resolves a stal
 
     bridge.holdNextUpsert = true;
     textarea.dispatchEvent(new Event("blur")); // fires persistBody(provisionalDraft.id, "first body"), held mid-flight
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     expect(bridge.upsertCallCount).toBe(1);
 
     // A second blur for the same id in quick succession — persistBody's own doc-comment example —
@@ -835,7 +854,7 @@ describe("CommentsController — Fix 1 (round-2): persistBody re-resolves a stal
 
     bridge.holdNextUpsert = true;
     textarea.dispatchEvent(new Event("blur"));
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     textarea.value = "second body";
     textarea.dispatchEvent(new Event("input"));
@@ -870,7 +889,7 @@ describe("CommentsController — Fix 1 (round-2): persistBody re-resolves a stal
     const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
     deleteBtn.click(); // deleteDraft queues behind the still-unresolved create
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     bridge.releaseHeldUpsert?.();
     // Waits on the controller's own re-render rather than `bridge.drafts.size` — the mock's bridge-
     // level map is cleared synchronously inside `reviewCommentDelete`, one microtask *before*
@@ -1038,7 +1057,7 @@ describe("CommentsController — round-17 Fix 2: keyboard activation of a card a
 
     bridge.holdNextUpsert = true;
     textarea.dispatchEvent(new Event("blur")); // fires persistBody, held mid-flight — captureFocusedCard runs after this resolves
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     bridge.releaseHeldUpsert?.();
     await vi.waitFor(() => expect(bridge.drafts.get(created.id)?.body).toBe("edited via keyboard"));
@@ -1093,7 +1112,7 @@ describe("CommentsController — round-11 Fix 2: sendBatch awaits a pending pers
 
     const sendBatchPromise = controller.sendBatch(); // races the still-unresolved blur persist
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     expect(bridge.sendCalls).toHaveLength(0); // sendBatch is blocked awaiting the in-flight persist
 
     bridge.releaseHeldUpsert?.();
@@ -1135,7 +1154,7 @@ describe("CommentsController — round-11 Fix 3: 'Add to batch' coordinates agai
     const batchBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Add to batch")!;
     batchBtn.click(); // addToBatch races the still-unresolved blur persist
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     expect(bridge.upsertCallCount).toBe(1); // addToBatch is awaiting the blur's call, not issuing its own
 
     bridge.releaseHeldUpsert?.();
@@ -1360,7 +1379,7 @@ describe("CommentsController — Fix 4: loadInitial merges instead of clobbering
 
     bridge.holdNextList = true;
     const loadPromise = controller.loadInitial(); // parks on reviewCommentList
-    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined());
+    await bridge.nextHeldList();
 
     controller.hooks.onRequestNewComment({ filePath: "src/foo.ts", side: "new", lineNumber: 1, lineText: "const x = compute();" }); // provisional, local-only
 
@@ -1385,7 +1404,7 @@ describe("CommentsController — Fix 4: loadInitial merges instead of clobbering
 
     bridge.holdNextList = true;
     const loadPromise = controller.loadInitial();
-    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined());
+    await bridge.nextHeldList();
 
     // The provisional draft's persist lands (and this.drafts is re-keyed to the server id) while
     // the list RPC above is still parked — the eventual list response, built from `drafts.values()`
@@ -1440,7 +1459,7 @@ describe("CommentsController — Fix 4 (round-2): loadInitial drops a response r
 
     bridge.holdNextList = true;
     const loadPromise = controller.loadInitial(); // a second call in flight (e.g. a retry), response pending
-    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined());
+    await bridge.nextHeldList();
 
     const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
     deleteBtn.click();
@@ -1473,7 +1492,7 @@ describe("CommentsController — Fix 4 (round-2): loadInitial drops a response r
 
     bridge.holdNextList = true;
     const loadPromise = controller.loadInitial();
-    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined());
+    await bridge.nextHeldList();
 
     await controller.sendBatch();
     expect(bridge.sendCalls).toHaveLength(1);
@@ -1532,9 +1551,16 @@ describe("CommentsController — Fix 4 (round-2): loadInitial drops a response r
     // a manual deferred promise stands in for a transient failure that lands after a local removal
     // already raced it, matching `loadInitialRetryFailures`'s retry mechanism this exercises.
     let rejectFirst!: (err: unknown) => void;
-    listSpy.mockImplementationOnce(() => new Promise((_resolve, reject) => (rejectFirst = reject)));
+    const firstListArrived = makeArrivals();
+    listSpy.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFirst = reject;
+          firstListArrived.arrive();
+        }),
+    );
     const loadPromise1 = controller.loadInitial(); // parks on the manual promise; listCallsInFlight is 1
-    await vi.waitFor(() => expect(rejectFirst).toBeDefined());
+    await firstListArrived.next();
 
     const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
     deleteBtn.click();
@@ -1598,7 +1624,7 @@ describe("CommentsController — round-2b: reconcileMirrorAfterRejection's own r
     const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
     const deleteBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
     deleteBtnA.click();
-    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined()); // reconcile's own relist is parked
+    await bridge.nextHeldList(); // reconcile's own relist is parked
 
     // While that relist is in flight, an UNRELATED draft (B) is deleted successfully.
     const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
@@ -1658,7 +1684,7 @@ describe("CommentsController — round-2b: reconcileMirrorAfterRejection's own r
     bridge.holdNextList = true;
     const deleteBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
     deleteBtnA.click();
-    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined()); // both list calls are now in flight
+    await bridge.nextHeldList(); // both list calls are now in flight
 
     // While BOTH are in flight, an UNRELATED draft (B) is deleted successfully.
     const deleteBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
@@ -1710,7 +1736,7 @@ describe("CommentsController — Fix 3 (P2): list-response merges keep the local
     // A second reviewCommentList call (e.g. an overlapping retry) is dispatched and parked.
     bridge.holdNextList = true;
     const relistPromise = controller.loadInitial();
-    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined());
+    await bridge.nextHeldList();
 
     // While that list call is still in flight, a blur-driven upsert completes for the SAME row,
     // acknowledged by the daemon at revision 1 with a new body — and the persist's drop-if-equal rule
@@ -1813,7 +1839,7 @@ describe("CommentsController — Fix 3 (P2): list-response merges keep the local
     const cardA = controller.hooks.renderCard({ comment: a, position: { lineNumber: 1, outdated: false } });
     const deleteBtnA = [...cardA.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
     deleteBtnA.click();
-    await vi.waitFor(() => expect(bridge.releaseHeldList).toBeDefined()); // reconcile's own relist is parked
+    await bridge.nextHeldList(); // reconcile's own relist is parked
 
     // While that relist is in flight, an UNRELATED draft (B) gets a newer, daemon-acknowledged body via
     // a blur-driven upsert.
@@ -2542,7 +2568,7 @@ describe("CommentsController — round-16 Fix 3: a blur auto-discard and a click
     textarea.dispatchEvent(new Event("input"));
     bridge.holdNextDelete = true;
     textarea.dispatchEvent(new Event("blur")); // fires deleteDraft(id, true), held open mid-flight
-    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined());
+    await bridge.nextHeldDelete();
 
     deleteBtn.click(); // fires deleteDraft(id, false) for the same row — must coalesce, not issue a second RPC
 
@@ -2706,14 +2732,14 @@ describe("CommentsController — round-17 Fix 3: a delete registered under a pro
     const deleteSpy = vi.spyOn(bridge, "reviewCommentDelete");
     bridge.holdNextUpsert = true;
     textarea.dispatchEvent(new Event("blur")); // fires persistBody(provisionalId, "needs review"), held mid-flight
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
     bridge.holdNextDelete = true;
     deleteBtn.click(); // run 1: deleteDraft(provisionalId, false) — parks awaiting the held persist, then its own held delete RPC
 
     bridge.releaseHeldUpsert?.(); // the persist lands: re-keys idAliases and transfers pendingDeleteById to the server id
-    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined()); // run 1 resumed and is now parked on its own RPC
+    await bridge.nextHeldDelete(); // run 1 resumed and is now parked on its own RPC
 
     const persisted = firstAnchoredComment(diffViewFake);
     expect(persisted.id).not.toBe(provisionalId); // the server-assigned id the persist adopted
@@ -2750,14 +2776,14 @@ describe("CommentsController — round-17 Fix 3: a delete registered under a pro
     const deleteSpy = vi.spyOn(bridge, "reviewCommentDelete");
     bridge.holdNextUpsert = true;
     textarea.dispatchEvent(new Event("blur"));
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     const deleteBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === "Delete")!;
     bridge.holdNextDelete = true;
     deleteBtn.click(); // run 1: parks awaiting the held persist, then its own held delete RPC
 
     bridge.releaseHeldUpsert?.();
-    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined());
+    await bridge.nextHeldDelete();
 
     const persisted = firstAnchoredComment(diffViewFake);
     const rebuiltCard = controller.hooks.renderCard({ comment: persisted, position: { lineNumber: 1, outdated: false } });
@@ -2910,7 +2936,7 @@ describe("CommentsController — Fix 2 (round-13): sendBatch serializes with in-
 
     bridge.holdNextDelete = true;
     textareaB.dispatchEvent(new Event("blur")); // fires deleteDraft(b.id, true), held open mid-flight
-    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined());
+    await bridge.nextHeldDelete();
 
     const sendBatchPromise = controller.sendBatch(); // must serialize with the still-open delete
     await new Promise((resolve) => setTimeout(resolve, 0)); // flush pending microtasks
@@ -2944,9 +2970,11 @@ describe("CommentsController — Fix 2 (round-13): sendBatch serializes with in-
     await controller.loadInitial();
 
     let rejectDelete: ((err: unknown) => void) | undefined;
+    const deleteArrived = makeArrivals();
     bridge.reviewCommentDelete = () =>
       new Promise<void>((_resolve, reject) => {
         rejectDelete = reject;
+        deleteArrived.arrive();
       });
 
     const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
@@ -2954,7 +2982,7 @@ describe("CommentsController — Fix 2 (round-13): sendBatch serializes with in-
     textareaB.value = "";
     textareaB.dispatchEvent(new Event("input"));
     textareaB.dispatchEvent(new Event("blur")); // fires deleteDraft(b.id, true), held on the rejecting promise
-    await vi.waitFor(() => expect(rejectDelete).toBeDefined());
+    await deleteArrived.next();
 
     const sendBatchPromise = controller.sendBatch();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -3073,7 +3101,7 @@ describe("CommentsController — Fix 3 (round-13): rejection relist merges, keep
 
     bridge.holdNextUpsert = true;
     provisionalTextarea.dispatchEvent(new Event("blur")); // fires persistBody, held open mid-flight
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     bridge.failNextSend = new SpacesBridgeError("conflict", "stale revision");
     const cardB = controller.hooks.renderCard({ comment: b, position: { lineNumber: 1, outdated: false } });
@@ -3258,7 +3286,7 @@ describe("CommentsController — Fix 2 (round-2 P1): sendBatch drains persists r
     textareaX.dispatchEvent(new Event("blur")); // fires persistBody(x), held open mid-flight
 
     const sendBatchPromise = controller.sendBatch(); // races X's still-unresolved persist
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     expect(bridge.sendCalls).toHaveLength(0); // still draining X
 
     // While sendBatch is still awaiting X (the one-shot `holdNextUpsert` was already spent on X, so
@@ -3318,7 +3346,7 @@ describe("CommentsController — Fix 2 (round-2 P1): sendBatch drains persists r
     textareaX.dispatchEvent(new Event("blur")); // fires persistBody(x), held open mid-flight
 
     const sendBatchPromise = controller.sendBatch(); // drain-loop iteration 1 awaits X alone
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     // Card Y's persist is parked on a manually-controlled promise (rather than the one-shot
     // `holdNextUpsert`, already spent on X) so it can be released deterministically AFTER X's
@@ -3400,7 +3428,7 @@ describe("CommentsController — Fix 3 (round-2 P1): captures the target agent w
     const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
     sendBtn.click(); // sendOne captures AGENT before awaiting the still-pending blur persist
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     // A dropdown pick changes the selection while sendOne is still awaiting the pending persist.
     controller.onAgentSelected(AGENT_2.id);
@@ -3426,7 +3454,7 @@ describe("CommentsController — Fix 3 (round-2 P1): captures the target agent w
     const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
     sendBtn.click();
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     // AGENT's session ends; AGENT_2 is the sole remaining agent, so `onAgentsChanged`'s auto-default
     // rule (see `selectDefaultAgentId`) re-selects it while sendOne is still awaiting.
@@ -3460,7 +3488,7 @@ describe("CommentsController — Fix 3 (round-2 P1): captures the target agent w
     textarea.dispatchEvent(new Event("blur")); // fires persistBody(x), held open mid-flight
 
     const sendBatchPromise = controller.sendBatch(); // captures AGENT before draining X's pending persist
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
 
     controller.onAgentSelected(AGENT_2.id); // selection changes mid-drain
 
@@ -3501,7 +3529,7 @@ describe("CommentsController — Fix (P2): overlapping sends serialize instead o
 
     bridge.holdNextSend = true;
     sendBtn.click(); // first sendOne: reaches the (held) send RPC and publishes itself into `sendInFlight`
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
 
     // Second click lands while the first send is still in flight — without the `sendInFlight` queue
     // this would race the daemon's single-writer queue and come back a false "not a draft" failure
@@ -3547,7 +3575,7 @@ describe("CommentsController — Fix (P2): overlapping sends serialize instead o
 
     bridge.holdNextSend = true; // one-shot: holds only A's send, not B's later one
     sendBtnA.click();
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
 
     // "Send batch" fires while A's single send is still pending — it must queue behind A rather than
     // racing it (which would either false-fail A once it lands, or leave B unsent).
@@ -3606,7 +3634,7 @@ describe("CommentsController — Fix 1 (round-9 P1): captures the send-target ag
 
     bridge.holdNextSend = true; // one-shot: holds only A's send RPC
     sendBtnA.click(); // A's sendOne captures AGENT, reaches the (held) send RPC, publishes into sendInFlight
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
 
     // B's sendOne captures AGENT synchronously too (before B's own `while (sendInFlight)` wait even
     // starts), then queues behind A via `sendInFlight` — B's send RPC has not been reached yet.
@@ -3649,7 +3677,7 @@ describe("CommentsController — Fix 1 (round-9 P1): captures the send-target ag
 
     bridge.holdNextSend = true; // one-shot: holds only A's send RPC
     sendBtnA.click();
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
 
     // sendBatch captures AGENT synchronously (before its own `sendInFlight` wait even starts), then
     // queues behind A's still-held send.
@@ -3702,15 +3730,17 @@ describe("CommentsController — Fix 2 (P2): doSendOne's provisional-to-server i
     // promise so it can be rejected deterministically once the swap's state is inspected — mirrors the
     // Y-reject pattern in the drain-loop test above.
     let rejectSend: ((err: unknown) => void) | undefined;
+    const sendArrived = makeArrivals();
     bridge.reviewCommentsSend = () =>
       new Promise<void>((_resolve, reject) => {
         rejectSend = reject;
+        sendArrived.arrive();
       });
 
     const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
     sendBtn.click(); // doSendOne: upsert creates the server row, swaps the id, refreshes, then parks on the send
 
-    await vi.waitFor(() => expect(rejectSend).toBeDefined());
+    await sendArrived.next();
 
     // The swap's refresh (before the send await) rebuilt the card under the server-assigned id:
     // without that refresh, the latest render would still show the stale provisional id.
@@ -3755,7 +3785,7 @@ describe("CommentsController — Fix 2 (P2): doSendOne's provisional-to-server i
     const sendBtn = [...card.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
     sendBtn.click();
 
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
 
     // The swap's refresh must have run BEFORE this point (it runs before the `reviewCommentsSend`
     // await, not after) — so the latest render already reflects the server-assigned id and the live
@@ -3818,7 +3848,7 @@ describe("CommentsController — round-15: press-scoped rebuild gate", () => {
     window.dispatchEvent(new Event("mousedown")); // press starts: the rebuild gate opens
     textarea.dispatchEvent(new Event("blur")); // blur-before-click: starts the held persist mid-press
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     bridge.releaseHeldUpsert?.(); // the persist resolves WHILE the press is still open
     await vi.waitFor(() => expect(bridge.drafts.size).toBe(1)); // persist has landed server-side
     // Let `doPersistBody`'s own continuation (which calls `refresh()`) actually run. This is pure
@@ -3857,7 +3887,7 @@ describe("CommentsController — round-15: press-scoped rebuild gate", () => {
 
     bridge.holdNextUpsert = true;
     textarea.dispatchEvent(new Event("blur")); // no mousedown preceded this — nothing gates the rebuild
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     bridge.releaseHeldUpsert?.();
 
     await vi.waitFor(() => expect(diffViewFake.setComments.mock.calls.length).toBeGreaterThan(callsBeforeBlur));
@@ -3874,7 +3904,7 @@ describe("CommentsController — round-15: press-scoped rebuild gate", () => {
     window.dispatchEvent(new Event("mousedown"));
     textarea.dispatchEvent(new Event("blur")); // starts the held persist mid-press
 
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     bridge.releaseHeldUpsert?.();
     await vi.waitFor(() => expect(bridge.drafts.size).toBe(1));
     await Promise.resolve();
@@ -3998,7 +4028,7 @@ describe("CommentsController — round-18 Fix 1 (P2): a failed blur persist stay
     const upsertCallsBeforeBlur = bridge.upsertCallCount;
     bridge.holdNextUpsert = true;
     textarea.dispatchEvent(new Event("blur"));
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined());
+    await bridge.nextHeldUpsert();
     expect(bridge.upsertCallCount).toBe(upsertCallsBeforeBlur + 1);
 
     // Re-blur the SAME text while the first persist is still parked — the eager-advance in the
@@ -4244,7 +4274,7 @@ describe("CommentsController — round-23 Fix: divergent-commit loop revalidates
 
     bridge.holdNextUpsert = true;
     const sendPromise = controller.sendBatch();
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined()); // A's commit-persist is in flight
+    await bridge.nextHeldUpsert(); // A's commit-persist is in flight
 
     // While A's commit is still open, delete B through the real click flow (`doDeleteDraft`'s
     // non-provisional arm) and hold ITS RPC open too, so B's delete is still in flight — not yet
@@ -4252,7 +4282,7 @@ describe("CommentsController — round-23 Fix: divergent-commit loop revalidates
     bridge.holdNextDelete = true;
     const deleteBtnB = [...cardB.querySelectorAll("button")].find((btn) => btn.textContent === "Delete")!;
     deleteBtnB.click();
-    await vi.waitFor(() => expect(bridge.releaseHeldDelete).toBeDefined()); // B's delete RPC is in flight
+    await bridge.nextHeldDelete(); // B's delete RPC is in flight
 
     bridge.releaseHeldUpsert?.(); // A's commit resolves; the loop's next entry is B, whose delete is still pending
     await new Promise((resolve) => setTimeout(resolve, 0)); // flush pending microtasks
@@ -4303,7 +4333,7 @@ describe("CommentsController — round-23 Fix: divergent-commit loop revalidates
 
     bridge.holdNextUpsert = true;
     const sendPromise = controller.sendBatch();
-    await vi.waitFor(() => expect(bridge.releaseHeldUpsert).toBeDefined()); // A's commit-persist is in flight
+    await bridge.nextHeldUpsert(); // A's commit-persist is in flight
 
     // While A's commit is still open, empty B's textarea (typing, no blur) — the same no-blur input
     // path the tray-liveness tests above use — so B is no longer divergent (blank) by the time the
@@ -4363,7 +4393,7 @@ describe("CommentsController — round-24 Fix 1 (P1): doSendOne recomputes the b
     bridge.holdNextSend = true;
     const sendBtnA = [...cardA.querySelectorAll("button")].find((b) => b.textContent === `Send to ${AGENT.label}`)!;
     sendBtnA.click(); // A's fast path (draft.body === body): no upsert, straight to the held send
-    await vi.waitFor(() => expect(bridge.releaseHeldSend).toBeDefined());
+    await bridge.nextHeldSend();
   }
 
   it("blurred-newer: a card queued behind another card's in-flight send delivers its blur-persisted body, not the stale click-time snapshot", async () => {
