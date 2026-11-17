@@ -39,6 +39,24 @@ ios_simulator_arch() {
   esac
 }
 
+# A boot that never completes (even on a fresh device) says nothing about the code under test, so
+# name it as an infrastructure failure: the CI annotation is what the PR checks page shows, and it
+# makes a rerun the obvious next step instead of a test investigation.
+report_simulator_boot_failure() {
+  local status="$1"
+  local message
+  if (( status == SPACES_IOS_SIMULATOR_BOOT_WEDGED_STATUS )); then
+    message="Infrastructure failure, not a test failure: the iOS simulator did not finish booting on this runner, even on a freshly created device. No tests ran. Rerun the job."
+  else
+    message="The iOS simulator could not be booted (status $status). No tests ran."
+  fi
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    printf '::error title=iOS simulator boot::%s\n' "$message"
+  else
+    printf '%s\n' "$message" >&2
+  fi
+}
+
 select_ios_test_destination() {
   local simulator_arch
   local simulator_selection
@@ -86,7 +104,23 @@ raise SystemExit("No available iPhone simulator found for iOS tests.")
   # bash variable mutation that would not propagate back out of that subshell -- the same
   # propagation hazard documented above run_ios_lane. Losing it would leak a booted simulator on
   # every run, which is worse than an unwrapped hang here.
-  spaces_ios_simulator_boot_if_needed "$simulator_id"
+  local boot_status=0
+  spaces_ios_simulator_boot_if_needed "$simulator_id" || boot_status=$?
+  if (( boot_status == SPACES_IOS_SIMULATOR_BOOT_WEDGED_STATUS )); then
+    # The one recovery for a wedged boot: a fresh lane-owned device, which carries over none of the
+    # state that wedged this one. Shut the wedged device down first so it does not compete for the
+    # host while the new one boots.
+    printf 'iOS simulator %s did not finish booting; booting a fresh simulator instead...\n' "$simulator_id" >&2
+    spaces_ios_simulator_shutdown_one_owned "$simulator_id"
+    spaces_ios_simulator_create_fresh_like "$simulator_id"
+    simulator_id="$SPACES_FRESH_IOS_SIMULATOR_UDID"
+    boot_status=0
+    spaces_ios_simulator_boot_if_needed "$simulator_id" || boot_status=$?
+  fi
+  if (( boot_status != 0 )); then
+    report_simulator_boot_failure "$boot_status"
+    return "$boot_status"
+  fi
   destination="platform=iOS Simulator,id=$simulator_id,arch=$simulator_arch"
 }
 
@@ -113,7 +147,13 @@ run_ios_tests() {
   printf 'Building iOS tests for %s...\n' "$destination"
   run_with_silence_watchdog "$ios_build_stall_seconds" xcodebuild "${xcodebuild_args[@]}" build-for-testing
   printf 'Running iOS tests on %s...\n' "$destination"
-  run_with_silence_watchdog "$verify_stall_seconds" xcodebuild "${xcodebuild_args[@]}" test-without-building
+  # The result bundle holds the failure screenshots and attachments of the UI tests, which a CI
+  # failure that does not reproduce locally has no other record of; the workflow uploads it on
+  # failure. xcodebuild refuses to write over an existing bundle.
+  local result_bundle="$root/.build/ios-test-results/SpacesMobile.xcresult"
+  rm -rf "$result_bundle"
+  mkdir -p "$(dirname "$result_bundle")"
+  run_with_silence_watchdog "$verify_stall_seconds" xcodebuild "${xcodebuild_args[@]}" -resultBundlePath "$result_bundle" test-without-building
 }
 
 # This script's own process is what verify.sh backgrounds (see the `ios-test-lane.sh ... &` call

@@ -136,10 +136,31 @@
         /// markup, and `- [ ]`/`- [x]` items as read-only checkboxes that replace their marker text.
         func testBriefDocumentRendersHeadingsListsAndReadOnlyCheckboxes() async throws {
             let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
-            let delegate = NavigationFinishDelegate(finished: expectation(description: "brief document loaded"))
+            let delegate = NavigationFinishDelegate()
             webView.navigationDelegate = delegate
+            // The first load in a process pays WebKit's cold WebContent and Networking process launch,
+            // which took 19.5s of a 20s budget on a loaded CI simulator. That launch is not what this
+            // test is about, so it is awaited on its own. Its 120s bound is not a timing threshold: it
+            // only ends a run where WebKit never comes up, so that fails this test rather than
+            // stalling the lane until its silence watchdog kills it. The rendering load below keeps
+            // its tight bound because it runs against a warm process.
+            let warmed = expectation(description: "WebKit processes launched")
+            delegate.onFinish = { warmed.fulfill() }
+            delegate.onFail = { error in
+                XCTFail("WebKit warm-up navigation failed: \(error)")
+                warmed.fulfill()
+            }
+            webView.loadHTMLString("<html></html>", baseURL: nil)
+            await fulfillment(of: [warmed], timeout: 120)
+
+            let rendered = expectation(description: "brief document rendered")
+            delegate.onFinish = { rendered.fulfill() }
+            delegate.onFail = { error in
+                XCTFail("Brief document navigation failed: \(error)")
+                rendered.fulfill()
+            }
             webView.loadHTMLString(TerminalMarkdownDocument.makeHTML(markdownSource: brief), baseURL: nil)
-            await fulfillment(of: [delegate.finished], timeout: 20)
+            await fulfillment(of: [rendered], timeout: 20)
 
             let headings = try await webView.evaluateJavaScript(
                 "Array.from(document.querySelectorAll('#content h2')).map(function (h) { return h.textContent; }).join('|')")
@@ -166,10 +187,15 @@
     }
 
     @MainActor private final class NavigationFinishDelegate: NSObject, WKNavigationDelegate {
-        let finished: XCTestExpectation
+        /// Called on each navigation that finishes or fails; the owner swaps them per load so a failed
+        /// load surfaces as itself instead of as a timeout.
+        var onFinish: (() -> Void)?
+        var onFail: ((Error) -> Void)?
 
-        init(finished: XCTestExpectation) { self.finished = finished }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { onFinish?() }
 
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finished.fulfill() }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { onFail?(error) }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { onFail?(error) }
     }
 #endif

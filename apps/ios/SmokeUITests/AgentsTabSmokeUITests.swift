@@ -58,10 +58,30 @@ final class AgentsTabSmokeUITests: XCTestCase {
         XCTAssertTrue(app.buttons[rowIdentifier].waitForExistence(timeout: 20), "Back navigation did not return to the Agents list")
     }
 
-    /// Swipes the brief sheet down, the way a user puts it away.
+    /// Drags the brief sheet down by its header, the way a user puts it away.
+    ///
+    /// The drag starts on the header, not the sheet's center: the center is the brief's WKWebView, whose
+    /// touches are routed through its WebContent process, so on a runner still cold-launching that
+    /// process the sheet's own dismiss gesture can be held back or taken by the page's scroll view. The
+    /// header is SwiftUI-owned and depends on neither.
     private func dismissBriefSheet(_ sheet: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
-        sheet.swipeDown(velocity: .fast)
-        XCTAssertTrue(
-            SpacesMobileUITestDriver.waitForDisappearance(of: sheet, timeout: 10), "The brief sheet did not dismiss", file: file, line: line)
+        let headerPoint = sheet.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: sheet.frame.width / 2, dy: 30))
+        let belowSheet = headerPoint.withOffset(CGVector(dx: 0, dy: sheet.frame.height))
+        headerPoint.press(forDuration: 0.05, thenDragTo: belowSheet, withVelocity: .fast, thenHoldForDuration: 0)
+        let dismissed = SpacesMobileUITestDriver.waitForDisappearance(of: sheet, timeout: 10)
+        if !dismissed {
+            // A sheet that never moved looks different from one that closed and came back (the binding
+            // re-presented it) only in the screen and hierarchy at this moment, so keep both even
+            // though the run failed for a reason XCTest reports as a bare assertion.
+            let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            screenshot.name = "Screen after the failed brief dismissal"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            let hierarchy = XCTAttachment(string: XCUIApplication().debugDescription)
+            hierarchy.name = "App hierarchy after the failed brief dismissal"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(dismissed, "The brief sheet did not dismiss", file: file, line: line)
     }
 }

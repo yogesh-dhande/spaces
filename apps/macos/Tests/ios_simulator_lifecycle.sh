@@ -46,6 +46,7 @@ for path in sorted(state_root.iterdir()):
         "udid": path.name,
         "state": path.read_text().strip(),
         "isAvailable": True,
+        "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-Test",
     })
 print(json.dumps({"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-Test": devices}}))
 PY
@@ -80,21 +81,21 @@ PY
   shutdown)
     udid="$1"
     printf 'shutdown %s\n' "$udid" >>"$SPACES_TEST_SIMCTL_LOG"
-    # The wedge recovery shuts every device down at once; there is no device named "all" to
-    # record a state for, so mark each known device instead.
-    if [[ "$udid" == "all" ]]; then
-      for device in "$SPACES_TEST_SIMULATOR_STATE_ROOT"/*; do
-        [[ -e "$device" ]] || continue
-        printf 'Shutdown\n' >"$device"
-      done
-    else
-      printf 'Shutdown\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
-    fi
-    ;;
-  erase)
-    udid="$1"
-    printf 'erase %s\n' "$udid" >>"$SPACES_TEST_SIMCTL_LOG"
     printf 'Shutdown\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
+    ;;
+  create)
+    # Arguments are: name, device type, runtime. The new device's udid is derived from the name so
+    # the test can assert on it.
+    name="$1"
+    printf 'create %s %s %s\n' "$name" "$2" "$3" >>"$SPACES_TEST_SIMCTL_LOG"
+    udid="fresh-${name##* }"
+    printf 'Shutdown\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
+    printf '%s\n' "$udid"
+    ;;
+  delete)
+    udid="$1"
+    printf 'delete %s\n' "$udid" >>"$SPACES_TEST_SIMCTL_LOG"
+    rm -f "$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
     ;;
   *)
     echo "unexpected simctl command: $command $*" >&2
@@ -103,14 +104,6 @@ PY
 esac
 EOF
 chmod +x "$STUB_BIN/xcrun"
-
-# The wedge recovery kills the CoreSimulator daemon. Stub killall so this test records the call
-# instead of taking down the real service on a developer's machine mid-run.
-cat >"$STUB_BIN/killall" <<'EOF'
-#!/bin/bash
-printf 'killall %s\n' "$*" >>"$SPACES_TEST_SIMCTL_LOG"
-EOF
-chmod +x "$STUB_BIN/killall"
 
 export PATH="$STUB_BIN:$PATH"
 export SPACES_TEST_SIMULATOR_STATE_ROOT="$STATE_ROOT"
@@ -170,6 +163,27 @@ assert_count 1 "boot iphone-boot-race"
 assert_count 0 "bootstatus iphone-boot-race"
 assert_count 0 "shutdown iphone-boot-race"
 [[ "$(cat "$STATE_ROOT/iphone-boot-race")" == "Booted" ]] || fail "competing owner's simulator was changed"
+
+# The same race, called the way the iOS lane calls the helper (`|| status=$?`), which disables
+# errexit inside the helper: the failed boot must still be returned, and the competing owner's
+# simulator must be neither recorded as owned nor shut down at teardown.
+reset_fixture
+printf 'Shutdown\n' >"$STATE_ROOT/iphone-boot-race-or"
+set +e
+SPACES_TEST_SIMCTL_BOOT_RACE_UDID=iphone-boot-race-or bash -c '
+  set -euo pipefail
+  source "$1"
+  trap '\''status=$?; spaces_ios_simulator_shutdown_owned "$status"'\'' EXIT
+  boot_status=0
+  spaces_ios_simulator_boot_if_needed iphone-boot-race-or || boot_status=$?
+  exit "$boot_status"
+' _ "$LIFECYCLE_HELPER"
+boot_race_or_status=$?
+set -e
+[[ "$boot_race_or_status" == "149" ]] || fail "competing boot under '||' returned $boot_race_or_status instead of 149"
+assert_count 0 "bootstatus iphone-boot-race-or"
+assert_count 0 "shutdown iphone-boot-race-or"
+[[ "$(cat "$STATE_ROOT/iphone-boot-race-or")" == "Booted" ]] || fail "competing owner's simulator was changed under '||'"
 
 reset_fixture
 printf 'Shutdown\n' >"$STATE_ROOT/iphone-one"
@@ -237,39 +251,34 @@ rm -f "$hang_marker"
   export SPACES_IOS_SIMULATOR_BOOT_TIMEOUT=1
   export SPACES_TEST_SIMCTL_BOOTSTATUS_HANG_UDID=iphone-wedged
   export SPACES_TEST_SIMCTL_BOOTSTATUS_HANG_MARKER="$hang_marker"
-  spaces_ios_simulator_boot_if_needed iphone-wedged
-  spaces_ios_simulator_shutdown_owned 0
-)
-# Attempt 1 wedges (bootstatus #1), then recovery resets the service (shutdown all + killall);
-# attempt 2 boots again (boot #2, bootstatus #2) and succeeds since the hang is single-shot. The
-# only per-device shutdown is the owned-simulator teardown at the end.
-assert_count 2 "boot iphone-wedged"
-assert_count 2 "bootstatus iphone-wedged"
-assert_count 1 "shutdown all"
-assert_count 1 "killall -9 com.apple.CoreSimulator.CoreSimulatorService"
-assert_count 0 "erase iphone-wedged"
-assert_count 1 "shutdown iphone-wedged"
-[[ "$(cat "$STATE_ROOT/iphone-wedged")" == "Shutdown" ]] || fail "recovered simulator was not shut down at teardown"
+  wedged_status=0
+  spaces_ios_simulator_boot_if_needed iphone-wedged || wedged_status=$?
+  [[ "$wedged_status" == "$SPACES_IOS_SIMULATOR_BOOT_WEDGED_STATUS" ]] || exit 11
 
-reset_fixture
-printf 'Shutdown\n' >"$STATE_ROOT/iphone-double-wedged"
-set +e
-(
-  # shellcheck source=/dev/null
-  source "$LIFECYCLE_HELPER"
-  export SPACES_IOS_SIMULATOR_BOOT_TIMEOUT=1
-  export SPACES_TEST_SIMCTL_BOOTSTATUS_HANG_UDID=iphone-double-wedged
-  spaces_ios_simulator_boot_if_needed iphone-double-wedged
-)
-double_wedge_status=$?
-set -e
-[[ "$double_wedge_status" != "0" ]] || fail "expected boot_if_needed to fail when both attempts wedge"
-assert_count 2 "boot iphone-double-wedged"
-assert_count 2 "bootstatus iphone-double-wedged"
-# One recovery, after the first attempt only: the last attempt's wedge gives up rather than
-# resetting a service nothing will use again.
-assert_count 1 "shutdown all"
-assert_count 1 "killall -9 com.apple.CoreSimulator.CoreSimulatorService"
-assert_count 0 "erase iphone-double-wedged"
+  # The caller's recovery: shut the wedged device down (which releases its ownership, so teardown
+  # leaves it alone), then a fresh device of its type and runtime, which boots (the hang is
+  # single-shot and keyed to the wedged udid, so this boot is clean).
+  spaces_ios_simulator_shutdown_one_owned iphone-wedged
+  spaces_ios_simulator_create_fresh_like iphone-wedged
+  spaces_ios_simulator_boot_if_needed "$SPACES_FRESH_IOS_SIMULATOR_UDID"
+  printf '%s\n' "$SPACES_FRESH_IOS_SIMULATOR_UDID" >"$TMP_ROOT/fresh-udid"
+  spaces_ios_simulator_shutdown_owned 0
+) || fail "wedge recovery fixture failed (exit $?)"
+fresh_udid="$(cat "$TMP_ROOT/fresh-udid")"
+# A wedged boot is reported once, with no retry on the same device and no service reset or erase.
+assert_count 1 "bootstatus iphone-wedged"
+assert_count 1 "boot iphone-wedged"
+assert_count 0 "erase"
+assert_count 0 "killall"
+assert_count 0 "shutdown all"
+# The replacement is built from the wedged device's type and runtime, booted, then shut down and
+# deleted at teardown; the original is never deleted.
+assert_count 1 "create Spaces iOS tests $$ com.apple.CoreSimulator.SimDeviceType.iPhone-Test com.apple.CoreSimulator.SimRuntime.iOS-Test"
+assert_count 1 "boot $fresh_udid"
+assert_count 1 "shutdown $fresh_udid"
+assert_count 1 "delete $fresh_udid"
+assert_count 1 "shutdown iphone-wedged"
+assert_count 0 "delete iphone-wedged"
+[[ ! -e "$STATE_ROOT/$fresh_udid" ]] || fail "the replacement simulator was not deleted at teardown"
 
 echo "iOS simulator lifecycle tests passed"

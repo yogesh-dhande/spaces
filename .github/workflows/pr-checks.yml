@@ -188,6 +188,14 @@ jobs:
         timeout-minutes: 30
         run: apps/macos/scripts/ios-test-lane.sh
 
+      - name: Upload iOS test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-test-results
+          path: apps/macos/.build/ios-test-results/
+          if-no-files-found: ignore
+
   # Split out of verify so a website change no longer drags the whole macOS suite along, and so the
   # build runs on a Linux runner instead of an expensive macOS one.
   website:
