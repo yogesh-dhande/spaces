@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { settled } from "./settled";
 import { jsonTreeDocument } from "../src/app/previewMode";
 import { MAX_PREVIEW_SVG_CHARS, PreviewSurface, PreviewSurfaceCallbacks } from "../src/app/previewSurface";
 
@@ -20,13 +21,13 @@ describe("PreviewSurface: document switching", () => {
     const surface = new PreviewSurface(makeCallbacks({ loadImage }));
 
     surface.renderText("docs/a.md", "markdown", "preview", MARKDOWN, undefined);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
 
     // The Markdown preview is kept alive across this, only detached from the surface.
     surface.renderText("docs/b.json", "json", "tree", '{"a":1}', jsonTreeDocument("docs/b.json", '{"a":1}'));
 
     surface.renderText("docs/a.md", "markdown", "preview", MARKDOWN, undefined);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(2));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(2));
     expect(loadImage).toHaveBeenLastCalledWith("docs/img/shot.png");
   });
 
@@ -35,12 +36,12 @@ describe("PreviewSurface: document switching", () => {
     const surface = new PreviewSurface(makeCallbacks({ loadImage }));
 
     surface.renderText("docs/a.md", "markdown", "preview", MARKDOWN, undefined);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
 
     surface.renderImage("docs/diagram.png", "data:image/png;base64,BBB");
 
     surface.renderText("docs/a.md", "markdown", "preview", MARKDOWN, undefined);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(2));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(2));
   });
 
   it("keeps a document's loaded images across an edit of that same document", async () => {
@@ -48,7 +49,7 @@ describe("PreviewSurface: document switching", () => {
     const surface = new PreviewSurface(makeCallbacks({ loadImage }));
 
     surface.renderText("docs/a.md", "markdown", "preview", MARKDOWN, undefined);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
 
     surface.renderText("docs/a.md", "markdown", "preview", `${MARKDOWN}\n\nand a typed line.`, undefined);
     await Promise.resolve();
@@ -62,7 +63,7 @@ describe("PreviewSurface: document switching", () => {
     const surface = new PreviewSurface(makeCallbacks({ loadImage }));
 
     surface.renderText("docs/a.md", "markdown", "preview", MARKDOWN, undefined);
-    await vi.waitFor(() => expect(loadImage).toHaveBeenCalledTimes(1));
+    await settled(() => expect(loadImage).toHaveBeenCalledTimes(1));
 
     surface.renderText("docs/a.md", "markdown", "source", MARKDOWN, undefined);
     surface.renderText("docs/a.md", "markdown", "preview", MARKDOWN, undefined);

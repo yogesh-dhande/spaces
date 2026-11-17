@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { settled } from "./settled";
 import { WorkspaceFileListResult } from "../src/bridge/types";
 import { WorkspaceFileListCache } from "../src/app/workspaceFileListCache";
 import { QuickOpen, QuickOpenCallbacks } from "../src/app/quickOpen";
@@ -123,7 +124,7 @@ describe("QuickOpen — recents before typing", () => {
     // The listing excludes "b.ts" (e.g. deleted on disk but not yet dropped from recentPaths).
     resolve(makeResult(["a.ts", "c.ts"]));
 
-    await vi.waitFor(() => expect(rowPaths(host)).toEqual(["a.ts", "c.ts"]));
+    await settled(() => expect(rowPaths(host)).toEqual(["a.ts", "c.ts"]));
   });
 
   // A recent path's absence from a *truncated* listing isn't evidence the file is gone — it may
@@ -135,7 +136,7 @@ describe("QuickOpen — recents before typing", () => {
     const quickOpen = new QuickOpen(host, cache, () => ["a.ts", "b.ts", "c.ts"], makeCallbacks());
 
     quickOpen.show();
-    await vi.waitFor(() => expect(rowPaths(host)).toEqual(["a.ts", "b.ts", "c.ts"]));
+    await settled(() => expect(rowPaths(host)).toEqual(["a.ts", "b.ts", "c.ts"]));
   });
 });
 
@@ -176,7 +177,7 @@ describe("QuickOpen — revalidation on show() (Finding 1)", () => {
     expect(rowPaths(host)).toEqual([]); // still stale until the revalidation resolves
 
     resolveFresh(makeResult(["a.ts", "new.ts"]));
-    await vi.waitFor(() => expect(rowPaths(host)).toEqual(["new.ts"]));
+    await settled(() => expect(rowPaths(host)).toEqual(["new.ts"]));
   });
 });
 
@@ -207,7 +208,7 @@ describe("QuickOpen — selection clamped on async refresh", () => {
     // The listing now excludes "b.ts" and "c.ts" — recents filters down to a single row, leaving
     // the previous selectedIndex (2) past the end of the new, shorter results.
     resolve(makeResult(["a.ts"]));
-    await vi.waitFor(() => expect(rowPaths(host)).toEqual(["a.ts"]));
+    await settled(() => expect(rowPaths(host)).toEqual(["a.ts"]));
 
     expect(selIndex()).toBe(0); // clamped to the last (and only) row, not left dangling past the end
     inputOf(host).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
@@ -229,7 +230,7 @@ describe("QuickOpen — typing triggers fuzzy search", () => {
 
     // "src/foo.ts" scores higher: its "f" lands right at a path-segment start (after "/"), while
     // "src/xfoo.ts"'s "f" does not — see fuzzyMatch.ts's SEGMENT_START_BONUS.
-    await vi.waitFor(() => expect(rowPaths(host)).toEqual(["src/foo.ts", "src/xfoo.ts"]));
+    await settled(() => expect(rowPaths(host)).toEqual(["src/foo.ts", "src/xfoo.ts"]));
   });
 });
 
@@ -243,11 +244,11 @@ describe("QuickOpen — accessibility identifiers", () => {
     const input = inputOf(host);
     input.value = "src";
     input.dispatchEvent(new Event("input"));
-    await vi.waitFor(() => expect(input.getAttribute("role")).toBe("combobox"));
+    await settled(() => expect(input.getAttribute("role")).toBe("combobox"));
     const list = host.querySelector('[role="listbox"]');
     expect(list?.id).toBe("code-pane-quick-open-list");
     expect(input.getAttribute("aria-controls")).toBe(list?.id);
-    await vi.waitFor(() => expect(host.querySelectorAll('[role="option"]')).toHaveLength(2));
+    await settled(() => expect(host.querySelectorAll('[role="option"]')).toHaveLength(2));
     const rows = [...host.querySelectorAll<HTMLElement>('[role="option"]')];
     const first = rows[0]!;
     const second = rows[1]!;
@@ -266,7 +267,7 @@ describe("QuickOpen — accessibility identifiers", () => {
     input.value = "missing.ts";
     input.dispatchEvent(new Event("input"));
 
-    await vi.waitFor(() => expect(host.querySelector("#code-pane-quick-open-empty")).not.toBeNull());
+    await settled(() => expect(host.querySelector("#code-pane-quick-open-empty")).not.toBeNull());
   });
 
   it("marks each result row with a path-derived stable identifier", async () => {
@@ -279,7 +280,7 @@ describe("QuickOpen — accessibility identifiers", () => {
     input.value = "src";
     input.dispatchEvent(new Event("input"));
 
-    await vi.waitFor(() => expect(host.querySelector(`[id="${rowId("src/a.ts")}"]`)).not.toBeNull());
+    await settled(() => expect(host.querySelector(`[id="${rowId("src/a.ts")}"]`)).not.toBeNull());
     expect(host.querySelector(`[id="${rowId("src/b.ts")}"]`)).not.toBeNull();
   });
 
@@ -292,12 +293,12 @@ describe("QuickOpen — accessibility identifiers", () => {
     const input = inputOf(host);
     input.value = "src";
     input.dispatchEvent(new Event("input"));
-    await vi.waitFor(() => expect(host.querySelector('[role="option"]')).not.toBeNull());
+    await settled(() => expect(host.querySelector('[role="option"]')).not.toBeNull());
     expect(input.getAttribute("aria-activedescendant")).not.toBeNull();
 
     input.value = "missing";
     input.dispatchEvent(new Event("input"));
-    await vi.waitFor(() => expect(host.querySelector('[role="option"]')).toBeNull());
+    await settled(() => expect(host.querySelector('[role="option"]')).toBeNull());
     expect(input.getAttribute("aria-activedescendant")).toBeNull();
   });
 });
@@ -391,7 +392,7 @@ describe("QuickOpen — fuzzy-match candidate narrowing", () => {
     // above survived the refresh, this would still show no matches (query is unchanged, so it would
     // "extend" its own stale, empty candidate set instead of rescanning the fresh listing).
     resolveFresh(makeResult(["src/abc.ts", "src/abd.ts"]));
-    await vi.waitFor(() => expect(rowPaths(host)).toEqual(["src/abd.ts"]));
+    await settled(() => expect(rowPaths(host)).toEqual(["src/abd.ts"]));
   });
 });
 
@@ -523,7 +524,7 @@ describe("QuickOpen — failed listing fetch", () => {
     quickOpen.show();
     expect(rowPaths(host)).toEqual(["a.ts", "b.ts"]);
 
-    await vi.waitFor(() => expect(bridge).toHaveBeenCalledTimes(1));
+    await settled(() => expect(bridge).toHaveBeenCalledTimes(1));
     // Give the rejected promise's .catch() a turn to run; recents must still be showing afterward,
     // with no crash — this is the exact bug the recently-added .catch() guards against regressing.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -562,7 +563,7 @@ describe("QuickOpen — refreshListing (root.ts diff-signature push)", () => {
 
     // "only-l1.ts" (L1-only) drops out; "only-l2.ts" (L2-only) shows up, for the same unchanged query.
     resolveFresh(makeResult(["only-l2.ts", "common.ts"]));
-    await vi.waitFor(() => expect(rowPaths(host)).toEqual(["only-l2.ts"]));
+    await settled(() => expect(rowPaths(host)).toEqual(["only-l2.ts"]));
   });
 
   it("does nothing while the overlay is closed", () => {
@@ -727,6 +728,6 @@ describe("QuickOpen — truncated listing note", () => {
     quickOpen.show();
     expect((host.querySelector(".note") as HTMLElement).hidden).toBe(true); // not yet loaded
 
-    await vi.waitFor(() => expect((host.querySelector(".note") as HTMLElement).hidden).toBe(false));
+    await settled(() => expect((host.querySelector(".note") as HTMLElement).hidden).toBe(false));
   });
 });

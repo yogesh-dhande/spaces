@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { settled } from "./settled";
 import { SpacesBridgeError, WorkspaceFileListResult } from "../src/bridge/types";
 import { ContextMenu, ContextMenuRequest } from "../src/app/contextMenu";
 import { EditorSidebar, EditorSidebarBridge, EditorSidebarCallbacks } from "../src/app/editorSidebar";
@@ -111,7 +112,7 @@ describe("EditorSidebar", () => {
     sidebar.reattach();
     expect(bridge).toHaveBeenCalledTimes(1);
 
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
     const fnTexts = [...sidebar.el.querySelectorAll(".row .fn")].map((el) => el.textContent);
     expect(fnTexts).toEqual(["a.ts", "b.ts"]);
   });
@@ -134,7 +135,7 @@ describe("EditorSidebar", () => {
     filesBtn.click();
     expect(bridge).toHaveBeenCalledTimes(1);
 
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
   });
 
   it("reparents changesListEl into its list host when constructed on 'changes', without fetching", () => {
@@ -223,7 +224,7 @@ describe("EditorSidebar", () => {
     );
     sidebar.reattach(); // first show: triggers the listing fetch
 
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1)); // "dir" starts collapsed
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1)); // "dir" starts collapsed
     (sidebar.el.querySelector(".dirrow") as HTMLElement).click(); // expand "dir" to reach its row
 
     const row = sidebar.el.querySelector('.row[data-path="dir/b.ts"]') as HTMLElement;
@@ -246,7 +247,7 @@ describe("EditorSidebar", () => {
     );
     sidebar.reattach(); // first show: triggers the listing fetch
 
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
     expect(sidebar.el.querySelector(".row.on")).toBeNull();
 
     sidebar.setSelectedPath("b.ts");
@@ -293,7 +294,7 @@ describe("EditorSidebar", () => {
     );
     sidebar.reattach(); // first show: triggers the initial listing fetch
 
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
     expect(getFreshSpy).toHaveBeenCalledTimes(1);
     expect(bridgeFn).toHaveBeenCalledTimes(1);
 
@@ -303,7 +304,7 @@ describe("EditorSidebar", () => {
     // getFresh() revalidates in the background even without an explicit invalidate() —
     // renderList() runs on every Files-tab "show", which refreshFilesListing() is one path into.
     expect(bridgeFn).toHaveBeenCalledTimes(2);
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
   });
 
   it("reattach() on the Files tab with a cached listing revalidates in the background and re-renders on arrival (Finding 1)", async () => {
@@ -330,7 +331,7 @@ describe("EditorSidebar", () => {
     );
     sidebar.reattach(); // first show: this is the "cached listing" this test's SECOND reattach() revalidates
 
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
 
     // reattach() is the diff→editor re-entry path (the other "show" point that triggers a fetch,
     // alongside a tab click) — a non-git workspace or a pane that never fetched a diff has no diff-signature
@@ -341,7 +342,7 @@ describe("EditorSidebar", () => {
     expect([...sidebar.el.querySelectorAll(".row .fn")].map((el) => el.textContent)).toEqual(["a.ts"]);
 
     resolveFresh(makeResult(["a.ts", "b.ts"]));
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
     const fnTexts = [...sidebar.el.querySelectorAll(".row .fn")].map((el) => el.textContent);
     expect(fnTexts).toEqual(["a.ts", "b.ts"]);
   });
@@ -363,12 +364,12 @@ describe("EditorSidebar", () => {
     );
     sidebar.reattach(); // first show: triggers the initial listing fetch
 
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
 
     cache.invalidate();
     sidebar.refreshFilesListing();
 
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(2));
     const fnTexts = [...sidebar.el.querySelectorAll(".row .fn")].map((el) => el.textContent);
     expect(fnTexts).toEqual(["b.ts", "c.ts"]);
   });
@@ -408,9 +409,9 @@ describe("EditorSidebar", () => {
     );
     sidebar.reattach(); // first show: triggers the listing fetch
 
-    await vi.waitFor(() => expect(bridgeFn).toHaveBeenCalledTimes(1));
+    await settled(() => expect(bridgeFn).toHaveBeenCalledTimes(1));
     // Let the fetch's .catch() run before asserting the tree is left untouched, not crashed.
-    await vi.waitFor(() => expect(sidebar.el.querySelector(".empty")?.textContent).toBe("No files"));
+    await settled(() => expect(sidebar.el.querySelector(".empty")?.textContent).toBe("No files"));
   });
 
   it("switching to Changes while a Files fetch is pending does not reveal the truncation note once that stale fetch resolves truncated (Finding 2)", async () => {
@@ -471,7 +472,7 @@ describe("EditorSidebar", () => {
     sidebar.reattach(); // first show: resolves truncated, note becomes visible
 
     const note = sidebar.el.querySelector(".editor-sidebar-note") as HTMLElement;
-    await vi.waitFor(() => expect(note.hidden).toBe(false));
+    await settled(() => expect(note.hidden).toBe(false));
 
     const [filesBtn, changesBtn] = headerButtons(sidebar);
     changesBtn.click();
@@ -505,7 +506,7 @@ describe("EditorSidebar", () => {
     sidebar.reattach();
 
     const note = sidebar.el.querySelector(".editor-sidebar-note") as HTMLElement;
-    await vi.waitFor(() => expect(note.hidden).toBe(false));
+    await settled(() => expect(note.hidden).toBe(false));
 
     const [filesBtn, changesBtn] = headerButtons(sidebar);
     changesBtn.click();
@@ -514,7 +515,7 @@ describe("EditorSidebar", () => {
     filesBtn.click();
     expect(note.hidden).toBe(false);
 
-    await vi.waitFor(() => expect(bridgeFn).toHaveBeenCalledTimes(2));
+    await settled(() => expect(bridgeFn).toHaveBeenCalledTimes(2));
     await new Promise((resolve) => setTimeout(resolve, 0)); // let the rejection's .catch() run
     expect(note.hidden).toBe(false);
   });
@@ -619,7 +620,7 @@ describe("EditorSidebar: the Files tree's New file write", () => {
       makeCallbacks(),
     );
     sidebar.reattach();
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
 
     const tree = sidebar.el.querySelector(".editor-sidebar-list")!.firstElementChild as HTMLElement;
     tree.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
@@ -629,7 +630,7 @@ describe("EditorSidebar: the Files tree's New file write", () => {
     field.value = "created.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() =>
+    await settled(() =>
       expect(bridge.workspaceFileWrite).toHaveBeenCalledWith("created.ts", "", { baseSHA256: undefined, purpose: "createFile" }),
     );
   });
@@ -653,7 +654,7 @@ describe("EditorSidebar: the Files tree's New file write", () => {
       makeCallbacks(),
     );
     sidebar.reattach();
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
 
     const tree = sidebar.el.querySelector(".editor-sidebar-list")!.firstElementChild as HTMLElement;
     tree.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
@@ -663,7 +664,7 @@ describe("EditorSidebar: the Files tree's New file write", () => {
     field.value = "taken.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(sidebar.el.querySelector(".inline-error")).not.toBeNull());
+    await settled(() => expect(sidebar.el.querySelector(".inline-error")).not.toBeNull());
     expect(sidebar.el.querySelector(".inline-error")?.textContent).toBe("'taken.ts' already exists.");
     expect(sidebar.el.querySelector("input.inline-name")).toBe(field);
     expect(field.disabled).toBe(false);
@@ -692,7 +693,7 @@ describe("EditorSidebar: reporting a confirmed move", () => {
       callbacks,
     );
     sidebar.reattach();
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
+    await settled(() => expect(sidebar.el.querySelectorAll(".row")).toHaveLength(1));
 
     const row = sidebar.el.querySelector(".row") as HTMLElement;
     row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
@@ -709,7 +710,7 @@ describe("EditorSidebar: reporting a confirmed move", () => {
     const callbacks = makeCallbacks();
     await renameFirstRow(bridge, callbacks, "b.ts");
 
-    await vi.waitFor(() => expect(callbacks.onEntryMoved).toHaveBeenCalledWith("a.ts", "b.ts"));
+    await settled(() => expect(callbacks.onEntryMoved).toHaveBeenCalledWith("a.ts", "b.ts"));
   });
 
   it("reports nothing when the device refuses the rename, and shows the refusal under the row", async () => {
@@ -720,7 +721,7 @@ describe("EditorSidebar: reporting a confirmed move", () => {
     const callbacks = makeCallbacks();
     const sidebar = await renameFirstRow(bridge, callbacks, "b.ts");
 
-    await vi.waitFor(() => expect(sidebar.el.querySelector(".inline-error")).not.toBeNull());
+    await settled(() => expect(sidebar.el.querySelector(".inline-error")).not.toBeNull());
     expect(sidebar.el.querySelector(".inline-error")?.textContent).toBe(
       "Path is or contains a git submodule; move or delete it with git.",
     );
@@ -747,7 +748,7 @@ describe("EditorSidebar: reporting a confirmed move", () => {
       { ...makeCallbacks(), onTreeStateChange },
     );
     sidebar.reattach();
-    await vi.waitFor(() => expect(sidebar.el.querySelectorAll(".dirrow").length).toBeGreaterThan(0));
+    await settled(() => expect(sidebar.el.querySelectorAll(".dirrow").length).toBeGreaterThan(0));
 
     sidebar.retargetExpandedPaths("src", "lib");
 

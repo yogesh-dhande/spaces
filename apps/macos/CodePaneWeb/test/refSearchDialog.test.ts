@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { settled } from "./settled";
 import { WorkspaceRefListResult } from "../src/bridge/types";
 import { RefSearchDialog, RefSearchDialogCallbacks } from "../src/app/refSearchDialog";
 
@@ -71,7 +72,7 @@ describe("RefSearchDialog — loading the listing", () => {
     expect(host.querySelector(".empty")?.textContent).toBe("Loading…");
 
     resolve(makeListing());
-    await vi.waitFor(() => expect(rowTexts(host)).toEqual(["mainbase", "feature/x"]));
+    await settled(() => expect(rowTexts(host)).toEqual(["mainbase", "feature/x"]));
   });
 
   it("fetches fresh on every show() rather than caching the previous listing", async () => {
@@ -80,7 +81,7 @@ describe("RefSearchDialog — loading the listing", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", makeCallbacks());
 
     dialog.show("branch");
-    await vi.waitFor(() => expect(listRefs).toHaveBeenCalledTimes(1));
+    await settled(() => expect(listRefs).toHaveBeenCalledTimes(1));
     dialog.close();
 
     dialog.show("branch");
@@ -95,7 +96,7 @@ describe("RefSearchDialog — branch mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", makeCallbacks());
 
     dialog.show("branch");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBeGreaterThan(0));
+    await settled(() => expect(rowTexts(host).length).toBeGreaterThan(0));
 
     typeInto(host, "feat");
     expect(rowTexts(host)).toEqual(["feature/x"]);
@@ -110,7 +111,7 @@ describe("RefSearchDialog — branch mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", makeCallbacks());
 
     dialog.show("branch");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBe(3));
+    await settled(() => expect(rowTexts(host).length).toBe(3));
 
     const rows = rowsOf(host);
     expect(rows[0]!.textContent).toBe("mainbase");
@@ -126,7 +127,7 @@ describe("RefSearchDialog — branch mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", makeCallbacks());
 
     dialog.show("branch");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBe(3));
+    await settled(() => expect(rowTexts(host).length).toBe(3));
 
     const rows = rowsOf(host);
     expect(rows[0]!.textContent).toBe("origin/mainbase");
@@ -141,7 +142,7 @@ describe("RefSearchDialog — branch mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, undefined, makeCallbacks());
 
     dialog.show("branch");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBe(2));
+    await settled(() => expect(rowTexts(host).length).toBe(2));
     expect(host.querySelector(".badge")).toBeNull();
   });
 
@@ -152,7 +153,7 @@ describe("RefSearchDialog — branch mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", callbacks);
 
     dialog.show("branch");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBeGreaterThan(0));
+    await settled(() => expect(rowTexts(host).length).toBeGreaterThan(0));
 
     rowsOf(host).find((row) => row.textContent === "feature/x")!.click();
 
@@ -168,7 +169,7 @@ describe("RefSearchDialog — commit/ref mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", makeCallbacks());
 
     dialog.show("ref");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBeGreaterThan(0));
+    await settled(() => expect(rowTexts(host).length).toBeGreaterThan(0));
 
     typeInto(host, "aaaaaaa");
     expect(rowTexts(host)).toEqual(["aaaaaaaFix the flaky test"]);
@@ -180,7 +181,7 @@ describe("RefSearchDialog — commit/ref mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", makeCallbacks());
 
     dialog.show("ref");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBeGreaterThan(0));
+    await settled(() => expect(rowTexts(host).length).toBeGreaterThan(0));
 
     typeInto(host, "compare");
     expect(rowTexts(host)).toEqual(["bbbbbbbAdd compare menu"]);
@@ -197,7 +198,7 @@ describe("RefSearchDialog — commit/ref mode", () => {
     expect(host.querySelector(".empty")?.textContent).toBe("Loading…");
 
     resolve(makeListing());
-    await vi.waitFor(() => expect(rowTexts(host)).toEqual(["Use 'deadbeef'"]));
+    await settled(() => expect(rowTexts(host)).toEqual(["Use 'deadbeef'"]));
     expect(rowTexts(host)).toEqual(["Use 'deadbeef'"]);
   });
 
@@ -208,7 +209,7 @@ describe("RefSearchDialog — commit/ref mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", callbacks);
 
     dialog.show("ref");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBeGreaterThan(0));
+    await settled(() => expect(rowTexts(host).length).toBeGreaterThan(0));
 
     typeInto(host, "  not-a-real-ref  ");
     rowsOf(host)
@@ -225,7 +226,7 @@ describe("RefSearchDialog — commit/ref mode", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", callbacks);
 
     dialog.show("ref");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBeGreaterThan(0));
+    await settled(() => expect(rowTexts(host).length).toBeGreaterThan(0));
 
     rowsOf(host).find((row) => row.textContent === "aaaaaaaFix the flaky test")!.click();
 
@@ -292,7 +293,7 @@ describe("RefSearchDialog — latest-wins on reopen", () => {
     dialog.show("branch");
     dialog.close();
     dialog.show("ref");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBeGreaterThan(0));
+    await settled(() => expect(rowTexts(host).length).toBeGreaterThan(0));
     // Loaded from the second (ref-mode) fetch: commit rows plus the empty-query literal is absent
     // (no query typed yet), so this is exactly the two commit rows.
     expect(rowTexts(host)).toEqual(["aaaaaaaFix the flaky test", "bbbbbbbAdd compare menu"]);
@@ -314,7 +315,7 @@ describe("RefSearchDialog — truncation note", () => {
     dialog.show("branch");
     expect((host.querySelector(".note") as HTMLElement).hidden).toBe(true); // not yet loaded
 
-    await vi.waitFor(() => expect((host.querySelector(".note") as HTMLElement).hidden).toBe(false));
+    await settled(() => expect((host.querySelector(".note") as HTMLElement).hidden).toBe(false));
     expect(host.querySelector(".note")!.textContent).toBe("Branch list truncated");
   });
 
@@ -324,7 +325,7 @@ describe("RefSearchDialog — truncation note", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", makeCallbacks());
 
     dialog.show("ref");
-    await vi.waitFor(() => expect((host.querySelector(".note") as HTMLElement).hidden).toBe(false));
+    await settled(() => expect((host.querySelector(".note") as HTMLElement).hidden).toBe(false));
     expect(host.querySelector(".note")!.textContent).toBe("Commit history truncated");
   });
 
@@ -334,7 +335,7 @@ describe("RefSearchDialog — truncation note", () => {
     const dialog = new RefSearchDialog(host, listRefs, "main", makeCallbacks());
 
     dialog.show("branch");
-    await vi.waitFor(() => expect(rowTexts(host).length).toBeGreaterThan(0));
+    await settled(() => expect(rowTexts(host).length).toBeGreaterThan(0));
     expect((host.querySelector(".note") as HTMLElement).hidden).toBe(true);
   });
 });

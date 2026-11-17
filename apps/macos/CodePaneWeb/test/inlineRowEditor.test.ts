@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { settled } from "./settled";
 import { beginInlineRowEdit } from "../src/app/inlineRowEditor";
 
 function makeRow(initialText = "original.ts"): HTMLElement {
@@ -43,7 +44,7 @@ describe("inlineRowEditor: beginInlineRowEdit", () => {
     fieldOf(row).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
     expect(commit).toHaveBeenCalledWith("  renamed.ts  ");
-    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    await settled(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(row.querySelector("input.inline-name")).toBeNull();
     expect(row.querySelector(".fn")?.textContent).toBe("original.ts");
   });
@@ -89,7 +90,7 @@ describe("inlineRowEditor: beginInlineRowEdit", () => {
     expect(commit).toHaveBeenCalledTimes(1);
 
     resolveCommit();
-    await vi.waitFor(() => expect(field.isConnected).toBe(false));
+    await settled(() => expect(field.isConnected).toBe(false));
   });
 
   it("a rejected commit re-enables the field, keeps the typed value, and renders the message as .inline-error right after the row", async () => {
@@ -103,7 +104,7 @@ describe("inlineRowEditor: beginInlineRowEdit", () => {
     field.value = "renamed.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(field.disabled).toBe(false));
+    await settled(() => expect(field.disabled).toBe(false));
     expect(onClose).not.toHaveBeenCalled();
     expect(field.value).toBe("renamed.ts");
     const error = row.nextElementSibling as HTMLElement;
@@ -122,7 +123,7 @@ describe("inlineRowEditor: beginInlineRowEdit", () => {
     const field = fieldOf(row);
     field.value = "a.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(row.nextElementSibling?.className).toBe("inline-error"));
+    await settled(() => expect(row.nextElementSibling?.className).toBe("inline-error"));
 
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
@@ -162,7 +163,7 @@ describe("inlineRowEditor: beginInlineRowEdit", () => {
 
     const field = fieldOf(row);
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    await settled(() => expect(onClose).toHaveBeenCalledTimes(1));
 
     // The field is detached from the row now, but its own listeners are still attached to it; a
     // stray Escape reaching it must not re-run onClose a second time.

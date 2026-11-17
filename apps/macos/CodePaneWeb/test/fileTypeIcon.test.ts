@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { settled } from "./settled";
 import { DiffFileEntry, WorkspaceFileListResult } from "../src/bridge/types";
 import { ContextMenu } from "../src/app/contextMenu";
 import { renderFileList } from "../src/app/fileList";
@@ -203,7 +204,7 @@ describe("Quick-open rows", () => {
     });
 
     quickOpen.show();
-    await vi.waitFor(() => expect(host.querySelectorAll(".row").length).toBe(2));
+    await settled(() => expect(host.querySelectorAll(".row").length).toBe(2));
     expect(host.querySelectorAll(".ficon").length).toBe(0);
   });
 });

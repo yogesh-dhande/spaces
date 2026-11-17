@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { settled } from "./settled";
 import { ContextMenu, ContextMenuRequest } from "../src/app/contextMenu";
 import { FilesTreeActions, FilesTreeCallbacks, FilesTreeListing, renderFilesTree } from "../src/app/filesTree";
 import { FolderPicker } from "../src/app/folderPicker";
@@ -238,7 +239,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = "new.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.createFile).toHaveBeenCalledWith("src/new.ts"));
+    await settled(() => expect(actions.createFile).toHaveBeenCalledWith("src/new.ts"));
     expect(callbacks.onSelect).toHaveBeenCalledWith("src/new.ts");
     expect(callbacks.onMutated).toHaveBeenCalled();
     // In that order: both land on the daemon's one per-workspace serial queue, so a listing refetch
@@ -257,7 +258,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = "docs";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.createFolder).toHaveBeenCalledWith("docs"));
+    await settled(() => expect(actions.createFolder).toHaveBeenCalledWith("docs"));
     expect(callbacks.onSelect).not.toHaveBeenCalled();
     expect(callbacks.onMutated).toHaveBeenCalled();
   });
@@ -270,7 +271,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     const field = container.querySelector("input.inline-name") as HTMLInputElement;
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(container.querySelector(".row.draft")).toBeNull());
+    await settled(() => expect(container.querySelector(".row.draft")).toBeNull());
     expect(actions.createFile).not.toHaveBeenCalled();
   });
 
@@ -285,7 +286,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = " target ";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.createFolder).toHaveBeenCalledWith("src/ target "));
+    await settled(() => expect(actions.createFolder).toHaveBeenCalledWith("src/ target "));
   });
 
   // Whitespace alone is still a blank field: trimming is what recognizes that, and nothing else.
@@ -298,7 +299,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = "   ";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(container.querySelector(".row.draft")).toBeNull());
+    await settled(() => expect(container.querySelector(".row.draft")).toBeNull());
     expect(actions.createFile).not.toHaveBeenCalled();
   });
 
@@ -325,7 +326,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = "new.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(container.querySelector(".inline-error")).not.toBeNull());
+    await settled(() => expect(container.querySelector(".inline-error")).not.toBeNull());
     expect(container.querySelector(".inline-error")?.textContent).toBe("'new.ts' already exists.");
     expect(container.querySelector(".row.draft")).not.toBeNull(); // still open
     expect((container.querySelector("input.inline-name") as HTMLInputElement).disabled).toBe(false);
@@ -343,7 +344,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = "foo/";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(container.querySelector(".inline-error")).not.toBeNull());
+    await settled(() => expect(container.querySelector(".inline-error")).not.toBeNull());
     expect(actions.createFile).not.toHaveBeenCalled();
     expect(container.querySelector(".row.draft")).not.toBeNull(); // still editable
   });
@@ -357,7 +358,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = "a//b";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(container.querySelector(".inline-error")).not.toBeNull());
+    await settled(() => expect(container.querySelector(".inline-error")).not.toBeNull());
     expect(actions.createFolder).not.toHaveBeenCalled();
   });
 
@@ -370,7 +371,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = "a/b.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.createFile).toHaveBeenCalledWith("a/b.ts"));
+    await settled(() => expect(actions.createFile).toHaveBeenCalledWith("a/b.ts"));
     expect(callbacks.onSelect).toHaveBeenCalledWith("a/b.ts");
   });
 
@@ -385,7 +386,7 @@ describe("filesTree pointer menu: New file / New folder", () => {
     field.value = " target ";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.createFile).toHaveBeenCalledWith(" target "));
+    await settled(() => expect(actions.createFile).toHaveBeenCalledWith(" target "));
   });
 });
 
@@ -401,7 +402,7 @@ describe("filesTree pointer menu: Rename", () => {
     field.value = "renamed.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "src/renamed.ts"));
+    await settled(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "src/renamed.ts"));
     expect(callbacks.onMutated).toHaveBeenCalled();
   });
 
@@ -446,7 +447,7 @@ describe("filesTree pointer menu: Rename", () => {
     field.value = " target ";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "src/ target "));
+    await settled(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "src/ target "));
   });
 
   it("a whitespace-only name makes no call", () => {
@@ -472,7 +473,7 @@ describe("filesTree pointer menu: Rename", () => {
     field.value = "x/";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(container.querySelector(".inline-error")).not.toBeNull());
+    await settled(() => expect(container.querySelector(".inline-error")).not.toBeNull());
     expect(actions.move).not.toHaveBeenCalled();
   });
 });
@@ -548,7 +549,7 @@ describe("filesTree pointer menu: Move to…", () => {
     expect(row.getAttribute("aria-busy")).toBe("true");
 
     settleMove();
-    await vi.waitFor(() => expect(callbacks.onMutated).toHaveBeenCalled());
+    await settled(() => expect(callbacks.onMutated).toHaveBeenCalled());
     expect(row.className).not.toContain("in-flight");
   });
 
@@ -563,7 +564,7 @@ describe("filesTree pointer menu: Move to…", () => {
     expect(pickerSelectedText(pickerHost)).toBe("/");
     pressInPicker(pickerHost, "Enter");
 
-    await vi.waitFor(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "a.ts"));
+    await settled(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "a.ts"));
   });
 
   it("walks the list with the arrow keys, stepping over the current folder", async () => {
@@ -581,7 +582,7 @@ describe("filesTree pointer menu: Move to…", () => {
 
     pressInPicker(pickerHost, "Enter");
 
-    await vi.waitFor(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "a.ts"));
+    await settled(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "a.ts"));
   });
 
   it("Escape closes the picker without moving anything and hands focus back to the row", () => {
@@ -608,7 +609,7 @@ describe("filesTree pointer menu: Move to…", () => {
     typeInPicker(pickerHost, "nest");
     pressInPicker(pickerHost, "Enter");
 
-    await vi.waitFor(() =>
+    await settled(() =>
       expect(row.nextElementSibling?.textContent).toBe("src/nested/a.ts already exists"),
     );
     expect(row.nextElementSibling?.className).toBe("inline-error");
@@ -640,7 +641,7 @@ describe("filesTree pointer menu: Delete", () => {
     expect(actions.remove).not.toHaveBeenCalled();
 
     itemNamed(menu.calls[1]!, "Delete")();
-    await vi.waitFor(() => expect(actions.remove).toHaveBeenCalledWith("root.ts"));
+    await settled(() => expect(actions.remove).toHaveBeenCalledWith("root.ts"));
     expect(callbacks.onMutated).toHaveBeenCalled();
   });
 
@@ -667,7 +668,7 @@ describe("filesTree pointer menu: Delete", () => {
     expect(actions.remove).not.toHaveBeenCalled();
 
     itemNamed(menu.calls[1]!, "Delete")();
-    await vi.waitFor(() => expect(actions.remove).toHaveBeenCalledWith("empty"));
+    await settled(() => expect(actions.remove).toHaveBeenCalledWith("empty"));
   });
 
   it("on a folder with children, asks for confirmation first", () => {
@@ -690,7 +691,7 @@ describe("filesTree pointer menu: Open in system viewer", () => {
     itemNamed(menu.calls[0]!, "Open in system viewer")();
 
     expect(openInSystemViewer).toHaveBeenCalledWith("root.ts");
-    await vi.waitFor(() => expect(row.nextElementSibling?.className).toBe("inline-error"));
+    await settled(() => expect(row.nextElementSibling?.className).toBe("inline-error"));
     expect(row.nextElementSibling?.textContent).toBe("Could not open this file.");
   });
 });
@@ -723,7 +724,7 @@ describe("filesTree pointer menu: the open inline field owns its own events", ()
     field.value = "renamed.ts";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "src/renamed.ts"));
+    await settled(() => expect(actions.move).toHaveBeenCalledWith("src/a.ts", "src/renamed.ts"));
     expect(callbacks.onSelect).not.toHaveBeenCalled();
   });
 
@@ -738,7 +739,7 @@ describe("filesTree pointer menu: the open inline field owns its own events", ()
     field.value = "sources";
     field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 
-    await vi.waitFor(() => expect(actions.move).toHaveBeenCalledWith("src", "sources"));
+    await settled(() => expect(actions.move).toHaveBeenCalledWith("src", "sources"));
     expect(dirrow.getAttribute("aria-expanded")).toBe("false");
   });
 
@@ -864,8 +865,8 @@ describe("filesTree pointer menu: a listing refresh during a pending row action"
     expect(container.contains(row)).toBe(true);
 
     settleMove();
-    await vi.waitFor(() => expect(callbacks.onMutated).toHaveBeenCalled());
-    await vi.waitFor(() => expect(rootFilePaths(container)).toContain("added.ts"));
+    await settled(() => expect(callbacks.onMutated).toHaveBeenCalled());
+    await settled(() => expect(rootFilePaths(container)).toContain("added.ts"));
   });
 
   it("renders a refused move under the row, and applies the held refresh with that refusal kept", async () => {
@@ -875,7 +876,7 @@ describe("filesTree pointer menu: a listing refresh during a pending row action"
 
     refresh(LISTING_WITH_ADDED_FILE);
 
-    await vi.waitFor(() => expect(container.querySelector(".inline-error")).not.toBeNull());
+    await settled(() => expect(container.querySelector(".inline-error")).not.toBeNull());
     expect(rootFilePaths(container)).toContain("added.ts");
     const error = container.querySelector(".inline-error")!;
     expect(error.textContent).toBe("empty/root.ts already exists");
@@ -899,8 +900,8 @@ describe("filesTree pointer menu: a listing refresh during a pending row action"
     expect(rootFilePaths(container)).not.toContain("added.ts");
 
     settleRemove();
-    await vi.waitFor(() => expect(callbacks.onMutated).toHaveBeenCalled());
-    await vi.waitFor(() => expect(rootFilePaths(container)).toContain("added.ts"));
+    await settled(() => expect(callbacks.onMutated).toHaveBeenCalled());
+    await settled(() => expect(rootFilePaths(container)).toContain("added.ts"));
   });
 
   it("renders a refused delete under the row, and applies the held refresh with that refusal kept", async () => {
@@ -912,7 +913,7 @@ describe("filesTree pointer menu: a listing refresh during a pending row action"
 
     refresh(LISTING_WITH_ADDED_FILE);
 
-    await vi.waitFor(() => expect(container.querySelector(".inline-error")).not.toBeNull());
+    await settled(() => expect(container.querySelector(".inline-error")).not.toBeNull());
     expect(rootFilePaths(container)).toContain("added.ts");
     const error = container.querySelector(".inline-error")!;
     expect(error.textContent).toBe("Use git to remove a submodule checkout.");

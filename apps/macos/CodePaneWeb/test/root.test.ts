@@ -109,12 +109,35 @@ function useFakeTimersWithImmediatePaint(): void {
  *  the promise (not the handle) is what covers a root left mid-initialization: several tests
  *  deliberately never settle the first manifest pull, and such a root has already attached every
  *  window listener by the time it reaches that await. */
-const mountedRoots: Array<{ mounted: ReturnType<typeof mountRootDirect>; handle?: CodePaneRootHandle }> = [];
+const mountedRoots: Array<{ mounted: ReturnType<typeof mountRootDirect>; handle?: CodePaneRootHandle; firstListener: number }> = [];
+
+/** Every window listener added so far, in order. A root that is parked on a promise only its test
+ *  holds (a held chunk read, say) can never hand over its dispose handle, and its failed test is
+ *  the one that never resolves that promise, so the teardown below removes the listeners such a
+ *  root installed directly instead of waiting for the handle. */
+const windowListeners: Array<Parameters<typeof window.addEventListener>> = [];
+const addWindowEventListener = window.addEventListener.bind(window) as (...args: Parameters<typeof window.addEventListener>) => void;
+window.addEventListener = ((...args: Parameters<typeof window.addEventListener>) => {
+  windowListeners.push(args);
+  addWindowEventListener(...args);
+}) as typeof window.addEventListener;
+
+/** Turns of the event loop the teardown gives a still-initializing root to finish before treating
+ *  it as parked. Initialization after its last held promise is two paint frames and a few promise
+ *  hops, so a root that has not handed over its handle by then is waiting on something that will
+ *  not come. The teardown cannot release that promise itself: a test creates it inside its own
+ *  `mockImplementationOnce` closure, and only `pendingDiffCalls` is registered where the teardown
+ *  can reach it. Mounts that need frames cannot be drained by a count of microtasks, so the hops
+ *  here are frames. */
+const MOUNT_DRAIN_TURNS = 5;
 
 /** The single entry point every test in this file mounts through, so no call site can forget to
  *  register its root for teardown. */
 function mountRoot(container: HTMLElement): ReturnType<typeof mountRootDirect> {
-  const entry: { mounted: ReturnType<typeof mountRootDirect>; handle?: CodePaneRootHandle } = { mounted: mountRootDirect(container) };
+  const entry: { mounted: ReturnType<typeof mountRootDirect>; handle?: CodePaneRootHandle; firstListener: number } = {
+    firstListener: windowListeners.length,
+    mounted: mountRootDirect(container),
+  };
   entry.mounted.then(
     (handle) => {
       entry.handle = handle;
@@ -133,9 +156,20 @@ afterEach(async () => {
     // a root exists: rejecting a live root's in-flight pull would send it into a retry it schedules
     // after this teardown has already disposed it.
     for (const call of hoisted.pendingDiffCalls.splice(0)) call.reject(new Error("root.test.ts teardown"));
-    await Promise.allSettled(entries.map((entry) => entry.mounted));
+    // Awaiting the mounts themselves would hang for a root parked on a promise only its failed
+    // test could settle, and the hook timeout would then fail the next test's setup too.
+    for (let turn = 0; turn < MOUNT_DRAIN_TURNS && entries.some((entry) => entry.handle === undefined); turn++) {
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
+      else await new Promise<void>((resolve) => nativeRequestAnimationFrame.call(window, () => resolve()));
+    }
   }
   for (const entry of entries) entry.handle?.dispose();
+  const parked = entries.filter((entry) => entry.handle === undefined);
+  if (parked.length > 0) {
+    const firstParked = Math.min(...parked.map((entry) => entry.firstListener));
+    for (const [type, listener, options] of windowListeners.slice(firstParked)) window.removeEventListener(type, listener, options);
+  }
+  windowListeners.length = 0;
   // Restored after the awaits above, not before: a test that ended with fake timers installed still
   // needs the immediate-paint frames to drive that last stretch of initialization to completion.
   window.requestAnimationFrame = nativeRequestAnimationFrame;
