@@ -589,6 +589,13 @@
             guard case .ready(let model) = localScrollbackState else { return nil }
             return model.historyEpoch
         }
+        /// Whether a page read is still unresolved. A transcript provider records its request before the read's
+        /// result is applied on the main actor, so a request count says the read started, not that the pane
+        /// has acted on what it returned.
+        var debugIsLoadingLocalScrollback: Bool {
+            if case .loading = localScrollbackState { return true }
+            return false
+        }
         /// Whether a load is holding the pane's replay off the main actor, which is the window a gesture's
         /// rows buffer in rather than scrolling the replay.
         var debugLoadHoldsLocalScrollbackReplay: Bool {

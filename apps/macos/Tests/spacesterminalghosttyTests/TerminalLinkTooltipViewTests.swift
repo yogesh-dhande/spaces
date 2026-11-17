@@ -32,6 +32,18 @@ final class TerminalLinkTooltipViewTests: XCTestCase {
         XCTAssertEqual(right.maxX, 592)
     }
 
+    /// A pill smaller than its own padding (the hidden one is `.zero` until the first hover) must still
+    /// lay its label out at a finite frame: an infinite one is reported by AppKit as an invalid view
+    /// geometry, which XCTest records as an issue on the main thread.
+    @MainActor func testAPillSmallerThanItsPaddingLaysOutAFiniteLabel() throws {
+        let view = TerminalLinkTooltipView()
+        view.layout()
+        let label = try XCTUnwrap(view.subviews.first)
+        XCTAssertTrue(label.frame.origin.x.isFinite && label.frame.origin.y.isFinite)
+        XCTAssertLessThan(label.frame.origin.x, 1_000)
+        XCTAssertEqual(label.frame.size, .zero)
+    }
+
     func testTargetWiderThanThePaneIsCappedToThePaneMinusMargins() {
         let frame = TerminalLinkTooltipView.frame(
             paneBounds: pane, rowRect: row(atTop: 100), anchorX: 300, tooltipSize: NSSize(width: 2_000, height: 24))

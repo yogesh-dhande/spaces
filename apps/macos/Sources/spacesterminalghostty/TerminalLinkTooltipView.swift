@@ -47,7 +47,13 @@
 
         override func layout() {
             super.layout()
-            label.frame = bounds.insetBy(dx: Self.horizontalPadding, dy: Self.verticalPadding)
+            // Built by hand because `insetBy` on a rect smaller than the padding (the hidden pill is
+            // `.zero` until its first show) returns an infinite-origin null rect. AppKit reports that as
+            // "Invalid view geometry", which XCTest records as an issue on the main thread and
+            // symbolicates, stalling the first run-loop turn of a test process for seconds.
+            label.frame = NSRect(
+                x: Self.horizontalPadding, y: Self.verticalPadding, width: max(bounds.width - 2 * Self.horizontalPadding, 0),
+                height: max(bounds.height - 2 * Self.verticalPadding, 0))
         }
 
         /// The text shown, or nil while hidden.
