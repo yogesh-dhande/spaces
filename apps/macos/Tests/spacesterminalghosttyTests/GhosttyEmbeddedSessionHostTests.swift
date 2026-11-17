@@ -230,7 +230,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         let transcript = TranscriptBuffer()
         let driver = HostManagedPTYTerminalSessionDriver(
-            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: TerminalSessionLaunchConfiguration(
+            testChildEnvironment: IsolatedLoginProfile.environment,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "terminfo-environment-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminfo-environment",
                 workingDirectory: root.path, shell: "/bin/zsh",
                 command: "printf 'TERM=%s\\nTERMINFO=%s\\n__SPACES_ENV_END__\\n' \"$TERM\" \"$TERMINFO\"", createdAt: "2026-07-13T00:00:00Z",
@@ -260,7 +261,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
 
         let driver = HostManagedPTYTerminalSessionDriver(
-            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: TerminalSessionLaunchConfiguration(
+            testChildEnvironment: IsolatedLoginProfile.environment,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "foreground-job-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "foreground-job", workingDirectory: root.path,
                 shell: "/bin/zsh", command: nil, createdAt: "2026-06-06T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
         defer { driver.terminate() }
@@ -307,7 +309,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { _ = signal(SIGINT, previousInterruptHandler) }
 
         let driver = HostManagedPTYTerminalSessionDriver(
-            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: TerminalSessionLaunchConfiguration(
+            testChildEnvironment: IsolatedLoginProfile.environment,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "interrupt-signal-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "interrupt", workingDirectory: root.path,
                 shell: "/bin/zsh", command: scriptPath.path, createdAt: "2026-06-06T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
         defer { driver.terminate() }
@@ -344,7 +347,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
 
         let driver = HostManagedPTYTerminalSessionDriver(
-            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: TerminalSessionLaunchConfiguration(
+            testChildEnvironment: IsolatedLoginProfile.environment,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "terminate-escalates-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-escalates",
                 workingDirectory: root.path, shell: "/bin/zsh", command: "exec \(scriptPath.path)", createdAt: "2026-06-19T00:00:00Z",
                 workspaceID: "workspace-1", kind: .shell), terminationEscalationIntervals: .init(hupGrace: 0.05, termGrace: 2.0, killGrace: 2.0))
@@ -379,7 +383,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         let markerPath = root.appendingPathComponent("ready-marker")
         let driver = HostManagedPTYTerminalSessionDriver(
-            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: TerminalSessionLaunchConfiguration(
+            testChildEnvironment: IsolatedLoginProfile.environment,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "terminate-reaps-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-reaps", workingDirectory: root.path,
                 shell: "/bin/zsh", command: "printf 'ready\\n' > \"\(markerPath.path)\"; exec /bin/sleep 120", createdAt: "2026-07-24T00:00:00Z",
                 workspaceID: "workspace-1", kind: .shell))
@@ -441,7 +446,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try script.write(to: scriptPath, atomically: true, encoding: .utf8)
 
         let driver = HostManagedPTYTerminalSessionDriver(
-            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: TerminalSessionLaunchConfiguration(
+            testChildEnvironment: IsolatedLoginProfile.environment,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "terminate-released-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-released",
                 workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
                 createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
@@ -504,7 +510,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // seconds while the machine is saturated (#236) even though the session closed on time.
         let sessionClosed = DispatchSemaphore(value: 0)
         var driver: HostManagedPTYTerminalSessionDriver? = HostManagedPTYTerminalSessionDriver(
-            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: TerminalSessionLaunchConfiguration(
+            testChildEnvironment: IsolatedLoginProfile.environment,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "natural-exit-released-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "natural-exit-released",
                 workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
                 createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
@@ -574,7 +581,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         let sessionClosed = DispatchSemaphore(value: 0)
         let driver = HostManagedPTYTerminalSessionDriver(
-            testChildEnvironment: IsolatedLoginProfile.environment, launchConfiguration: TerminalSessionLaunchConfiguration(
+            testChildEnvironment: IsolatedLoginProfile.environment,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "close-busy-executors-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "close-busy-executors",
                 workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
                 createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
@@ -3567,7 +3575,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
 
         try await waitUntil { transcript.string().contains("line5") }
-        let captured = try XCTUnwrap(TerminalEngineActor.runSynchronously { sessionDriver.renderStateSnapshot() })
+        // The transcript sees a chunk before the terminal has parsed it, and the export below consumes the
+        // pending scroll exactly once, so an export that beat the parse would find no scroll to report.
+        let captured = try XCTUnwrap(
+            TerminalEngineActor.runSynchronously {
+                sessionDriver.awaitAppliedTerminalOutput()
+                return sessionDriver.renderStateSnapshot()
+            })
         let scrollRect = try XCTUnwrap(captured.scrollRects.first)
 
         XCTAssertEqual(scrollRect.rowStart, 0)

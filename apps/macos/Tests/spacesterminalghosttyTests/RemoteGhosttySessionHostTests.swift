@@ -3152,6 +3152,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             client: TerminalClient(kind: .local, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-09-16T00:00:02Z"),
             mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
         waitForCondition("live pane prefetches its scrollback page") { provider.requests.count >= 1 }
+        // The provider records its request before the pane acts on the empty result, so the gesture below
+        // must wait for that result: sent earlier it would join the prefetch still in flight instead of
+        // arriving at the idle pane this test is about.
+        waitForCondition("the pane acts on the empty prefetch") { !host.debugIsLoadingLocalScrollback }
         XCTAssertEqual(provider.requests.count, 1, "an empty read must not put every later frame back on the read path")
 
         XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))

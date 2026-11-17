@@ -530,6 +530,17 @@
         /// interactive input — and interactive input has no delivery record to be honest about.
         private func awaitGhosttyInputEmission(_ session: ghostty_session_t) { ghostty_session_sync_io(session) }
 
+        /// Returns once the terminal has applied every PTY output chunk whose bytes have already reached
+        /// the data callback. Ghostty fires that callback before it takes the terminal lock and parses the
+        /// chunk, so the output handler (and anything waiting on its transcript) can see bytes the
+        /// terminal state does not hold yet. A state read that has to include them, such as a snapshot
+        /// export that consumes the scroll the chunk produced, orders itself behind the chunk here: the IO
+        /// thread handles the chunk's mailbox message to completion before it reaches this barrier.
+        func awaitAppliedTerminalOutput() {
+            guard let session else { return }
+            awaitGhosttyInputEmission(session)
+        }
+
         /// Sends a key press through ghostty's own key encoder, which reads the live terminal state
         /// (Kitty keyboard flags, DECCKM, `modifyOtherKeys`) to pick the right sequence.
         @discardableResult func sendKey(_ event: ghostty_input_key_s) -> Bool {
