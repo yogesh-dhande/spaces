@@ -17,6 +17,13 @@
         // below read and write `SpacesMobileDeviceStore`'s real `UserDefaults.standard` persistence —
         // reset it around every test the same way `SpacesMobileDeviceStoreTests` does, so a fingerprint
         // used by one test can never leak a seeded cache into another.
+        // The queue every dial's `NWConnection` state callbacks run on, one per test (XCTest makes an
+        // instance per test method). The product always dials on a private queue; `.main` would put
+        // readiness behind the host app's UI work and other tests' main-thread work while the resolver's
+        // timeout keeps counting, so a dial could exhaust its budget with no network delay at all
+        // (`allCandidatesUnreachable` at about the budget, #783).
+        private let dialQueue = DispatchQueue(label: "spaces.device.api.resolver-test.dial")
+
         override func setUp() {
             super.setUp()
             resetDeviceStorePersistedState()
@@ -34,7 +41,7 @@
             let resolver = SpacesDeviceEndpointResolver(settings: settings)
 
             do {
-                _ = try await resolver.connect(timeout: .seconds(1), queue: .main)
+                _ = try await resolver.connect(timeout: .seconds(1), queue: dialQueue)
                 XCTFail("expected invalidEndpoint")
             } catch SpacesDeviceAPIClientError.invalidEndpoint {
                 // expected
@@ -56,7 +63,7 @@
             let resolver = SpacesDeviceEndpointResolver(settings: settings)
 
             do {
-                _ = try await resolver.connect(timeout: .milliseconds(300), queue: .main)
+                _ = try await resolver.connect(timeout: .milliseconds(300), queue: dialQueue)
                 XCTFail("expected allCandidatesUnreachable")
             } catch SpacesDeviceAPIClientError.allCandidatesUnreachable(let hosts) { XCTAssertEqual(hosts, ["192.0.2.1", "198.51.100.1"]) } catch {
                 XCTFail("unexpected error: \(error)")
@@ -95,7 +102,7 @@
             let resolver = SpacesDeviceEndpointResolver(settings: settings)
 
             let start = ContinuousClock.now
-            let resolved = try await resolver.connect(timeout: .seconds(3), queue: .main)
+            let resolved = try await resolver.connect(timeout: .seconds(3), queue: dialQueue)
             resolved.connection.cancel()
 
             XCTAssertEqual(resolved.host, "127.0.0.1")
@@ -124,7 +131,7 @@
             let resolver = SpacesDeviceEndpointResolver(settings: settings)
 
             do {
-                _ = try await resolver.connect(timeout: .milliseconds(500), queue: .main)
+                _ = try await resolver.connect(timeout: .milliseconds(500), queue: dialQueue)
                 XCTFail("expected allCandidatesUnreachable")
             } catch SpacesDeviceAPIClientError.allCandidatesUnreachable(let hosts) { XCTAssertEqual(hosts, ["127.0.0.1"]) } catch {
                 XCTFail("unexpected error: \(error)")
@@ -151,7 +158,7 @@
 
             let start = ContinuousClock.now
             do {
-                _ = try await resolver.connect(timeout: .seconds(20), queue: .main)
+                _ = try await resolver.connect(timeout: .seconds(20), queue: dialQueue)
                 XCTFail("expected transportAuthenticationFailed")
             } catch SpacesDeviceAPIClientError.transportAuthenticationFailed {
                 // Expected.
@@ -182,7 +189,7 @@
             let backend = SpacesDeviceNetworkBackend(settings: settings)
             let client = SpacesDeviceAPIClient(settings: settings, backend: backend)
 
-            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: .main)
+            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: dialQueue)
             let resolvedBeforeReset = await client.currentResolvedHost()
             XCTAssertEqual(resolvedBeforeReset, "127.0.0.1")
 
@@ -213,7 +220,7 @@
             settings.certificateFingerprint = server.certificateFingerprint
             let backend = SpacesDeviceNetworkBackend(settings: settings)
 
-            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: .main)
+            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: dialQueue)
             let cachedHostBeforeFailure = await backend.resolver.currentCachedHost()
             XCTAssertEqual(cachedHostBeforeFailure, "127.0.0.1")
             server.stop()
@@ -251,7 +258,7 @@
             settings.certificateFingerprint = server.certificateFingerprint
             let backend = SpacesDeviceNetworkBackend(settings: settings)
 
-            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: .main)
+            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: dialQueue)
             let cachedHostBeforeClose = await backend.resolver.currentCachedHost()
             XCTAssertEqual(cachedHostBeforeClose, "127.0.0.1")
 
@@ -347,7 +354,7 @@
             settings.certificateFingerprint = server.certificateFingerprint
             let backend = SpacesDeviceNetworkBackend(settings: settings)
 
-            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: .main)
+            _ = try await backend.resolver.connect(timeout: .seconds(3), queue: dialQueue)
             let cachedHostBeforeRejection = await backend.resolver.currentCachedHost()
             XCTAssertEqual(cachedHostBeforeRejection, "127.0.0.1")
 
@@ -756,7 +763,7 @@
             let beforeProof = await resolver.noteStreamFailed(host: "192.0.2.1")
             XCTAssertTrue(beforeProof, "sanity: both of the device's candidates are now marked stream-failed")
 
-            let resolved = try await resolver.connect(timeout: .seconds(3), queue: .main)
+            let resolved = try await resolver.connect(timeout: .seconds(3), queue: dialQueue)
             resolved.connection.cancel()
             XCTAssertEqual(resolved.host, "127.0.0.1")
 
@@ -869,7 +876,7 @@
 
             let streamHost = await viewerBackend.resolver.nextStreamHost()
             XCTAssertEqual(streamHost, "127.0.0.1")
-            _ = try await viewerBackend.resolver.connect(timeout: .seconds(3), queue: .main)
+            _ = try await viewerBackend.resolver.connect(timeout: .seconds(3), queue: dialQueue)
             let provenHost = await viewerBackend.resolver.currentCachedHost()
             XCTAssertEqual(provenHost, "127.0.0.1")
         }
