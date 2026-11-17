@@ -3093,6 +3093,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: session.launchConfiguration, paths: session.paths, terminalServiceRequestSender: recorder.send,
             transcriptProvider: provider.fetch)
+        // The flick's events are stamped on a clock the test holds still. On the real clock, the waits
+        // between the flick's first event and the post-jump momentum can outlast the idle interval under
+        // load, which ends the gesture (and its cancellation) and makes the momentum event a new gesture.
+        let clock = ScrollGestureTestClock()
+        host.scrollGestureClock = { clock.now }
         waitForCondition("live host paints its first frame") { host.snapshotText()?.contains("live-01") == true }
         let window = makeVisiblePaneWindow()
         defer { window.orderOut(nil) }

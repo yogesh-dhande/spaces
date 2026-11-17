@@ -86,6 +86,10 @@ stage_profiles() {
     fi
     find "$codecov_dir" -maxdepth 1 -type f -name '*.profraw' \
         -exec sh -c 'destination="$1"; shift; mv "$@" "$destination"' sh "$pass_staging_dir" {} +
+    # Every pass ends here, and the next pass's `swiftpm.sh` resets `.build/test-profile`, which a leaked
+    # daemon still writing into it makes fail with "Directory not empty". Checking at each pass boundary
+    # names the leak before that reset can hide it.
+    fail_on_leaked_test_daemons
 }
 
 # Decides whether a non-zero `swift test` exit can be attributed to SwiftPM's post-test steps
@@ -147,6 +151,53 @@ run_filtered_coverage_pass() {
         else
             return "$pass_status"
         fi
+    fi
+}
+
+# A test that starts a real `spacesd` and never stops it leaves the daemon (and its caddy) running after
+# the run. The daemon under `.build/test-profile` keeps writing there, so the NEXT run's `rm -rf` of that
+# profile fails with "Directory not empty" before any test runs, which blames the wrong run. This names
+# the leak in the run that caused it. Only daemons of this worktree's own binary that were not already
+# running when the tests started, and whose profile is the test profile or a temp directory, count: other
+# worktrees' daemons and the installed app's daemon are never touched.
+spacesd_binary="$root/.build/debug/spacesd"
+worktree_spacesd_pids() { pgrep -f "^$spacesd_binary" | sort || true; }
+spacesd_before_tests="$(worktree_spacesd_pids)"
+
+# The profile a daemon serves, read from its environment (`ps eww` appends it to the command line).
+spacesd_profile_db_path() {
+    ps eww -o command= -p "$1" 2>/dev/null | tr ' ' '\n' | sed -n 's/^SPACES_DB_PATH=//p' | head -n 1
+}
+
+# Prints one `pid profile` line per daemon this run leaked.
+leaked_test_daemons() {
+    temp_root="${TMPDIR:-/tmp}"
+    temp_root="${temp_root%/}"
+    for pid in $(worktree_spacesd_pids); do
+        if printf '%s\n' "$spacesd_before_tests" | grep -qx "$pid"; then
+            continue
+        fi
+        db_path="$(spacesd_profile_db_path "$pid")"
+        case "$db_path" in
+            "$root/.build/test-profile/"* | "$temp_root"/*) printf '%s %s\n' "$pid" "$db_path" ;;
+        esac
+    done
+}
+
+fail_on_leaked_test_daemons() {
+    # A daemon a test stopped properly may still be exiting; wait for those, not for leaks.
+    attempts=0
+    leaked="$(leaked_test_daemons)"
+    while [ -n "$leaked" ] && [ "$attempts" -lt 20 ]; do
+        sleep 0.5
+        attempts=$((attempts + 1))
+        leaked="$(leaked_test_daemons)"
+    done
+    if [ -n "$leaked" ]; then
+        echo "The test run left spacesd daemons running (pid, profile database):" >&2
+        printf '%s\n' "$leaked" | sed 's/^/  /' >&2
+        echo "A test started a real daemon and did not stop it. Stub the daemon-facing call or stop the daemon in teardown." >&2
+        exit 1
     fi
 }
 

@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import spacesclientcore
 import spacesdevicecore
+import spacesterminalcore
 import workspacecore
 
 /// Owns the Prompts pane and the merged prompt library behind it, the sidebar count, and the command
@@ -77,6 +78,12 @@ import workspacecore
     }
 
     private func fetch(deviceID: String, record: SpacesPairedDeviceRecord) {
+        // A test process has no daemon to answer, and the local device's credential recovery would start a
+        // real `spacesd` that outlives the run. Treated as the offline path.
+        guard !SpacesTestHost.isRunningUnderXCTest() else {
+            library.fetchFailed(deviceID: deviceID)
+            return
+        }
         let context = requestContext(for: record)
         Task { @MainActor [weak self] in
             let result = await Task.detached(priority: .userInitiated) { Result { try SpacesDeviceClient.listSavedPrompts(context: context) } }.value
