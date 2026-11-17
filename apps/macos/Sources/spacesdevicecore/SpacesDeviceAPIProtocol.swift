@@ -764,13 +764,17 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     /// successfully. The synthesized initializer requires every key regardless of the memberwise-init
     /// defaults above, so a missing key would fail decoding of the *entire* overview -- workspaces and
     /// sessions included -- rather than just leaving the new field empty.
+    ///
+    /// `workspaceIDsWithTeardownInFlight` is the exception and is required: an absent list defaulted to
+    /// empty would read as "no teardown running", which tells a client a workspace that is still being
+    /// torn down is gone or that its delete failed. A daemon that omits it is a version mismatch.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         projects = try container.decodeIfPresent([SpacesDeviceProjectSummary].self, forKey: .projects) ?? []
         workspaces = try container.decode([SpacesDeviceWorkspaceSummary].self, forKey: .workspaces)
         sessions = try container.decode([SpacesDeviceTerminalSessionSummary].self, forKey: .sessions)
         retainedTerminalSessionIDs = try container.decodeIfPresent([String].self, forKey: .retainedTerminalSessionIDs) ?? []
-        workspaceIDsWithTeardownInFlight = try container.decodeIfPresent([String].self, forKey: .workspaceIDsWithTeardownInFlight) ?? []
+        workspaceIDsWithTeardownInFlight = try container.decode([String].self, forKey: .workspaceIDsWithTeardownInFlight)
         daemonStatus = try container.decode(TerminalServiceDaemonStatus.self, forKey: .daemonStatus)
         automations = try container.decodeIfPresent([TerminalServiceAutomationSummary].self, forKey: .automations) ?? []
         automationRuns = try container.decodeIfPresent([TerminalServiceAutomationRunSummary].self, forKey: .automationRuns) ?? []

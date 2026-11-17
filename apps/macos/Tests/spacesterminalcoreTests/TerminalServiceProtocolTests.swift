@@ -11,7 +11,7 @@ import XCTest
 final class TerminalServiceProtocolTests: XCTestCase {
     func testRequestAndResponseRoundTripThroughCodec() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-1", backend: .ghosttyEmbedded, lifetimePolicy: .whileAttached, title: "shell", workingDirectory: "/tmp/work",
+            sessionID: "session-1", backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "shell", workingDirectory: "/tmp/work",
             shell: "/bin/zsh", command: "cat", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let manifest = TerminalServiceWorkspaceRuntimeManifest(
             workspaceID: "workspace-1", projectID: "project-1", deviceID: "host-1", location: .remote, localPath: "/local/work",
@@ -44,7 +44,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let response = TerminalServiceResponse(
             ok: true, message: "Started.",
             session: TerminalServiceSessionSummary(
-                id: "session-1", title: "shell", workingDirectory: "/tmp/work", backend: .ghosttyEmbedded, lifetimePolicy: .whileAttached,
+                id: "session-1", title: "shell", workingDirectory: "/tmp/work", backend: .ghosttyEmbedded, lifetimePolicy: .persistent,
                 state: .running, servicePID: 123, childPID: 456, controlSocketPath: "/tmp/control.sock", outputPath: "/tmp/output.log"),
             commandResult: TerminalServiceCommandResult(exitCode: 0, logPath: "/tmp/setup.log"),
             controlResponse: TerminalControlResponse(ok: true, message: "sent"),

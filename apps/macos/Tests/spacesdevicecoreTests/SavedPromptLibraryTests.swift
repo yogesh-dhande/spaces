@@ -137,6 +137,20 @@
             let stripped = try JSONSerialization.data(withJSONObject: object)
             #expect(throws: DecodingError.self) { try JSONDecoder().decode(SpacesDeviceOverviewPayload.self, from: stripped) }
         }
+
+        /// An absent list must not read as "no teardown in flight": that is the wrong answer for the one
+        /// field that tells a client a still-listed workspace is being deleted rather than gone or failed.
+        @Test func anOverviewWithoutTheTeardownInFlightListDoesNotDecode() throws {
+            let overview = SpacesDeviceOverviewPayload(
+                workspaces: [], sessions: [], workspaceIDsWithTeardownInFlight: ["ws-1"],
+                daemonStatus: TerminalServiceDaemonStatus(version: "t", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0))
+            let encoded = try JSONEncoder().encode(overview)
+            #expect(try JSONDecoder().decode(SpacesDeviceOverviewPayload.self, from: encoded).workspaceIDsWithTeardownInFlight == ["ws-1"])
+            var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            object.removeValue(forKey: "workspaceIDsWithTeardownInFlight")
+            let stripped = try JSONSerialization.data(withJSONObject: object)
+            #expect(throws: DecodingError.self) { try JSONDecoder().decode(SpacesDeviceOverviewPayload.self, from: stripped) }
+        }
     }
 
 #endif

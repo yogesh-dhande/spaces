@@ -5750,7 +5750,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
-    /// `hasLiveAttachments()` is what the daemon's `.whileAttached` reaper reads instead of the durable
+    /// `hasLiveAttachments()` is what the daemon's tracked-window pruning reads instead of the durable
     /// mirror (`TerminalSessionPersistence.liveAttachments`), because that mirror write for a just-applied
     /// attach can still be queued behind a contended write lock. An attach updates the in-memory snapshot
     /// synchronously before its mirror write is even enqueued to run, so this must answer true right away,
@@ -5820,7 +5820,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
-    /// The base case for the daemon reaper's `.whileAttached` check: a session with no attachments at all
+    /// The base case for the daemon's tracked-window pruning check: a session with no attachments at all
     /// must not report one.
     func testHasLiveAttachmentsIsFalseWithNoAttachments() async throws {
         try await TerminalEngineActor.run {

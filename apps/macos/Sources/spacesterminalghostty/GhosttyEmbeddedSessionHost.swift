@@ -703,15 +703,14 @@
 
         /// Whether the in-memory attachment authority (`currentAttachmentSnapshot()`) currently has any live
         /// attachment, per `TerminalSessionAttachmentSnapshot.liveAttachments` (active AND lease-fresh for the
-        /// client kinds a lease governs). The daemon's `.whileAttached` reaper calls this instead of reading
+        /// client kinds a lease governs). The daemon's tracked-window pruning calls this instead of reading
         /// the durable mirror: this core is the single writer of its own attachment rows, so memory is always
         /// at least as current as the database, and a DB read can observe an attach whose durable mirror is
-        /// still queued behind a contended write lock as "no attachment" and reap a session with a live owner.
+        /// still queued behind a contended write lock as "no attachment" and prune a window a client holds.
         ///
         /// A nil snapshot means the cache was empty AND the reseeding disk read failed (see
         /// `currentAttachmentSnapshot`), i.e. attachment state is genuinely unknown. Answering `true` in that
-        /// case preserves the old DB-reading reaper's `try?` guard, which skipped the session on a failed read
-        /// rather than treating a read failure as grounds to reap it.
+        /// case means a failed read is never treated as grounds to drop an attached session.
         public func hasLiveAttachments(now: Date = Date()) -> Bool {
             guard let snapshot = currentAttachmentSnapshot() else { return true }
             return !snapshot.liveAttachments(now: now).isEmpty
@@ -1074,7 +1073,7 @@
         /// multi-second scale, so durable staleness of a coalesced touch between writes is harmless.
         ///
         /// The in-memory half runs on EVERY touch, for every client kind — it is what keeps this session's own
-        /// stale-client expiry and owner gating honest. The daemon's own inactive-session reaper reads that
+        /// stale-client expiry and owner gating honest. The daemon's tracked-window pruning reads that
         /// same in-memory snapshot (`hasLiveAttachments`) rather than the durable column, so it never lags
         /// behind an uncommitted touch either. The durable write runs for every kind too — a `local` client
         /// is a separate process reaching this daemon over a unix socket, exactly as exposed to going stale

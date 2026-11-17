@@ -278,7 +278,7 @@
 
         // MARK: - `hasLiveAttachments`
 
-        /// `hasLiveAttachments()` is what the daemon's `.whileAttached` reaper reads instead of the durable
+        /// `hasLiveAttachments()` is what the daemon's tracked-window pruning reads instead of the durable
         /// mirror, because this core's own attachment writes are the only writes to its rows and memory is
         /// therefore always at least as current as a mirror those writes are still queued behind. Checking it
         /// synchronously, on the same engine-actor hop as the attach and before the queue is ever drained,
@@ -324,7 +324,7 @@
             await shutDownAndDrain(core)
         }
 
-        /// The base case for the daemon reaper's `.whileAttached` check: a session with no attachments at all
+        /// The base case for the daemon's tracked-window pruning check: a session with no attachments at all
         /// must not report one.
         @Test func hasLiveAttachmentsIsFalseWithNoAttachments() async throws {
             let paths = try makeTemporaryPaths()
@@ -519,8 +519,8 @@
         /// close to the top of resume as possible, since the durable attachment rows it reads there are
         /// exactly what a pre-handoff image committed before this core existed. If a failed read on that
         /// reseed cached an empty snapshot instead of nil, `hasLiveAttachments()` would answer false for a
-        /// session the durable rows say is still owned, and the daemon's `.whileAttached` reaper would tear
-        /// down a live, attached session on nothing more than a transient disk hiccup, with no read left
+        /// session the durable rows say is still owned, and the daemon's tracked-window pruning would drop
+        /// a live, attached session's window on nothing more than a transient disk hiccup, with no read left
         /// that would ever notice the mistake. Caching nil on a failed read instead means `hasLiveAttachments`
         /// answers conservatively (live) while the database stays broken, and the next access after it is
         /// restored retries the read and recovers the real, attached answer.
