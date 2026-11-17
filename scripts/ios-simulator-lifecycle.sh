@@ -79,83 +79,150 @@ spaces_ios_simulator_wait_for_boot() {
     boot_status_polls=$(( boot_status_polls + 1 ))
   done
 
-  wait "$boot_status_pid"
-  SPACES_IOS_SIMULATOR_LAST_BOOTSTATUS_EXIT=$?
+  SPACES_IOS_SIMULATOR_LAST_BOOTSTATUS_EXIT=0
+  wait "$boot_status_pid" || SPACES_IOS_SIMULATOR_LAST_BOOTSTATUS_EXIT=$?
   return 0
 }
 
+# Exit status of spaces_ios_simulator_boot_if_needed when the boot never completed within its
+# deadline, distinct from a simulator in an unusable state or a failing bootstatus, so a caller can
+# tell a wedged boot (infrastructure) from a real failure and recover or report it as such.
+SPACES_IOS_SIMULATOR_BOOT_WEDGED_STATUS=75
+
+# Boots `udid` if it is shut down and waits for it to finish. One attempt: a boot that exceeds its
+# deadline returns SPACES_IOS_SIMULATOR_BOOT_WEDGED_STATUS and leaves recovery to the caller,
+# because the right recovery depends on who owns the device (see spaces_ios_simulator_create_fresh_like).
 spaces_ios_simulator_boot_if_needed() {
   local udid="$1"
-  # Healthy boots take ~30-60s; 240s leaves ~4x headroom for a single attempt while still
-  # letting two attempts (see the retry loop below) fit under a CI step's outer ceiling.
+  # Healthy boots take ~30-60s; 240s leaves ~4x headroom, and still lets a caller that recovers
+  # from a wedge with a second boot fit both under a CI step's outer ceiling.
   local boot_status_deadline="${SPACES_IOS_SIMULATOR_BOOT_TIMEOUT:-240}"
-  local -r max_attempts=2
-  local attempt
   local state
 
-  for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
-    state="$(spaces_ios_simulator_state "$udid")"
+  # Every step checks its own status instead of relying on `set -e`: a caller that branches on this
+  # function's status (`f || status=$?`) runs it with errexit disabled throughout, and an ignored
+  # failed boot would record a simulator another workflow booted as owned, to be shut down at teardown.
+  state="$(spaces_ios_simulator_state "$udid")" || return
 
-    case "$state" in
-      Booted)
-        ;;
-      Shutdown)
-        printf 'Booting iOS simulator %s...\n' "$udid" >&2
-        xcrun simctl boot "$udid" >&2
-        # Record ownership at most once: a retry below boots the same udid again, but the
-        # caller's EXIT trap (spaces_ios_simulator_shutdown_owned) must shut it down exactly
-        # once, not once per line recorded here.
-        case $'\n'"$SPACES_OWNED_IOS_SIMULATOR_UDIDS"$'\n' in
-          *$'\n'"$udid"$'\n'*)
-            ;;
-          *)
-            if [[ -n "$SPACES_OWNED_IOS_SIMULATOR_UDIDS" ]]; then
-              SPACES_OWNED_IOS_SIMULATOR_UDIDS+=$'\n'
-            fi
-            SPACES_OWNED_IOS_SIMULATOR_UDIDS+="$udid"
-            ;;
-        esac
-        ;;
-      *)
-        printf 'iOS simulator %s is neither Shutdown nor Booted (state: %s).\n' "$udid" "$state" >&2
-        return 1
-        ;;
-    esac
-
-    if spaces_ios_simulator_wait_for_boot "$udid" "$boot_status_deadline"; then
-      return "$SPACES_IOS_SIMULATOR_LAST_BOOTSTATUS_EXIT"
-    fi
-
-    if (( attempt == max_attempts )); then
+  case "$state" in
+    Booted)
+      ;;
+    Shutdown)
+      printf 'Booting iOS simulator %s...\n' "$udid" >&2
+      local boot_status=0
+      xcrun simctl boot "$udid" >&2 || boot_status=$?
+      if (( boot_status != 0 )); then
+        return "$boot_status"
+      fi
+      # Record ownership before waiting: the caller's EXIT trap (spaces_ios_simulator_shutdown_owned)
+      # must shut this simulator down even if the wait wedges. Once per udid, so the trap shuts it
+      # down exactly once however many times the caller boots it.
+      case $'\n'"$SPACES_OWNED_IOS_SIMULATOR_UDIDS"$'\n' in
+        *$'\n'"$udid"$'\n'*)
+          ;;
+        *)
+          if [[ -n "$SPACES_OWNED_IOS_SIMULATOR_UDIDS" ]]; then
+            SPACES_OWNED_IOS_SIMULATOR_UDIDS+=$'\n'
+          fi
+          SPACES_OWNED_IOS_SIMULATOR_UDIDS+="$udid"
+          ;;
+      esac
+      ;;
+    *)
+      printf 'iOS simulator %s is neither Shutdown nor Booted (state: %s).\n' "$udid" "$state" >&2
       return 1
-    fi
+      ;;
+  esac
 
-    # A wedged bootstatus wait usually means CoreSimulator itself is stuck, not that the boot
-    # will ever complete on its own. Resetting the device (shutdown + erase) was tried first and
-    # did not help: a wedged boot came back and failed the retry the same way, which says the stuck
-    # layer is CoreSimulator itself rather than the device's contents. So reset the service --
-    # shut every device down, then kill the daemon, which launchd respawns clean on the next simctl
-    # call. Everything here tolerates failure: the device may already be down and the daemon may
-    # already be gone, and either way the retry below is what we actually care about.
-    printf 'iOS simulator %s appears wedged; resetting CoreSimulator before retrying...\n' "$udid" >&2
-    xcrun simctl shutdown all >&2 || true
-    killall -9 com.apple.CoreSimulator.CoreSimulatorService >/dev/null 2>&1 || true
-  done
+  if spaces_ios_simulator_wait_for_boot "$udid" "$boot_status_deadline"; then
+    return "$SPACES_IOS_SIMULATOR_LAST_BOOTSTATUS_EXIT"
+  fi
+  return "$SPACES_IOS_SIMULATOR_BOOT_WEDGED_STATUS"
+}
+
+# Devices this process created (see spaces_ios_simulator_create_fresh_like), deleted at teardown.
+SPACES_CREATED_IOS_SIMULATOR_UDIDS=""
+
+SPACES_FRESH_IOS_SIMULATOR_UDID=""
+
+# Creates a new, never-booted simulator of the same device type and runtime as `udid` and leaves its
+# udid in SPACES_FRESH_IOS_SIMULATOR_UDID. This is the recovery for a boot that wedged: a CoreSimulator
+# reset on the same device kept wedging in CI, while a device with no prior state is the thing that
+# does not carry over whatever wedged. The original is left alone rather than erased or deleted, because it may be a
+# developer's own simulator with installed apps; the new one is lane-owned and is deleted at
+# teardown by spaces_ios_simulator_shutdown_owned. Not for callers that hold a device by udid
+# across steps (paired mobile E2E): the replacement has a different udid.
+spaces_ios_simulator_create_fresh_like() {
+  local udid="$1"
+  local device_type
+  local runtime
+
+  read -r device_type runtime < <(
+    python3 - "$udid" <<'PY'
+import json
+import subprocess
+import sys
+
+udid = sys.argv[1]
+payload = json.loads(
+    subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"], text=True)
+)
+for runtime, runtime_devices in payload.get("devices", {}).items():
+    for device in runtime_devices:
+        if device.get("udid") == udid:
+            print(device["deviceTypeIdentifier"], runtime)
+            raise SystemExit(0)
+raise SystemExit(f"Available simulator not found: {udid}")
+PY
+  ) || return
+
+  # Command substitution runs in a subshell, so the udid is captured and then recorded in this
+  # shell, where the caller's EXIT trap can read it.
+  SPACES_FRESH_IOS_SIMULATOR_UDID="$(xcrun simctl create "Spaces iOS tests $$" "$device_type" "$runtime")" || return
+  if [[ -n "$SPACES_CREATED_IOS_SIMULATOR_UDIDS" ]]; then
+    SPACES_CREATED_IOS_SIMULATOR_UDIDS+=$'\n'
+  fi
+  SPACES_CREATED_IOS_SIMULATOR_UDIDS+="$SPACES_FRESH_IOS_SIMULATOR_UDID"
+}
+
+# Shuts down one test-owned simulator and drops it from the owned list, so teardown does not shut
+# it down a second time (which would log a failure for a device that is already down).
+spaces_ios_simulator_shutdown_one_owned() {
+  local udid="$1"
+  local remaining=""
+  local owned
+
+  printf 'Shutting down test-owned iOS simulator %s...\n' "$udid" >&2
+  if ! xcrun simctl shutdown "$udid" >&2; then
+    printf 'Failed to shut down test-owned iOS simulator %s.\n' "$udid" >&2
+  fi
+  while IFS= read -r owned; do
+    [[ -n "$owned" && "$owned" != "$udid" ]] || continue
+    remaining+="${remaining:+$'\n'}$owned"
+  done <<<"$SPACES_OWNED_IOS_SIMULATOR_UDIDS"
+  SPACES_OWNED_IOS_SIMULATOR_UDIDS="$remaining"
 }
 
 spaces_ios_simulator_shutdown_owned() {
   local exit_code="${1:-$?}"
   local owned_udids="$SPACES_OWNED_IOS_SIMULATOR_UDIDS"
+  local created_udids="$SPACES_CREATED_IOS_SIMULATOR_UDIDS"
   local udid
 
-  SPACES_OWNED_IOS_SIMULATOR_UDIDS=""
+  SPACES_CREATED_IOS_SIMULATOR_UDIDS=""
   while IFS= read -r udid; do
     [[ -n "$udid" ]] || continue
-    printf 'Shutting down test-owned iOS simulator %s...\n' "$udid" >&2
-    if ! xcrun simctl shutdown "$udid" >&2; then
-      printf 'Failed to shut down test-owned iOS simulator %s.\n' "$udid" >&2
-    fi
+    spaces_ios_simulator_shutdown_one_owned "$udid"
   done <<<"$owned_udids"
+  SPACES_OWNED_IOS_SIMULATOR_UDIDS=""
+
+  while IFS= read -r udid; do
+    [[ -n "$udid" ]] || continue
+    printf 'Deleting test-created iOS simulator %s...\n' "$udid" >&2
+    if ! xcrun simctl delete "$udid" >&2; then
+      printf 'Failed to delete test-created iOS simulator %s.\n' "$udid" >&2
+    fi
+  done <<<"$created_udids"
 
   return "$exit_code"
 }
