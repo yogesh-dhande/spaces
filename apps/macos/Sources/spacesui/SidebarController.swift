@@ -268,6 +268,65 @@ private struct DeviceSyncState {
     private static let workspaceIndent: CGFloat = 16
     private static let runtimeTargetShortcutSlotWidth: CGFloat = 20
 
+    /// The terminal session whose row is marked as the keystroke target. Sticky: set only by a terminal
+    /// pane gaining focus (see `SidebarFocusMarker`), so focus moving elsewhere leaves it in place.
+    private var focusMarkedSessionID: String?
+
+    /// The focus intent the workspace panel is restored with for the selection change in flight. The
+    /// outline's selection callback is the only door into `showWorkspaceDetail`, so a selection that must
+    /// not take the caret (see `terminalGainedFocus`) says so here for the duration of its
+    /// `selectWorkspace` call; every other selection restores with `.focus`.
+    private var selectionFocusIntent: TerminalOpenFocusIntent = .focus
+
+    private func isFocusMarked(_ item: SidebarRuntimeTargetItem) -> Bool {
+        SidebarFocusMarker.marksRow(kind: item.kind, sessionID: item.sessionID, markedSessionID: focusMarkedSessionID)
+    }
+
+    /// Moves the marker to a terminal that just gained focus, then brings its workspace into view.
+    ///
+    /// Selection goes through `selectWorkspace`, the same path the app toggle takes when it selects the
+    /// workspace of the pane focused before a summon: it neither asks about unsaved prompt edits (the
+    /// draft stays for the return) nor takes keyboard focus from the terminal that was just focused.
+    func terminalGainedFocus(sessionID: String) {
+        let outcome = SidebarFocusMarker.outcome(
+            previousMarkedSessionID: focusMarkedSessionID, focusedSessionID: sessionID, location: focusedRowLocation(sessionID: sessionID),
+            selectedWorkspaceID: host.selectedWorkspaceID)
+        let previousMarkedSessionID = focusMarkedSessionID
+        focusMarkedSessionID = outcome.markedSessionID
+        if let projectID = outcome.expandProjectID { toggleProjectExpanded(projectID: projectID) }
+        if let workspaceID = outcome.selectWorkspaceID, let (_, workspace) = findWorkspace(id: workspaceID) {
+            // The terminal that just gained focus may live in a panel window; restoring the selected
+            // workspace's own panel with `.focus` would activate its pane once prepared and pull the
+            // keyboard away from it.
+            selectionFocusIntent = SidebarFocusMarker.selectionFocusIntent
+            defer { selectionFocusIntent = .focus }
+            selectWorkspace(workspace)
+        }
+        reloadRuntimeTargetRows(sessionIDs: Set([previousMarkedSessionID, focusMarkedSessionID].compactMap { $0 }))
+    }
+
+    private func focusedRowLocation(sessionID: String) -> SidebarFocusMarker.RowLocation? {
+        guard let workspaceID = host.clientWorkspaceID(forTerminalSession: sessionID), let (project, workspace) = findWorkspace(id: workspaceID),
+            SidebarVisibility.isVisibleWorkspace(workspace, inProject: project),
+            let item = runtimeTargetItems(workspaceID: workspaceID).first(where: { $0.sessionID == sessionID })
+        else { return nil }
+        return SidebarFocusMarker.RowLocation(
+            workspaceID: workspaceID, projectID: project.id, isProjectCollapsed: project.isCollapsed, kind: item.kind)
+    }
+
+    private func reloadRuntimeTargetRows(sessionIDs: Set<String>) {
+        guard !sessionIDs.isEmpty else { return }
+        var rows = IndexSet()
+        for row in 0..<host.outlineView.numberOfRows {
+            guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef, case .runtimeTarget(_, _, let item) = ref.item,
+                let sessionID = item.sessionID, sessionIDs.contains(sessionID)
+            else { continue }
+            rows.insert(row)
+        }
+        guard !rows.isEmpty else { return }
+        host.outlineView.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integer: 0))
+    }
+
     func invalidateVisibleWorkspacesCache() {
         visibleWorkspacesCache.removeAll(keepingCapacity: true)
         runtimeTargetItemsCache.removeAll(keepingCapacity: true)
@@ -1835,7 +1894,8 @@ private struct DeviceSyncState {
         .runtimeTarget(
             SidebarRuntimeTargetRowSignature(
                 device: device, item: item, nestedUnderWorkspace: nestedUnderWorkspace,
-                isRenaming: renamingRuntimeTarget.map { $0.workspaceID == workspace.id && $0.item.key == item.key } ?? false))
+                isRenaming: renamingRuntimeTarget.map { $0.workspaceID == workspace.id && $0.item.key == item.key } ?? false,
+                isFocusMarked: isFocusMarked(item)))
     }
 
     /// Resolves a project by id through `projectsByID`, rebuilding that position index on first use
@@ -2642,7 +2702,8 @@ private struct DeviceSyncState {
             // Name then secondary text, the two-part shape a process row already uses (see the Alerts
             // table's combined column, `AlertsController.alertsCombinedCell`): the name goes semibold once
             // something trails it, so the two halves stay tellable apart at the sidebar's one type size.
-            titleLabel.font = item.detail == nil ? Typography.metadata : Typography.metadataTitle
+            let titleFont = item.detail == nil ? Typography.metadata : Typography.metadataTitle
+            titleLabel.font = isFocusMarked(item) ? NSFontManager.shared.convert(titleFont, toHaveTrait: .boldFontMask) : titleFont
             titleLabel.textColor = runtimeTargetTextColor(item: item, isSelected: isWorkspaceSelected)
             titleLabel.lineBreakMode = .byTruncatingTail
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -2684,6 +2745,22 @@ private struct DeviceSyncState {
                 pinGlyph.setContentCompressionResistancePriority(.required, for: .horizontal)
                 row.addArrangedSubview(pinGlyph)
             }
+        }
+
+        if isFocusMarked(item) {
+            // Inset within the selected-workspace region (which starts at the workspace indent for a git
+            // project) so the fill reads as a row inside it, not a second region.
+            let fill = NSView()
+            fill.translatesAutoresizingMaskIntoConstraints = false
+            fill.wantsLayer = true
+            fill.layer?.cornerRadius = 5
+            bindAppearanceReactiveLayer(fill) { [weak self] view in view.layer?.backgroundColor = self?.sidebarFocusedRowFillColor().cgColor }
+            cell.addSubview(fill)
+            NSLayoutConstraint.activate([
+                fill.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: (nestedUnderWorkspace ? Self.workspaceIndent : 0) + 6),
+                fill.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6), fill.topAnchor.constraint(equalTo: cell.topAnchor),
+                fill.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -bottomPadding),
+            ])
         }
 
         cell.addSubview(row)
@@ -3041,6 +3118,10 @@ private struct DeviceSyncState {
     /// rather than a teal-tinted card, so the leading teal rail is the only accent.
     func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarThemeColor(light: (0, 0, 0), dark: (255, 255, 255), alpha: 0.06) }
 
+    /// Neutral fill behind the focused terminal's row, brighter than the selected-workspace fill so it
+    /// reads as a row within that region. Neutral on purpose: the row keeps its status tint.
+    func sidebarFocusedRowFillColor() -> NSColor { sidebarThemeColor(light: (0, 0, 0), dark: (255, 255, 255), alpha: 0.11) }
+
     /// Teal rail drawn on the leading edge of a selected sidebar row/region — the selection's sole accent.
     /// Matches the focused-pane accent bar so the sidebar and terminal chrome share one accent.
     func sidebarSelectionRailColor() -> NSColor { sidebarThemeColor(light: (15, 122, 118), dark: (89, 219, 205), alpha: 0.9) }
@@ -3249,7 +3330,7 @@ private struct DeviceSyncState {
             // A non-git project has no workspace row to expand, but a git workspace that was only
             // transiently expanded still needs to collapse now that the selection moved to this project.
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
-            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
+            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation, focusIntent: selectionFocusIntent)
         case .workspace(let project, let workspace):
             host.selectedProjectID = project.id
             // See the ordering comment in the `.project` case above.
@@ -3257,7 +3338,7 @@ private struct DeviceSyncState {
             host.selectedWorkspaceID = workspace.id
             host.showingSettings = false
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
-            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
+            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation, focusIntent: selectionFocusIntent)
         }
         refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,

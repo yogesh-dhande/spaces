@@ -42,8 +42,7 @@ struct SidebarOutlineDiffTests {
             signature: .device(
                 SidebarDeviceRowSignature(
                     displayName: device.displayName ?? "", loadState: device.loadState ?? .loaded, compatibilityActionTitle: nil, isLocal: false,
-                    offersRetry: device.loadState?.isOffline == true, isUpdatePending: false,
-                    offersSelfUpdate: offersSelfUpdate)))
+                    offersRetry: device.loadState?.isOffline == true, isUpdatePending: false, offersSelfUpdate: offersSelfUpdate)))
     }
 
     private func projectRow(_ project: ProjectSummary, device: SidebarRowDeviceTreatment) -> SidebarOutlineRow {
@@ -70,7 +69,8 @@ struct SidebarOutlineDiffTests {
     private func targetRow(_ item: SidebarRuntimeTargetItem, workspaceID: String, device: SidebarRowDeviceTreatment) -> SidebarOutlineRow {
         SidebarOutlineRow(
             cacheKey: "rt:\(workspaceID):\(item.key)",
-            signature: .runtimeTarget(SidebarRuntimeTargetRowSignature(device: device, item: item, nestedUnderWorkspace: true, isRenaming: false)))
+            signature: .runtimeTarget(
+                SidebarRuntimeTargetRowSignature(device: device, item: item, nestedUnderWorkspace: true, isRenaming: false, isFocusMarked: false)))
     }
 
     /// A device header, one git project, one workspace, and that workspace's single target row.
