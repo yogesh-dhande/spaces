@@ -88,22 +88,24 @@ enum SpacesMobileUITestDriver {
         row.tap()
     }
 
-    static func leaveTerminalDetail(in app: XCUIApplication) {
+    /// Taps the terminal detail's back Button and requires the detail's chrome to go away. The
+    /// `terminal.back` identifier sits on an `Other` wrapper around the Button (`chromeButton` hides the
+    /// label's children), so `app.buttons["terminal.back"]` matches nothing; the Button is the wrapper's
+    /// child. A tap that leaves the detail mounted fails here, at the tap, rather than as a later
+    /// "list did not return" assertion with no hint that the tap itself was lost (#971).
+    static func leaveTerminalDetail(in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let chrome = app.otherElements["terminal.back"]
+        let button = chrome.buttons.firstMatch
         let deadline = Date().addingTimeInterval(10)
-        while Date() < deadline {
-            let button = app.buttons["terminal.back"].firstMatch
-            if button.exists, button.isHittable {
-                button.tap()
-                return
-            }
-            let anyBack = app.descendants(matching: .any)["terminal.back"].firstMatch
-            if anyBack.exists, anyBack.isHittable {
-                anyBack.tap()
-                return
-            }
+        while !(button.exists && button.isHittable), Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.09, dy: 0.11)).tap()
+        guard button.exists, button.isHittable else {
+            XCTFail("The terminal back button was not on screen", file: file, line: line)
+            return
+        }
+        button.tap()
+        XCTAssertTrue(waitForDisappearance(of: chrome, timeout: 20), "Tapping the terminal back button left the detail mounted", file: file, line: line)
     }
 
     // MARK: - Assertion helpers
