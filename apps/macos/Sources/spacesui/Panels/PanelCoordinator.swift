@@ -508,6 +508,9 @@ import spacesterminalcore
         guard current != lastFocusedSessionIDForCycleRow else { return }
         lastFocusedSessionIDForCycleRow = current
         host.sidebar.refreshCycleModeRow()
+        // Only a terminal gaining focus moves the sidebar's focus marker; focus leaving for a code pane
+        // or another window (nil) leaves the last terminal's row marked.
+        if let current { host.sidebar.terminalGainedFocus(sessionID: current) }
     }
 
     /// The key-window change handler for the main window and every global panel window calls this:

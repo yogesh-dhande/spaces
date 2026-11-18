@@ -84,4 +84,5 @@ struct SidebarRuntimeTargetRowSignature: Hashable, Sendable {
     let item: SidebarRuntimeTargetItem
     let nestedUnderWorkspace: Bool
     let isRenaming: Bool
+    let isFocusMarked: Bool
 }

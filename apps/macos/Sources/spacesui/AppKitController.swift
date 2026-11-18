@@ -4505,7 +4505,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary, presentation: DetailPanePresentation = .backgroundRefresh) {
+    func showWorkspaceDetail(
+        project: ProjectSummary, workspace: WorkspaceSummary, presentation: DetailPanePresentation = .backgroundRefresh,
+        focusIntent: TerminalOpenFocusIntent = .focus
+    ) {
         // Fully blocked, scoped to the owning device: if its daemon is wire-incompatible, the only
         // detail surface is the compatibility banner. Other devices' workspaces stay usable.
         // The owning device comes from the row's own project (callers always pass the pair the
@@ -4577,7 +4580,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // The right panel is the workspace's panel (tabs of terminal panes) and
         // nothing else; workspace identity and actions live in the footer strip below.
         let scope = PanelScope.workspace(deviceID: workspaceDeviceID, workspaceID: workspace.id)
-        panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .focus)
+        panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: focusIntent)
         // Decided here, after the persisted layout is adopted, so a relaunch that restores panes into
         // this panel reads as the arranged panel it is, and ahead of the panel view's attachment below,
         // which the auto-open's own asynchronous open does not wait for.

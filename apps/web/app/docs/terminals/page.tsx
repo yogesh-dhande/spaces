@@ -37,6 +37,13 @@ export default function TerminalsDocsPage() {
           selected (for example while Alerts is open), it does nothing. Rename one from its sidebar row&apos;s context
           menu (&quot;Rename&quot;).
         </Prose>
+        <Prose>
+          The sidebar marks the row of the terminal that last had keyboard focus with a soft fill and
+          a bold name, so you can see which row gets your keystrokes. The mark stays when you switch
+          to another app or to the Editor. Focusing a terminal expands its project if it was
+          collapsed, and while a workspace is selected, focusing a terminal in another workspace
+          selects that one. Alerts, Automations, Resources, and Prompts stay open.
+        </Prose>
       </Section>
 
       <Section id="session-picker" title="The session picker">
