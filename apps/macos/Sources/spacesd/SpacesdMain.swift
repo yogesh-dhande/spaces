@@ -399,8 +399,7 @@ enum SpacesDaemonErrorClassification {
         // two transports" seam. Both closures run on the Device API connection queue (never main), and the
         // service serializes internally, so calling it directly is deadlock-safe (the one-way rule).
         automationOperations: daemonAutomationOperations(),
-        onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } },
-        selfUpdateController: selfUpdateService,
+        onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } }, selfUpdateController: selfUpdateService,
         // Same queue guarantee as the closures above (the Device API's own connection-handling queue, never
         // main), so the engine hop is deadlock-safe. Lets a Device API `.state` read — one per pane attach —
         // be answered from the live core instead of dialing that core's own subscription socket.
@@ -1537,25 +1536,37 @@ enum SpacesDaemonErrorClassification {
         do { try await startSharedServices() } catch { writeStandardError("spacesd handoff_resume_in_place_failed error=\(error)\n") }
     }
 
-    /// `execv`s `path` with this process's original argv verbatim. Original argv matters: the new
-    /// image's `ghostty_init` consumes it. `execv` either replaces this image (never returning) or
-    /// returns -1 on failure; the strdup'd argv is only freed on the failure path (a leak on the
-    /// success path is irrelevant — the image is gone). `nonisolated`: it touches no daemon state (only
-    /// `CommandLine`/`execv`), and `performExecHandoff` calls it from inside the engine-isolated
-    /// `withValidatedHandoffOutputsForExec`'s `operation` closure.
+    /// Replaces this image with `path`, passing this process's original argv verbatim (the new image's
+    /// `ghostty_init` consumes it). Returns only on failure, with `errno` set; the strdup'd argv is freed
+    /// only then (on success the image is gone). `nonisolated`: it touches no daemon state, and
+    /// `performExecHandoff` calls it from inside the engine-isolated `withValidatedHandoffOutputsForExec`'s
+    /// `operation` closure.
     private nonisolated func execStagedBinary(path: String) {
-        // POSIX exec preserves the calling THREAD's signal mask, and this runs on the terminal engine
-        // executor — a libdispatch worker, which blocks the terminal signals (SIGTERM/SIGHUP/SIGINT) so
-        // they are delivered to the main thread instead. Without resetting the mask here the replacement
-        // daemon would start with those signals blocked and ignore graceful shutdown (they would stay
-        // pending, never handled). Reset to an empty mask immediately before `execv`, exactly as the PTY
-        // child path does before its own exec (HostManagedPTYTerminalSessionDriver.resetSignalDispositionsForExec).
-        var emptyMask = sigset_t()
-        sigemptyset(&emptyMask)
-        sigprocmask(SIG_SETMASK, &emptyMask, nil)
         var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) }
         argv.append(nil)
-        path.withCString { pathPointer in _ = execv(pathPointer, &argv) }
+        #if os(macOS)
+            // Not `execv`: it keeps a TCC responsibility record naming the executable an app update deleted, so
+            // tccd denies privacy checks for every program in a Spaces terminal (#979). `DaemonExecSpawnAttributes`
+            // explains the disclaim. SETEXEC inherits descriptors without FD_CLOEXEC exactly as `execv` does,
+            // which the handoff relies on for the PTY masters.
+            var attributes = DaemonExecSpawnAttributes.make()
+            if attributes != nil {
+                defer { posix_spawnattr_destroy(&attributes) }
+                let status = path.withCString { posix_spawn(nil, $0, nil, &attributes, argv, environ) }
+                errno = status
+            } else {
+                errno = EINVAL
+            }
+        #else
+            // POSIX exec preserves the calling THREAD's signal mask, and this runs on the terminal engine
+            // executor, a libdispatch worker that blocks the terminal signals (SIGTERM/SIGHUP/SIGINT). Without
+            // resetting the mask the replacement daemon would ignore graceful shutdown, exactly as the PTY child
+            // path avoids before its own exec (HostManagedPTYTerminalSessionDriver.resetSignalDispositionsForExec).
+            var emptyMask = sigset_t()
+            sigemptyset(&emptyMask)
+            sigprocmask(SIG_SETMASK, &emptyMask, nil)
+            path.withCString { pathPointer in _ = execv(pathPointer, &argv) }
+        #endif
         for pointer in argv where pointer != nil { free(pointer) }
     }
 
@@ -3562,9 +3573,7 @@ enum SpacesDaemonErrorClassification {
             if let self, !self.handoffInProgress { self.selfUpdateService?.tick() }
             // `garbageCollectRemovedSessionsIfDue` is engine-isolated (it reads `sessionCores`), so this
             // hops onto the engine actor directly rather than the main actor the timer callback fires on.
-            Task { @TerminalEngineActor [weak self] in
-                self?.garbageCollectRemovedSessionsIfDue()
-            }
+            Task { @TerminalEngineActor [weak self] in self?.garbageCollectRemovedSessionsIfDue() }
         }
         if let lifecycleTimer { RunLoop.main.add(lifecycleTimer, forMode: .common) }
     }
