@@ -16,9 +16,10 @@ source "$root/scripts/silence-watchdog.sh"
 # shell variable.
 verify_stall_seconds="${SPACES_VERIFY_STALL_SECONDS:-600}"
 
-# PID of the backgrounded iOS lane process started by run_verify_steps, so
-# handle_interrupt() can tear it down. Empty until that lane is launched.
+# PIDs of the backgrounded iOS and Editor web lane processes started by run_verify_steps, so
+# handle_interrupt() can tear them down. Empty until that lane is launched.
 ios_lane_pid=""
+web_lane_pid=""
 
 # Per-lane state for the closing summary. Each lane advances from "not started" to "started" to a
 # result as run_verify_steps progresses, so the summary describes what this run actually did. The
@@ -27,6 +28,7 @@ ios_lane_pid=""
 # lanes as having run would overstate the run's coverage.
 coverage_lane_state="not started"
 ios_lane_state="not started"
+web_lane_state="not started"
 verify_interrupted=0
 
 render_lane_state() {
@@ -51,7 +53,8 @@ print_lane_summary() {
   fi
   printf '  macOS build, lint, unit tests   %s\n' "$(render_lane_state "$coverage_lane_state")"
   printf '  iOS tests                       %s\n' "$(render_lane_state "$ios_lane_state")"
-  if [ "$coverage_lane_state" = "not started" ] && [ "$ios_lane_state" = "not started" ]; then
+  printf '  Editor web app                  %s\n' "$(render_lane_state "$web_lane_state")"
+  if [ "$coverage_lane_state" = "not started" ] && [ "$ios_lane_state" = "not started" ] && [ "$web_lane_state" = "not started" ]; then
     printf '  the run ended during preparation (simulator lifecycle checks, Ghostty artifact sync,\n'
     printf '  formatting, lint, the SwiftPM build, or release bundle signing)\n'
   fi
@@ -80,6 +83,15 @@ run_verify_steps() {
   ios_lane_pid=$!
   ios_lane_state="started"
 
+  # The Editor web app lane runs only node (npm ci, vitest, typecheck, a scratch build) against
+  # apps/macos/CodePaneWeb, so it shares nothing with either Swift lane and overlaps them the same way.
+  local web_log="$root/.build/codepane-web-verify.log"
+  : >"$web_log"
+  printf 'Starting Editor web app lane in the background (log: %s)...\n' "$web_log"
+  "$root/scripts/codepane-web-lane.sh" >"$web_log" 2>&1 &
+  web_lane_pid=$!
+  web_lane_state="started"
+
   coverage_lane_state="started"
   local coverage_status=0
   "$root/scripts/coverage.sh" || coverage_status=$?
@@ -107,11 +119,32 @@ run_verify_steps() {
     echo "iOS test lane: FAILED (exit $ios_status)"
   fi
 
+  local web_status=0
+  wait "$web_lane_pid" || web_status=$?
+  web_lane_pid=""
+  if [ "$web_status" -eq 0 ]; then
+    web_lane_state="PASSED"
+  else
+    web_lane_state="FAILED (exit $web_status)"
+  fi
+
+  printf '\n--- Editor web app lane log (last 60 lines) ---\n'
+  tail -n 60 "$web_log" || true
+  printf -- '--- end Editor web app lane log ---\n\n'
+  if [ "$web_status" -eq 0 ]; then
+    echo "Editor web app lane: PASSED"
+  else
+    echo "Editor web app lane: FAILED (exit $web_status)"
+  fi
+
   if [ "$coverage_status" -ne 0 ]; then
     exit "$coverage_status"
   fi
   if [ "$ios_status" -ne 0 ]; then
     exit "$ios_status"
+  fi
+  if [ "$web_status" -ne 0 ]; then
+    exit "$web_status"
   fi
 }
 
@@ -144,6 +177,10 @@ handle_interrupt() {
     # lane is left running. That residual gap mirrors any other hard-kill of verify.sh and is left
     # for a future pass if it proves disruptive in practice.
     kill_silence_watchdog_process_tree "$ios_lane_pid"
+  fi
+  if [ -n "$web_lane_pid" ]; then
+    # The same descendant walk, so npm and its vitest workers do not outlive this script.
+    kill_silence_watchdog_process_tree "$web_lane_pid"
   fi
   exit 130
 }
