@@ -1,4 +1,4 @@
-import { vi } from "vitest";
+import { onTestFinished, vi } from "vitest";
 
 /**
  * A completion point for a result produced by the mocked bridge, so a test asserts after the work
@@ -28,9 +28,20 @@ function nextTurn(): Promise<void> {
 }
 
 export async function settled<T>(check: () => T): Promise<T> {
-  await nextTurn();
-  if (vi.isFakeTimers()) {
-    for (let round = 0; round < 100 && vi.getTimerCount() > 0; round++) await vi.advanceTimersToNextTimerAsync();
+  // A turn follows every fired timer, not just the first: a delayed reply resolves a promise whose
+  // continuation (and the next timer it arms) runs only once that turn has drained.
+  // Vitest does not cancel the wait of a test that timed out. Once its test is over, it must
+  // neither fire the next test's fake timers nor run `check` and resume the old test's steps.
+  let over = false;
+  onTestFinished(() => {
+    over = true;
+  });
+  for (let round = 0; ; round++) {
+    await nextTurn();
+    if (over) return new Promise<T>(() => {});
+    if (!vi.isFakeTimers() || vi.getTimerCount() === 0 || round >= 100) break;
+    await vi.advanceTimersToNextTimerAsync();
   }
+  if (over) return new Promise<T>(() => {});
   return check();
 }
