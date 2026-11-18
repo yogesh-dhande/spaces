@@ -23,18 +23,18 @@ function buildRow(row: string[], columnCount: number, cellTag: "th" | "td"): HTM
   return tr;
 }
 
-/** The first row is the header and stays visible while the body scrolls. */
-export function renderDelimitedTable(host: HTMLElement, table: DelimitedTable): void {
-  host.textContent = "";
+/** What the preview shows for a parsed table: the rows to render (the first is the header), the
+ *  column count they are padded to, and the truncation notes. Pure arithmetic over the parse, so the
+ *  caps and the cell budget can be checked without building the DOM they bound. */
+export interface DelimitedTablePlan {
+  rows: string[][];
+  columnCount: number;
+  notes: string[];
+}
 
+export function planDelimitedTable(table: DelimitedTable): DelimitedTablePlan {
   const retained = table.rows;
-  if (retained.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "preview-table-empty";
-    empty.textContent = "This file has no rows.";
-    host.appendChild(empty);
-    return;
-  }
+  if (retained.length === 0) return { rows: [], columnCount: 0, notes: [] };
 
   // The widest RETAINED row sets the column count: a ragged file (a header with fewer fields than a
   // data row, or vice versa) still gets every column represented, with the shorter rows padded to
@@ -48,21 +48,6 @@ export function renderDelimitedTable(host: HTMLElement, table: DelimitedTable): 
   const rowCountByCellBudget = Math.max(1, Math.floor(MAX_RENDERED_CELLS / Math.max(1, columnCount)));
   const rendered = retained.slice(0, Math.min(retained.length, rowCountByCellBudget));
 
-  const tableEl = document.createElement("table");
-  tableEl.className = "preview-table";
-
-  const thead = document.createElement("thead");
-  thead.appendChild(buildRow(rendered[0]!, columnCount, "th"));
-  tableEl.appendChild(thead);
-
-  const tbody = document.createElement("tbody");
-  for (const row of rendered.slice(1)) {
-    tbody.appendChild(buildRow(row, columnCount, "td"));
-  }
-  tableEl.appendChild(tbody);
-
-  host.appendChild(tableEl);
-
   // A file wide enough and long enough to hit both caps says so on its own line for each, rather
   // than folding two different truncations into one sentence. Both notes report what was actually
   // rendered: the cell budget can push the row count below the row cap on a wide file, and the
@@ -74,7 +59,39 @@ export function renderDelimitedTable(host: HTMLElement, table: DelimitedTable): 
   if (columnCount < table.widestRowWidth) {
     notes.push(`Showing first ${columnCount} of ${table.widestRowWidth} columns`);
   }
-  for (const text of notes) {
+  return { rows: rendered, columnCount, notes };
+}
+
+/** Lays out `planDelimitedTable`'s plan and nothing else. The first row is the header and stays
+ *  visible while the body scrolls. */
+export function renderDelimitedTable(host: HTMLElement, table: DelimitedTable): void {
+  host.textContent = "";
+
+  const plan = planDelimitedTable(table);
+  if (plan.rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "preview-table-empty";
+    empty.textContent = "This file has no rows.";
+    host.appendChild(empty);
+    return;
+  }
+
+  const tableEl = document.createElement("table");
+  tableEl.className = "preview-table";
+
+  const thead = document.createElement("thead");
+  thead.appendChild(buildRow(plan.rows[0]!, plan.columnCount, "th"));
+  tableEl.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const row of plan.rows.slice(1)) {
+    tbody.appendChild(buildRow(row, plan.columnCount, "td"));
+  }
+  tableEl.appendChild(tbody);
+
+  host.appendChild(tableEl);
+
+  for (const text of plan.notes) {
     const note = document.createElement("div");
     note.className = "preview-table-note";
     note.textContent = text;
