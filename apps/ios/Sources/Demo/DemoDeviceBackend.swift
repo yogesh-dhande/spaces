@@ -44,9 +44,11 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     /// screens worth looking at; edits last for the session, like every other demo mutation.
     private var savedPrompts: [SpacesDeviceSavedPrompt]
     private var savedPromptsRevision = 1
+    private let agentSessionSearch: DemoAgentSessionSearch
 
-    init(library: DemoRecordingLibrary) {
+    init(library: DemoRecordingLibrary, agentSessionSearch: DemoAgentSessionSearch = DemoAgentSessionSearch()) {
         self.library = library
+        self.agentSessionSearch = agentSessionSearch
         savedPrompts = Self.seedPrompts(now: Date())
         overview = library.overview.demoReplacingSavedPromptsRevision(1)
     }
@@ -184,12 +186,29 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         case .deleteSavedPrompt(let request): return serveDeleteSavedPrompt(request)
         case .recordSavedPromptUse(let request): return serveRecordSavedPromptUse(request)
 
+        case .searchAgentSessions(let request):
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "Searched agent sessions.",
+                result: .agentSessionSearch(agentSessionSearch.result(for: request, workspaces: overview.workspaces)))
+        case .resumeAgentSession(let request): return serveResumeAgentSession(request)
+
         case .createWorkspace, .createProject, .importProject, .exportProject, .deleteProject, .pair, .requestDaemonRestart, .resolveTerminalLink,
             .readTerminalLinkChunk, .startDaemonSelfUpdate, .setDaemonUpdateChannel:
             return reject(Self.unavailableInDemo)
 
         default: return reject(Self.unsupportedInDemo)
         }
+    }
+
+    /// A conversation the demo shows as running focuses its terminal, as on a real device. Resuming any
+    /// other would launch an agent, which Demo Mode cannot.
+    private func serveResumeAgentSession(_ request: SpacesDeviceResumeAgentSessionRequest) -> SpacesDeviceAPIResponse {
+        guard let seed = agentSessionSearch.seed(agent: request.agent, sessionKey: request.sessionKey), let sessionID = seed.runningTerminalSessionID,
+            let workspace = agentSessionSearch.workspace(for: seed, in: overview.workspaces)
+        else { return reject(Self.unsupportedInDemo) }
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Resumed agent session.",
+            result: .mutation(SpacesDeviceMutationResult(overview: overview, workspaceID: workspace.id, sessionID: sessionID)))
     }
 
     private func serveState(_ request: SpacesDeviceTerminalSessionRequest) -> SpacesDeviceAPIResponse {

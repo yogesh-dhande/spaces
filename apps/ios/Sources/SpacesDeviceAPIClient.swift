@@ -668,6 +668,35 @@ struct SpacesDeviceAPIClient: Sendable {
         return try savedPromptsResult(response)
     }
 
+    /// One page of the coding-agent conversations in the device's agents' own stores matching `query`
+    /// (all of them, newest first, for a blank query). Read-only (replay-safe), so it uses `sendRequest`.
+    func searchAgentSessions(
+        query: String, page: Int, agents: [CodingAgent]? = nil, projectID: String? = nil, commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAgentSessionSearchResult {
+        let response = try await sendRequest(
+            .init(
+                command: .searchAgentSessions(.init(query: query, page: page, agents: agents, projectID: projectID)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        guard let search = response.agentSessionSearch else {
+            throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode)
+        }
+        return search
+    }
+
+    /// Focuses the terminal already running a found conversation, else resumes it in the workspace the hit
+    /// named. The mutation result's `sessionID` is the terminal to open. A conversation whose folder is
+    /// gone and which its agent resumes only from that folder fails with `.invalidArgument`, and the
+    /// message carries the session id.
+    func resumeAgentSession(agent: CodingAgent, sessionKey: String, workingDirectory: String?, commandChannel: SpacesDeviceAPICommandChannel? = nil)
+        async throws -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .resumeAgentSession(.init(agent: agent, sessionKey: sessionKey, workingDirectory: workingDirectory)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
     /// Saves a prompt on the device and returns the whole library. The device rejects a blank title or
     /// text, and text over `SpacesDeviceSavedPrompt.maximumTextBytes`, with `.invalidArgument`.
     func createSavedPrompt(title: String, text: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws

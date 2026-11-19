@@ -3,6 +3,7 @@ import Foundation
 import spacesclientcore
 import spacesdevicecore
 import spacesruntimecore
+import spacessessionindex
 import spacesterminalcore
 import spacesterminalghostty
 import workspacecore
@@ -346,6 +347,10 @@ enum SpacesDaemonErrorClassification {
     private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
     private var portReservationService: PortReservationService?
     private var remoteAgentWatchService: RemoteAgentWatchService?
+    private var agentSessionIndexService: AgentSessionIndexService?
+    /// The same service as `agentSessionIndexService`, resolvable off the main actor by the Device API's
+    /// search handler.
+    private nonisolated let agentSessionIndexServiceBox = AgentSessionIndexServiceBox()
     private var automationService: AutomationService?
     /// The same live `AutomationService` as `automationService`, held in a lock-guarded box so the off-main
     /// automation handlers (profile-command `automationCommandOffMain`, Device API `AutomationOperations`)
@@ -398,7 +403,7 @@ enum SpacesDaemonErrorClassification {
         // command drives the exact scheduler state a local profile command would — the "one implementation,
         // two transports" seam. Both closures run on the Device API connection queue (never main), and the
         // service serializes internally, so calling it directly is deadlock-safe (the one-way rule).
-        automationOperations: daemonAutomationOperations(),
+        automationOperations: daemonAutomationOperations(), agentSessionSearchOperations: daemonAgentSessionSearchOperations(),
         onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } }, selfUpdateController: selfUpdateService,
         // Same queue guarantee as the closures above (the Device API's own connection-handling queue, never
         // main), so the engine hop is deadlock-safe. Lets a Device API `.state` read — one per pane attach —
@@ -589,6 +594,18 @@ enum SpacesDaemonErrorClassification {
         }
         portReservations.start()
         portReservationService = portReservations
+        let sessionIndex = AgentSessionIndexService(
+            indexURL: URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("agent-session-index.sqlite"),
+            locations: AgentSessionStoreLocations(home: FileManager.default.homeDirectoryForCurrentUser),
+            // Re-checked between sessions, like the automation ticks: a pass must not read stores or
+            // write the index while a handoff or shutdown is tearing the daemon down.
+            isSuspended: { [livenessState] in
+                let snapshot = livenessState.snapshot()
+                return snapshot.handoffInProgress || snapshot.shutdownInProgress
+            }, onError: { writeStandardError("spacesd agent_session_index_error error=\($0)\n") })
+        sessionIndex.start()
+        agentSessionIndexService = sessionIndex
+        agentSessionIndexServiceBox.set(sessionIndex)
         let remoteAgentWatch = RemoteAgentWatchService(
             databasePath: databasePath, transport: .live(clientApp: Self.daemonDeviceClientApp()),
             deliver: { [weak self] sessionID, line in
@@ -1069,6 +1086,9 @@ enum SpacesDaemonErrorClassification {
         worktreeDiscoveryService = nil
         remoteAgentWatchService?.stop()
         remoteAgentWatchService = nil
+        agentSessionIndexServiceBox.set(nil)
+        agentSessionIndexService?.stop()
+        agentSessionIndexService = nil
         terminalForegroundAgentReconciler?.beginStop()
         portReservationService?.beginStop()
         #if os(macOS)
@@ -2693,6 +2713,18 @@ enum SpacesDaemonErrorClassification {
         }
     }
 
+    /// The Device API's session search, resolving the live index service from its box on every call so a
+    /// daemon that resumes after a failed handoff searches its new service.
+    private nonisolated func daemonAgentSessionSearchOperations() -> AgentSessionSearchOperations {
+        AgentSessionSearchOperations { [weak self] query, page, agents, folders in
+            guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+            guard let service = self.agentSessionIndexServiceBox.get() else {
+                throw SpacesRuntimeError.invalidArgument(message: "Session search is unavailable on this daemon.")
+            }
+            return try service.search(query: query, page: page, agents: agents, folders: folders)
+        }
+    }
+
     /// Wraps the live automation scheduler as an `AutomationOperations` bundle: each op resolves the
     /// same queue-confined `AutomationService` the profile-command handlers use and calls it directly, so both
     /// transports share one scheduler. `service` resolves that instance from the off-main box (throwing during
@@ -3755,14 +3787,16 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil, selfUpdateController: (any DaemonSelfUpdateControlling)? = nil,
+        agentSessionSearchOperations: AgentSessionSearchOperations? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        selfUpdateController: (any DaemonSelfUpdateControlling)? = nil,
         liveTerminalSessionStateProvider: (@Sendable (String, TerminalOneShotStateRead) -> GhosttyRemoteSessionStatePayload?)? = nil,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-                agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
+                agentSessionKiller: agentSessionKiller, automationOperations: automationOperations,
+                agentSessionSearchOperations: agentSessionSearchOperations, onRestartRequested: onRestartRequested,
                 selfUpdateController: selfUpdateController, liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
                 liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider)
         #endif

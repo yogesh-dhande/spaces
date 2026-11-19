@@ -96,7 +96,7 @@ import Testing
         case .archiveWorkspace, .deleteProject: .workspaceTeardown
         case .stopWorkspace: .workspaceStop
         case .runWorkspaceSetup: .workspaceSetup
-        case .startWorkspaceCommandSession, .resumeLostShell, .resumePinnedThread: .workspaceTerminalLaunch
+        case .startWorkspaceCommandSession, .resumeLostShell, .resumePinnedThread, .resumeAgentSession: .workspaceTerminalLaunch
         case .createWorkspace: .workspaceCreate
         case .createProject, .previewGitProject: .projectClone
         case .importProject, .exportProject: .projectConfigFile
@@ -135,7 +135,7 @@ import Testing
             .resumePinnedThread, .stopWorkspaceTerminal, .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess,
             .restartWorkspaceProcess, .stopCodingAgent, .installAgentHooks, .trustAgentHooks, .stopCodexSharedServer, .spawnAgentSession,
             .killAgentSession, .createAutomation, .updateAutomation, .setAutomationNextRun, .deleteAutomation, .triggerAutomation,
-            .cancelAutomationRun, .endAutomationAgents, .restoreSessions, .discardRestorableSessions, .workspaceFileDelete,
+            .cancelAutomationRun, .endAutomationAgents, .restoreSessions, .discardRestorableSessions, .resumeAgentSession, .workspaceFileDelete,
             .workspaceFileCreateDirectory, .workspaceFileRename:
             60
         case .agentHooksStatus: 20
@@ -153,7 +153,8 @@ import Testing
             .subscribeDeviceOverview, .subscribeDeviceResources, .subscribeWorkspaceDiffSignature, .subscribeWorkspaceFileSignature,
             .subscribeWorkspaceFileListSignature, .openServiceTunnel, .listAgentSessions, .writeAgentBrief, .readAgentBrief, .clearAgentBrief,
             .listAutomations, .listAutomationRuns, .workspaceReviewCommentList, .workspaceReviewCommentUpsert, .workspaceReviewCommentDelete,
-            .workspaceReviewCommentsSend, .listSavedPrompts, .createSavedPrompt, .updateSavedPrompt, .deleteSavedPrompt, .recordSavedPromptUse:
+            .workspaceReviewCommentsSend, .listSavedPrompts, .createSavedPrompt, .updateSavedPrompt, .deleteSavedPrompt, .recordSavedPromptUse,
+            .searchAgentSessions:
             10
         }
     }

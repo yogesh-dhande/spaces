@@ -1434,7 +1434,8 @@ import workspacecore
 
     /// - Parameter route: See `executeWindowFocusResolution`. Decides whether a refusal is shown or logged,
     ///   and whether an open that resumes after the sidebar selection moved still presents its workspace.
-    @discardableResult private func openOrFocusTerminalTarget(
+    // Not private: `SessionsController` opens a resumed session's pane from a different file in the same module.
+    @discardableResult func openOrFocusTerminalTarget(
         _ request: AppKitController.DeviceTerminalOpenRequest, requestID: String? = nil, route: AppKitController.WorkspaceTerminalOpenRoute = .button
     ) async -> Bool {
         let startedAt = Date()

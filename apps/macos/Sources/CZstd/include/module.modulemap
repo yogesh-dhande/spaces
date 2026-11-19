@@ -1,0 +1,8 @@
+// Vendored zstd 1.5.7 (https://github.com/facebook/zstd/releases/tag/v1.5.7, tarball sha256
+// eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3), decompression only:
+// lib/common (minus pool/threading) and lib/decompress without the amd64 assembly decoder or
+// legacy formats. Only the stream decompression entry points in zstd.h are used.
+module CZstd [system] {
+  header "../zstd.h"
+  export *
+}

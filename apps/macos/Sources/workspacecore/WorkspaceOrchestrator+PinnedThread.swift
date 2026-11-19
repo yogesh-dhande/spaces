@@ -51,9 +51,7 @@ extension WorkspaceOrchestrator {
                 workingDirectory: workingDirectory, agentSessionID: existing.id, pinnedAt: nowISO8601())
             try store.insertPinnedThread(pin)
             try store.setAgentSessionUserLabel(id: existing.id, userLabel: name)
-            if existing.status == .exited || !builtInAgentSessionIsStillLive(existing) {
-                try detachPinnedThread(fromAgent: existing.withUserLabel(name))
-            }
+            if !builtInAgentIsRunning(existing) { try detachPinnedThread(fromAgent: existing.withUserLabel(name)) }
         }
     }
 
@@ -102,7 +100,7 @@ extension WorkspaceOrchestrator {
             if let attachedID = pin.agentSessionID {
                 if attachedID == row.id { return }
                 guard let attachedRow = try store.agentWindow(id: attachedID) else { return }
-                if builtInAgentSessionIsStillLive(attachedRow) { return }
+                if builtInAgentIsRunning(attachedRow) { return }
                 // The dead row still carries the pin's name, so it gives it back before the new row takes it.
                 try detachPinnedThread(fromAgent: attachedRow)
             }
@@ -124,7 +122,7 @@ extension WorkspaceOrchestrator {
         guard let pin = try store.pinnedThread(id: pinID), pin.workspaceID == workspaceID else {
             throw WorkspaceError.invalidArgument(message: "No pinned thread '\(pinID)' in workspace \(workspaceID).")
         }
-        if let agentID = pin.agentSessionID, let row = try store.agentWindow(id: agentID), builtInAgentSessionIsStillLive(row),
+        if let agentID = pin.agentSessionID, let row = try store.agentWindow(id: agentID), builtInAgentIsRunning(row),
             let sessionID = builtInAgentSessionID(for: row)
         {
             return PinnedThreadResumption(sessionID: sessionID, launchedSession: nil)

@@ -661,10 +661,9 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let supervisor = SpacesDeviceAPISupervisor(
                 settingsStore: settingsStore, environment: environment, restartInterval: 60, builtInTerminalSessionTerminator: nil,
-                builtInTerminalSessionLauncher: nil, agentSessionKiller: nil, automationOperations: nil, onRestartRequested: nil,
-                selfUpdateController: nil, liveTerminalSessionStateProvider: nil, liveInMemoryTerminalSessionsProvider: nil,
-                pushRelayClient: DiscardingPushRelayClient(),
-                pushScheduler: SpacesDevicePushDispatchScheduler())
+                builtInTerminalSessionLauncher: nil, agentSessionKiller: nil, automationOperations: nil, agentSessionSearchOperations: nil,
+                onRestartRequested: nil, selfUpdateController: nil, liveTerminalSessionStateProvider: nil, liveInMemoryTerminalSessionsProvider: nil,
+                pushRelayClient: DiscardingPushRelayClient(), pushScheduler: SpacesDevicePushDispatchScheduler())
             supervisor.start()
             defer { supervisor.stop() }
 

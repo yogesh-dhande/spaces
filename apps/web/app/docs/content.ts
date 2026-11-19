@@ -138,6 +138,12 @@ export const docsNavGroups: DocsNavGroup[] = [
           "How Spaces knows whether Claude Code, Codex, opencode, GitHub Copilot CLI, pi, or Amp is working, waiting for you, or done.",
       },
       {
+        href: "/docs/sessions",
+        title: "Sessions",
+        summary:
+          "Search the past conversations of your coding agents on any device, and resume one in the right workspace.",
+      },
+      {
         href: "/docs/orchestration",
         title: "Orchestrate agents",
         summary:

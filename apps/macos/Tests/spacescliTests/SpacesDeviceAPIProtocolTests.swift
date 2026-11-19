@@ -24,6 +24,37 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
+    /// A search only reads, so a dropped connection may send it again; a resume launches an agent, so it may not.
+    func testSearchAgentSessionsIsReplaySafeAndResumeIsNot() throws {
+        let search = SpacesDeviceAPIRequest(command: .searchAgentSessions(.init(query: "retry", page: 1, agents: [.codex])), authToken: "SECRET")
+        XCTAssertTrue(search.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(search)), search)
+
+        let resume = SpacesDeviceAPIRequest(
+            command: .resumeAgentSession(.init(agent: .claudeCode, sessionKey: "session-1", workingDirectory: nil)), authToken: "SECRET")
+        XCTAssertFalse(resume.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(resume)), resume)
+    }
+
+    /// A newer daemon can find conversations of an agent this client lacks: those hits and filter choices
+    /// are dropped and the rest of the page still decodes.
+    func testAgentSessionSearchResultDropsAnAgentThisBuildDoesNotKnow() throws {
+        let json = """
+            {"results":[
+              {"agent":"claudeCode","sessionKey":"known","title":"t","lastActive":"2026-01-10T10:00:00.000Z","sizeBytes":1,
+               "workspace":{"projectID":"p","projectName":"P","workspaceID":"w","workspaceName":"main"},"resumability":"resumable"},
+              {"agent":"futureAgent","sessionKey":"unknown","title":"t","lastActive":"2026-01-10T10:00:00.000Z","sizeBytes":1,
+               "workspace":{"projectID":"p","projectName":"P","workspaceID":"w","workspaceName":"main"},"resumability":"resumable"}],
+             "hasMore":false,"availableAgents":["claudeCode","futureAgent"],
+             "availableProjects":[{"id":"p","name":"P","isHome":false}],
+             "progress":{"indexedSessions":2,"totalSessions":2,"isBuilding":false,"isRefreshing":false}}
+            """
+        let decoded = try JSONDecoder().decode(SpacesDeviceAgentSessionSearchResult.self, from: Data(json.utf8))
+
+        XCTAssertEqual(decoded.results.map(\.sessionKey), ["known"])
+        XCTAssertEqual(decoded.availableAgents, [.claudeCode])
+    }
+
     func testInstallAgentHooksCommandRoundTripsAndIsNotReplaySafe() throws {
         let request = SpacesDeviceAPIRequest(command: .installAgentHooks(.init(kinds: [.claudeCode, .opencode])), authToken: "SECRET")
         XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
@@ -103,7 +134,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
     /// A newer client asking an older daemon to install an agent it lacks still gets the others installed.
     func testInstallRequestDropsAKindThisBuildDoesNotKnow() throws {
-        let request = try JSONDecoder().decode(SpacesDeviceInstallAgentHooksRequest.self, from: Data(#"{"kinds":["codex","futureagent","opencode"]}"#.utf8))
+        let request = try JSONDecoder().decode(
+            SpacesDeviceInstallAgentHooksRequest.self, from: Data(#"{"kinds":["codex","futureagent","opencode"]}"#.utf8))
         XCTAssertEqual(request.kinds, [.codex, .opencode])
     }
 

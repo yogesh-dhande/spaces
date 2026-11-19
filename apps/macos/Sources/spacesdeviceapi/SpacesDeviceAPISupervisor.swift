@@ -1,5 +1,6 @@
 import Foundation
 import spacesdevicecore
+import spacessessionindex
 import spacesterminalcore
 import workspacecore
 
@@ -11,6 +12,7 @@ import workspacecore
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
     private let agentSessionKiller: (@Sendable (String) throws -> Bool)?
     private let automationOperations: AutomationOperations?
+    private let agentSessionSearchOperations: AgentSessionSearchOperations?
     private let onRestartRequested: (@Sendable () -> Void)?
     private let selfUpdateController: (any DaemonSelfUpdateControlling)?
     private let liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider?
@@ -32,14 +34,16 @@ import workspacecore
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil, selfUpdateController: (any DaemonSelfUpdateControlling)? = nil,
+        agentSessionSearchOperations: AgentSessionSearchOperations? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        selfUpdateController: (any DaemonSelfUpdateControlling)? = nil,
         liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider? = nil,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil
     ) {
         self.init(
             settingsStore: settingsStore, environment: environment, restartInterval: restartInterval,
             builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-            agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
+            agentSessionKiller: agentSessionKiller, automationOperations: automationOperations,
+            agentSessionSearchOperations: agentSessionSearchOperations, onRestartRequested: onRestartRequested,
             selfUpdateController: selfUpdateController, liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
             liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider, pushRelayClient: SpacesDevicePushRelayCurlClient(),
             pushScheduler: SpacesDevicePushDispatchScheduler())
@@ -50,7 +54,8 @@ import workspacecore
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?,
         agentSessionKiller: (@Sendable (String) throws -> Bool)?, automationOperations: AutomationOperations?,
-        onRestartRequested: (@Sendable () -> Void)?, selfUpdateController: (any DaemonSelfUpdateControlling)?,
+        agentSessionSearchOperations: AgentSessionSearchOperations?, onRestartRequested: (@Sendable () -> Void)?,
+        selfUpdateController: (any DaemonSelfUpdateControlling)?,
         liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider?,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])?, pushRelayClient: any SpacesDevicePushRelayClient,
         pushScheduler: any SpacesDevicePushScheduler
@@ -64,6 +69,7 @@ import workspacecore
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
         self.automationOperations = automationOperations
+        self.agentSessionSearchOperations = agentSessionSearchOperations
         self.onRestartRequested = onRestartRequested
         self.selfUpdateController = selfUpdateController
         self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
@@ -144,10 +150,10 @@ import workspacecore
         let createdServer = SpacesDeviceAPIServer(
             host: settings.host, port: settings.port, identity: identity, pairingStoreProtocol: try SpacesDevicePairingStore(),
             builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-            agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
+            agentSessionKiller: agentSessionKiller, automationOperations: automationOperations,
+            agentSessionSearchOperations: agentSessionSearchOperations, onRestartRequested: onRestartRequested,
             selfUpdateController: selfUpdateController, liveTerminalSessionStateProvider: liveTerminalSessionStateProvider,
-            liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider, pushRelayClient: pushRelayClient,
-            pushScheduler: pushScheduler
+            liveInMemoryTerminalSessionsProvider: liveInMemoryTerminalSessionsProvider, pushRelayClient: pushRelayClient, pushScheduler: pushScheduler
         )
         do {
             try createdServer.start()

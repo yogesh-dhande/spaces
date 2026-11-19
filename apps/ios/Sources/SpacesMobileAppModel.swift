@@ -2365,6 +2365,42 @@ private enum SpacesMobileMutationTimeoutRecovery {
         savedPrompts.reconcile(reachable: reachable, pairedDeviceCount: pairedDevices.count, defaultDeviceID: defaultDeviceID)
     }
 
+    /// A Search Sessions sheet model wired to this app's paired devices and their connections. Each sheet
+    /// opening gets its own, so nothing about a search outlives the sheet.
+    func makeSessionSearchModel() -> SessionSearchModel {
+        SessionSearchModel(
+            environment: SessionSearchEnvironment(
+                devices: { [weak self] in self?.pairedDevices.map { SessionSearchDevice(id: $0.id, name: $0.name) } ?? [] },
+                activeDeviceID: { [weak self] in self?.activeDeviceID }, isOffline: { [weak self] in self?.offlineDeviceIDs.contains($0) ?? true },
+                search: { [weak self] deviceID, request in
+                    guard let connection = self?.mutationConnection(forDeviceID: deviceID) else {
+                        throw SpacesDeviceAPIClientError.requestFailed("This device is not reachable.", code: nil)
+                    }
+                    return try await connection.client.searchAgentSessions(
+                        query: request.query, page: request.page, agents: request.agents, projectID: request.projectID,
+                        commandChannel: connection.channel)
+                },
+                resume: { [weak self] deviceID, hit in
+                    guard let self else { return .failed("This device is not reachable.") }
+                    return await resumeAgentSession(hit, deviceID: deviceID)
+                }))
+    }
+
+    /// Resumes (or focuses) a found conversation on `deviceID` and resolves the terminal to open, the way a
+    /// pinned thread's row does. A failure is returned for the sheet to show inline, so it is taken back
+    /// off `errorMessage`, which would otherwise raise a banner behind the sheet.
+    private func resumeAgentSession(_ hit: SpacesDeviceAgentSessionHit, deviceID: String) async -> SessionSearchResumeOutcome {
+        errorMessage = nil
+        let session = await performMutationReturningSession(deviceID: deviceID) { channel, client in
+            try await client.resumeAgentSession(
+                agent: hit.agent, sessionKey: hit.sessionKey, workingDirectory: hit.workingDirectory, commandChannel: channel)
+        }
+        if let session { return .opened(session) }
+        let message = errorMessage ?? "Could not open the session."
+        errorMessage = nil
+        return .failed(message)
+    }
+
     /// Opens `deviceID`'s overview stream for the coordinator's `attempt`. `attempt` rides in both stream
     /// callbacks below so a disconnect belonging to an abandoned attempt is never mistaken for the state
     /// of the attempt that replaced it (see `RemoteOverviewSubscriptionCoordinator`'s own doc comment).

@@ -1,0 +1,27 @@
+{
+  "v": 3,
+  "id": "T-019c0000-0000-7000-8000-000000000002",
+  "created": 1768100000000,
+  "messages": [
+    {
+      "role": "user",
+      "messageId": 0,
+      "content": [
+        { "type": "text", "text": "/review" }
+      ],
+      "userState": { "currentlyVisibleFiles": [] },
+      "agentMode": "smart",
+      "meta": { "sentAt": 1768100003000 }
+    }
+  ],
+  "agentMode": "smart",
+  "nextMessageId": 1,
+  "env": {
+    "initial": {
+      "trees": [
+        { "displayName": "tools", "uri": "file:///Users/test/tools" }
+      ],
+      "platform": { "os": "darwin", "client": "VS Code CLI", "clientType": "cli" }
+    }
+  }
+}

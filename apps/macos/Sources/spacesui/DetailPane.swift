@@ -19,6 +19,9 @@ enum DetailPane: Equatable {
     case resources
     /// The full-pane saved prompts library. Leaving it keeps an unsaved draft in memory.
     case prompts
+    /// The full-pane search over the coding-agent sessions on one device. Its results are never kept
+    /// once it is left.
+    case sessions
     /// The full-pane compatibility block for an incompatible device's daemon. Held here (rather than
     /// only in the sidebar selection) so the block survives background sidebar reloads instead of
     /// being replaced.
@@ -41,6 +44,9 @@ enum DetailPane: Equatable {
 
     /// Whether the saved prompts library is the current pane.
     var isPrompts: Bool { if case .prompts = self { true } else { false } }
+
+    /// Whether the sessions search is the current pane.
+    var isSessions: Bool { if case .sessions = self { true } else { false } }
 
     /// Device whose compatibility block is shown, or `nil` for any other pane.
     var compatibilityBlockDeviceID: String? { if case .compatibilityBlock(let deviceID) = self { deviceID } else { nil } }

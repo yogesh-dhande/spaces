@@ -499,6 +499,20 @@ Launches with only `SPACES_MOBILE_PAYWALL_BYPASS=1` and a render-dump path (no h
 
 Produce App Store screenshots from Demo Mode with the same `testScreenshotStaging` invocation, adding `TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_DEMO=1` (no stack or config file needed).
 
+## Session Search Benchmark
+
+`spacessessionsearchbench` guards the performance budgets of the session index (see "Session search" in [implementation.md](implementation.md)). It is not part of `scripts/verify.sh`; run it after changing the index, the readers, or the refresh. Build it in release from `apps/macos`:
+
+```bash
+swift build -c release --product spacessessionsearchbench
+.build/release/spacessessionsearchbench --synthetic [--scale N] [--json]
+.build/release/spacessessionsearchbench --real [--json]
+```
+
+- `--synthetic` generates a deterministic set of agent stores in a temporary home (scale 1 is about 870 sessions, a tenth of a heavy user's Mac; `--scale 10` approximates one). `--real` reads the current user's real agent stores read-only. Either way the index is built in a temporary directory that is removed afterwards. Exactly one of the two is required.
+- It builds the index on a background-priority thread as the daemon does, then measures the first index (wall, CPU, peak memory, index size), a no-change refresh, an append refresh (synthetic only), and query, empty-query, and second-page latency. `--json` prints the report as JSON instead of a table.
+- The budgets are printed as PASS or FAIL. The exit code is 0 when all pass, 1 when a budget is missed, and 2 for a usage or runtime error. On `--real`, a live agent writing during the run can make no-change passes read a session; the run repeats passes until it has enough quiet ones.
+
 ## Pre-commit Hook
 
 ```bash

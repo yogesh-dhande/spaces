@@ -95,20 +95,42 @@ import Testing
         #expect(target == .resources)
     }
 
-    @Test func downArrowFromPromptsSelectsFirstVisibleWorkspace() {
+    @Test func downArrowFromPromptsSelectsSessions() {
+        let target = AppKitController.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: [("project-a", ["workspace-a"])], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil,
+            showingAlerts: false, showingAutomations: false, showingPrompts: true, direction: 1)
+
+        #expect(target == .sessions)
+    }
+
+    @Test func upArrowFromSessionsSelectsPrompts() {
+        let target = AppKitController.sidebarArrowSelectionTarget(
+            visibleWorkspaceIDsByProject: [("project-a", ["workspace-a"])], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil,
+            showingAlerts: false, showingAutomations: false, showingSessions: true, direction: -1)
+
+        #expect(target == .prompts)
+    }
+
+    @Test func downArrowFromSessionsSelectsFirstVisibleWorkspace() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
-            selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: false, showingPrompts: true, direction: 1)
+            selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: false, showingSessions: true, direction: 1)
 
         #expect(target == .workspace("workspace-a"))
     }
 
-    @Test func downArrowFromPromptsStopsWhenNoWorkspaces() {
+    @Test func downArrowFromSessionsStopsWhenNoWorkspaces() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [], hiddenWorkspaceIDs: [], selectedProjectID: nil, selectedWorkspaceID: nil, showingAlerts: false,
-            showingAutomations: false, showingPrompts: true, direction: 1)
+            showingAutomations: false, showingSessions: true, direction: 1)
 
         #expect(target == nil)
+    }
+
+    @Test func clearingSelectionForSessionsKeepsTheSessionsPane() {
+        #expect(
+            AppKitController.sidebarClearedSelectionPresentsPlaceholder(
+                showingAlerts: false, showingAutomations: false, showingResources: false, showingPrompts: false, showingSessions: true) == false)
     }
 
     @Test func clearingSelectionForPromptsKeepsThePromptsPane() {
@@ -123,20 +145,20 @@ import Testing
                 == false)
     }
 
-    @Test func upArrowFromFirstWorkspaceReturnsToPrompts() {
+    @Test func upArrowFromFirstWorkspaceReturnsToSessions() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", ["workspace-a", "workspace-b"]), ("project-b", ["workspace-c"])], hiddenWorkspaceIDs: [],
             selectedProjectID: "project-a", selectedWorkspaceID: "workspace-a", showingAlerts: false, showingAutomations: false, direction: -1)
 
-        #expect(target == .prompts)
+        #expect(target == .sessions)
     }
 
-    @Test func upArrowFromFirstWorkspaceReturnsToPromptsViaProjectFallback() {
+    @Test func upArrowFromFirstWorkspaceReturnsToSessionsViaProjectFallback() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", []), ("project-b", [])], hiddenWorkspaceIDs: [], selectedProjectID: "project-a",
             selectedWorkspaceID: nil, showingAlerts: false, showingAutomations: false, direction: -1)
 
-        #expect(target == .prompts)
+        #expect(target == .sessions)
     }
 
     @Test func arrowNavigationMovesAcrossProjectBoundariesUsingFlatVisibleOrder() {
