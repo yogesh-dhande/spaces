@@ -257,6 +257,10 @@ private struct DeviceSyncState {
     private var promptsHeaderStack: NSStackView?
     private var promptsRowRail: NSView?
     private var promptsRowBadge: NSTextField?
+
+    // Sessions sidebar row
+    private var sessionsHeaderStack: NSStackView?
+    private var sessionsRowRail: NSView?
     /// Top-bar warning icon shown while another Spaces instance owns desktop control.
     private(set) weak var desktopControlStatusIcon: NSImageView?
 
@@ -1638,6 +1642,8 @@ private struct DeviceSyncState {
             host.showResourcesDetail()
         } else if host.showingPrompts {
             host.showPromptsDetail()
+        } else if host.showingSessions {
+            host.showSessionsDetail()
         } else if AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
             visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
             newLoadState: host.deviceModel.deviceSections[index].loadState)
@@ -1977,7 +1983,8 @@ private struct DeviceSyncState {
             let target = AppKitController.sidebarArrowSelectionTarget(
                 visibleWorkspaceIDsByProject: visibleWorkspaceIDsByProject, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID,
                 selectedWorkspaceID: host.selectedWorkspaceID, showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations,
-                showingResources: host.showingResources, showingPrompts: host.showingPrompts, direction: direction)
+                showingResources: host.showingResources, showingPrompts: host.showingPrompts, showingSessions: host.showingSessions,
+                direction: direction)
         else { return false }
         if case .workspace(let workspaceID) = target, findWorkspace(id: workspaceID) == nil { return false }
         // Leaving the Prompts pane with unsaved edits asks first, so the move may run after the answer.
@@ -1987,6 +1994,7 @@ private struct DeviceSyncState {
             case .automations: host.showAutomationsDetail()
             case .resources: host.showResourcesDetail()
             case .prompts: host.showPromptsDetail()
+            case .sessions: host.showSessionsDetail()
             case .workspace(let workspaceID):
                 guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
                 selectWorkspace(workspace)
@@ -3285,7 +3293,7 @@ private struct DeviceSyncState {
             host.showingSettings = false
             if AppKitController.sidebarClearedSelectionPresentsPlaceholder(
                 showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, showingResources: host.showingResources,
-                showingPrompts: host.showingPrompts)
+                showingPrompts: host.showingPrompts, showingSessions: host.showingSessions)
             {
                 host.showPlaceholder(presentation: .userNavigation)
             }
@@ -3793,6 +3801,59 @@ private struct DeviceSyncState {
         header.layer?.backgroundColor = NSColor.clear.cgColor
         promptsRowRail?.isHidden = !host.showingPrompts
         if let rail = promptsRowRail {
+            bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
+        }
+    }
+
+    func makeSessionsSidebarRow() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.setAccessibilityIdentifier("sidebar-sessions")
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "Sessions")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
+        icon.contentTintColor = .secondaryLabelColor
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let titleLabel = NSTextField(labelWithString: "Sessions")
+        titleLabel.font = Typography.controlLabel
+        titleLabel.textColor = .labelColor
+
+        let header = NSStackView(views: [icon, titleLabel, NSView(), makeSidebarBadgeTrailingSlot()])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+        header.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        header.wantsLayer = true
+        header.layer?.cornerRadius = UIRadius.regular
+        header.translatesAutoresizingMaskIntoConstraints = false
+        sessionsHeaderStack = header
+        header.addGestureRecognizer(NSClickGestureRecognizer(target: host, action: #selector(AppKitController.sessionsRowClicked)))
+
+        container.addSubview(header)
+        let rail = NSView()
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        rail.wantsLayer = true
+        rail.isHidden = true
+        container.addSubview(rail)
+        sessionsRowRail = rail
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: container.topAnchor), header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor), header.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            rail.leadingAnchor.constraint(equalTo: container.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
+            rail.topAnchor.constraint(equalTo: header.topAnchor), rail.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        ])
+        updateSessionsRowAppearance()
+        return container
+    }
+
+    func updateSessionsRowAppearance() {
+        guard let header = sessionsHeaderStack else { return }
+        header.layer?.borderWidth = 0
+        header.layer?.backgroundColor = NSColor.clear.cgColor
+        sessionsRowRail?.isHidden = !host.showingSessions
+        if let rail = sessionsRowRail {
             bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
         }
     }

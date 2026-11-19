@@ -1,0 +1,49 @@
+{
+  "v": 3,
+  "id": "T-019c0000-0000-7000-8000-000000000001",
+  "created": 1768000000000,
+  "title": "Tidy the release script",
+  "messages": [
+    {
+      "role": "user",
+      "messageId": 0,
+      "content": [
+        { "type": "text", "text": "Tidy the release script. platypus-prompt" }
+      ],
+      "userState": { "currentlyVisibleFiles": [] },
+      "agentMode": "smart",
+      "meta": { "sentAt": 1768000001000 }
+    },
+    {
+      "role": "assistant",
+      "messageId": 1,
+      "content": [
+        { "type": "thinking", "thinking": "hidden-thinking-marker" },
+        { "type": "text", "text": "I simplified release.sh. tapir-reply" },
+        { "type": "tool_use", "id": "toolu_1", "name": "Bash", "input": { "cmd": "hidden-tool-input-marker" } }
+      ]
+    },
+    {
+      "role": "user",
+      "messageId": 2,
+      "content": [
+        { "type": "tool_result", "toolUseID": "toolu_1", "run": { "status": "done", "result": "hidden-tool-output-marker" } }
+      ],
+      "meta": { "sentAt": 1768000050000 }
+    }
+  ],
+  "agentMode": "smart",
+  "nextMessageId": 3,
+  "env": {
+    "initial": {
+      "trees": [
+        {
+          "displayName": "tools",
+          "uri": "file:///Users/test/tools",
+          "repository": { "type": "git", "url": "https://example.com/test/tools", "ref": "refs/heads/main", "sha": "0000000000000000000000000000000000000000" }
+        }
+      ],
+      "platform": { "os": "darwin", "client": "VS Code CLI", "clientType": "cli" }
+    }
+  }
+}

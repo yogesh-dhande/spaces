@@ -1094,6 +1094,30 @@ public enum SpacesDeviceClient {
         return library
     }
 
+    /// One page of the coding-agent conversations in the device's agents' own stores matching `query`
+    /// (all of them, newest first, for a blank query), with the agent filter's choices and indexing status.
+    public static func searchAgentSessions(
+        query: String, page: Int, agents: [CodingAgent]? = nil, projectID: String? = nil, context: DeviceRequestContext
+    ) throws -> SpacesDeviceAgentSessionSearchResult {
+        let response = try request(
+            .init(command: .searchAgentSessions(.init(query: query, page: page, agents: agents, projectID: projectID))), context: context)
+        guard let search = response.agentSessionSearch else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return search
+    }
+
+    /// Focuses the terminal already running a found conversation, else resumes it in the workspace the hit
+    /// named. The mutation result's `sessionID` is the terminal to open and `launchedTerminalSession` is
+    /// set when this call launched it. A conversation whose folder is gone and which its agent resumes
+    /// only from that folder is rejected with `.invalidArgument` and a message carrying the session id.
+    public static func resumeAgentSession(agent: CodingAgent, sessionKey: String, workingDirectory: String?, context: DeviceRequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        try request(
+            .init(command: .resumeAgentSession(.init(agent: agent, sessionKey: sessionKey, workingDirectory: workingDirectory))), context: context)
+    }
+
     /// Replaces a coding agent's brief on a paired device (`spaces agent brief write --device`). Returns the
     /// whole response: its `agentSessions` carries the updated row, and its `message` says whether the
     /// write stored a document or cleared the brief, which only the device's daemon knows after sanitizing.

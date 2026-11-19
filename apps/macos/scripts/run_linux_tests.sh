@@ -80,6 +80,21 @@ for suite in \
   SpacesDeviceWorkspaceGitHashingKnownAnswerTests \
   FileSystemWatcherLinuxInotifyTests \
   FileSystemWatcherInotifyRoutingTests \
+  JSONLineScannerTests \
+  ClaudeCodeSessionStoreTests \
+  CodexSessionStoreTests \
+  OpenCodeSessionStoreTests \
+  AmpThreadStoreTests \
+  CopilotSessionStoreTests \
+  PiSessionStoreTests \
+  AgentSessionMetadataTests \
+  AgentSessionStoreLocationsTests \
+  SessionSearchQueryTests \
+  SessionExcerptTests \
+  JSONLineFilterTests \
+  AgentSessionIndexSearchTests \
+  AgentSessionIndexRefreshTests \
+  AgentSessionFolderFilterTests \
   SpacesDeviceWorkspaceWatchLinuxTests \
   DeviceOverviewStreamServerSigpipeTests \
   SpacesDevicePushNotifierTests \

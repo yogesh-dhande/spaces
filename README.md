@@ -27,6 +27,7 @@ Spaces is a native Mac app (not Electron) that gives each piece of work its own 
 - **MCP server**: [`spaces mcp`](https://usespaces.dev/docs/mcp) exposes projects, workspaces, terminals, agents, and paired devices as tools, so an agent can inspect and drive Spaces directly.
 - **Automations**: [run a coding agent with a prompt, or a shell script](https://usespaces.dev/docs/automations), in a workspace on any paired device, on demand or on a cron schedule, including while the app is closed. Each run's terminal can be watched live and replayed afterwards.
 - **Saved prompts**: keep prompts you reuse, stored on each device and listed together on the Mac and iPhone, and copy one into any terminal from the Prompts pane, the command palette, or the iPhone's terminal keys.
+- **Session search**: [search the past conversations](https://usespaces.dev/docs/sessions) of all six agents on any paired Mac or Linux machine from the Mac's Sessions pane or the iPhone, and click one to resume it in the right workspace, or jump to it if it is already running.
 - **Session restore**: when a restart, crash, or shutdown cuts running agents off, Spaces offers to relaunch them in the workspaces they were working in, resuming the same conversation where the agent supports it.
 
 ### Across machines

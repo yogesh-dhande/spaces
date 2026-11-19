@@ -41,6 +41,12 @@ public enum ClientSettingsKey {
     public static let guiWindowShortcut = "gui_window_shortcut"
     public static let defaultGUIWindowShortcut = "cmd+1"
     public static let activeWorkspaceID = "active_workspace_id"
+    /// The device the Sessions pane last searched.
+    public static let sessionsLastDeviceID = "sessions_last_device_id"
+    /// The Sessions pane's agent filter per device, as JSON keyed by device id.
+    public static let sessionsAgentsByDevice = "sessions_agents_by_device"
+    /// The Sessions pane's project filter per device, as JSON keyed by device id with the project id as value.
+    public static let sessionsProjectByDevice = "sessions_project_by_device"
     /// Which set of windows the next/previous window shortcuts rotate over (a `WindowCycleMode` raw
     /// value). An unset or unparseable value resolves to the Workspace default.
     public static let windowCycleMode = "window_cycle_mode"

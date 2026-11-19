@@ -2,6 +2,7 @@ import Dispatch
 import Foundation
 import spacesdevicecore
 import spacesruntimecore
+import spacessessionindex
 import spacesterminalcore
 import workspacecore
 
@@ -1136,6 +1137,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// The daemon-side automation operations, routed to the one live automation scheduler. Nil only in
     /// tests or a misconfigured daemon; the automation handlers then report the endpoint unavailable.
     private let automationOperations: AutomationOperations?
+    /// The daemon's session search over the agents' own stores. Nil only in tests or a misconfigured
+    /// daemon; `searchAgentSessions` then reports the endpoint unavailable.
+    private let agentSessionSearchOperations: AgentSessionSearchOperations?
     /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon performs its
     /// exec-in-place handoff so running terminals, processes, and agents survive the update.
     private let onRestartRequested: (@Sendable () -> Void)?
@@ -1469,7 +1473,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil, selfUpdateController: (any DaemonSelfUpdateControlling)? = nil
+        agentSessionSearchOperations: AgentSessionSearchOperations? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        selfUpdateController: (any DaemonSelfUpdateControlling)? = nil
     ) throws {
         self.host = host
         self.port = port
@@ -1480,6 +1485,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
         self.automationOperations = automationOperations
+        self.agentSessionSearchOperations = agentSessionSearchOperations
         self.onRestartRequested = onRestartRequested
         self.selfUpdateController = selfUpdateController
         self.workspaceGitClient = RemoteWorkspaceGitClient()
@@ -1513,8 +1519,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil, selfUpdateController: (any DaemonSelfUpdateControlling)? = nil,
-        liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider? = nil,
+        agentSessionSearchOperations: AgentSessionSearchOperations? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        selfUpdateController: (any DaemonSelfUpdateControlling)? = nil, liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider? = nil,
         liveInMemoryTerminalSessionsProvider: (@Sendable () -> [TerminalSessionCatalogEntry])? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
@@ -1540,6 +1546,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
         self.automationOperations = automationOperations
+        self.agentSessionSearchOperations = agentSessionSearchOperations
         self.onRestartRequested = onRestartRequested
         self.selfUpdateController = selfUpdateController
         self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
@@ -3595,6 +3602,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .endAutomationAgents(let payload): return try handleEndAutomationAgentsRequest(payload, context: context)
         case .restoreSessions(let payload): return try handleRestoreSessionsRequest(payload, context: context)
         case .discardRestorableSessions(let payload): return try handleDiscardRestorableSessionsRequest(payload, context: context)
+        case .searchAgentSessions(let payload): return try handleSearchAgentSessionsRequest(payload, context: context)
+        case .resumeAgentSession(let payload): return try handleResumeAgentSessionRequest(payload, context: context)
         case .listSavedPrompts: return try handleListSavedPromptsRequest(context: context)
         case .createSavedPrompt(let payload): return try handleCreateSavedPromptRequest(payload, context: context)
         case .updateSavedPrompt(let payload): return try handleUpdateSavedPromptRequest(payload, context: context)
@@ -3705,9 +3714,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .startWorkspaceCommandSession(let payload): return try handleStartWorkspaceCommandSessionRequest(payload, context: context)
         case .resumeLostShell(let payload): return try handleResumeLostShellRequest(payload, context: context)
         case .resumePinnedThread(let payload): return try handleResumePinnedThreadRequest(payload, context: context)
+        case .resumeAgentSession(let payload): return try handleResumeAgentSessionRequest(payload, context: context)
         default:
             preconditionFailure(
-                "Only `.startWorkspaceCommandSession`, `.resumeLostShell` and `.resumePinnedThread` run on the workspace-terminal-launch queue.")
+                "Only `.startWorkspaceCommandSession`, `.resumeLostShell`, `.resumePinnedThread` and `.resumeAgentSession` run on the workspace-terminal-launch queue."
+            )
         }
     }
 
@@ -6870,6 +6881,72 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         try context.orchestrator().setComeBackLater(
             rowKind: request.rowKind, rowID: rowID, isOn: request.isOn, in: try loadOverview(store: context.store()))
         return try refreshedMutationResponse(context: context, message: request.isOn ? "Flagged to come back later." : "Cleared the flag.")
+    }
+
+    /// Answers a search from the daemon's index, then adds what only this device's own state knows about
+    /// each hit (the workspace a resume opens in, whether it is running or pinned, whether its folder is
+    /// gone). The index knows nothing of workspaces, so the enrichment is computed per request from one
+    /// read of the store rather than being stored in the index, where it would go stale.
+    private func handleSearchAgentSessionsRequest(_ request: SpacesDeviceAgentSessionSearchRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let agentSessionSearchOperations else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Session search is unavailable on this daemon.", errorCode: .internalError)
+        }
+        guard request.page >= 0 else { throw Self.invalidArgumentError("A search page cannot be negative.") }
+        let orchestrator = try context.orchestrator()
+        let folders = try request.projectID.map { projectID in
+            // A project this device does not have matches nothing; `availableProjects` lets the client drop it.
+            try orchestrator.agentSessionFolderFilter(forProjectID: projectID) ?? AgentSessionFolderFilter(includedFolders: [])
+        }
+        let projects = try context.store().projects()
+        let availableProjects = (projects.filter { $0.kind != .home } + projects.filter { $0.kind == .home }).map {
+            SpacesDeviceAgentSessionProject(id: $0.id, name: $0.name, isHome: $0.kind == .home)
+        }
+        let snapshot = try agentSessionSearchOperations.search(request.query, request.page, Set(request.agents ?? []), folders)
+        let found = snapshot.page.results
+        let contexts = try orchestrator.agentSessionContexts(
+            for: found.map { AgentSessionReference(agent: $0.agent, sessionKey: $0.sessionKey, workingDirectory: $0.workingDirectory) })
+        // The folder filter is exact except for pathological overlapping project roots; keeping only hits
+        // that open in the requested project guarantees every row shown under a project opens in it. A page
+        // may come back short, which is fine: offsets count index pages, so nothing repeats or is skipped.
+        let matching = zip(found, contexts).filter { request.projectID == nil || $1.destination.projectID == request.projectID }
+        let hits = matching.map { result, sessionContext in
+            SpacesDeviceAgentSessionHit(
+                agent: result.agent, sessionKey: result.sessionKey, title: result.title, workingDirectory: result.workingDirectory,
+                lastActive: TerminalSessionTimestamp.fractionalString(from: result.lastActive), sizeBytes: result.sizeBytes, excerpt: result.excerpt,
+                workspace: SpacesDeviceAgentSessionWorkspace(
+                    projectID: sessionContext.destination.projectID, projectName: sessionContext.destination.projectName,
+                    workspaceID: sessionContext.destination.workspaceID, workspaceName: sessionContext.destination.workspaceName),
+                runningTerminalSessionID: sessionContext.runningTerminalSessionID, pinnedName: sessionContext.pinnedName,
+                resumability: sessionContext.cannotResume(agent: result.agent) ? .folderMissing : .resumable)
+        }
+        let progress = snapshot.progress
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Searched agent sessions.",
+            result: .agentSessionSearch(
+                SpacesDeviceAgentSessionSearchResult(
+                    results: hits, hasMore: snapshot.page.hasMore, availableAgents: snapshot.availableAgents, availableProjects: availableProjects,
+                    progress: SpacesDeviceAgentSessionIndexProgress(
+                        indexedSessions: progress.processed, totalSessions: progress.total, isBuilding: snapshot.isBuilding,
+                        isRefreshing: progress.isRefreshing))))
+    }
+
+    /// Resumes a conversation from an agent's store, answering like `resumePinnedThread`: a conversation
+    /// already running answers with its terminal and no launched session.
+    private func handleResumeAgentSessionRequest(_ request: SpacesDeviceResumeAgentSessionRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let sessionKey = request.sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sessionKey.isEmpty else { throw Self.invalidArgumentError("A session id is required.") }
+        let orchestrator = try context.orchestrator()
+        let resumption = try orchestrator.resumeAgentSession(
+            AgentSessionReference(agent: request.agent, sessionKey: sessionKey, workingDirectory: request.workingDirectory))
+        return try refreshedMutationResponse(
+            context: context, message: "Resumed agent session.", workspaceID: resumption.workspaceID, sessionID: resumption.sessionID,
+            launchedTerminalSession: try resumption.launchedSession.map {
+                try launchedTerminalSessionSummary($0, workspaceID: resumption.workspaceID)
+            })
     }
 
     private func handleListSavedPromptsRequest(context: RequestContext) throws -> SpacesDeviceAPIResponse {

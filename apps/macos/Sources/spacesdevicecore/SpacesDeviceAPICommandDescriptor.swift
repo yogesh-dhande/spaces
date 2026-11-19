@@ -322,6 +322,11 @@ extension SpacesDeviceAPICommand {
             return Self.descriptor(wireKey: "deleteSavedPrompt", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
         case .recordSavedPromptUse:
             return Self.descriptor(wireKey: "recordSavedPromptUse", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .searchAgentSessions:
+            return Self.descriptor(wireKey: "searchAgentSessions", lane: .mainQueue, timeoutSeconds: Self.defaultRequestTimeoutSeconds)
+        case .resumeAgentSession:
+            return Self.descriptor(
+                wireKey: "resumeAgentSession", lane: .workspaceTerminalLaunch, timeoutSeconds: Self.longRunningMutationTimeoutSeconds)
         }
     }
 

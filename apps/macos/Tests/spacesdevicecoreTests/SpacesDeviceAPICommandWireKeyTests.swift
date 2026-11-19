@@ -142,6 +142,8 @@ import spacesterminalcore
         .createSavedPrompt(SpacesDeviceSavedPromptFields(title: "title", text: "text")),
         .updateSavedPrompt(SpacesDeviceSavedPromptUpdateRequest(id: "prompt-1", title: "title", text: "text")),
         .deleteSavedPrompt(SpacesDeviceSavedPromptReference(id: "prompt-1")), .recordSavedPromptUse(SpacesDeviceSavedPromptReference(id: "prompt-1")),
+        .searchAgentSessions(SpacesDeviceAgentSessionSearchRequest(query: "retry", page: 0, agents: [.codex])),
+        .resumeAgentSession(SpacesDeviceResumeAgentSessionRequest(agent: .claudeCode, sessionKey: "session-1", workingDirectory: "/work/app")),
     ]
 
     private static let automationFields = TerminalServiceAutomationFields(
@@ -171,7 +173,7 @@ import spacesterminalcore
     ///     same enum, not case lists, so neither one can be diffed against `samples` to catch an omission.
     @Test func sampleListCoversEveryCurrentCaseExactlyOnce() {
         let keys = Set(Self.samples.map(Self.goldenWireKey))
-        #expect(keys.count == 101)
+        #expect(keys.count == 103)
         #expect(keys.count == Self.samples.count)
     }
 
@@ -318,6 +320,8 @@ import spacesterminalcore
         case .updateSavedPrompt: "updateSavedPrompt"
         case .deleteSavedPrompt: "deleteSavedPrompt"
         case .recordSavedPromptUse: "recordSavedPromptUse"
+        case .searchAgentSessions: "searchAgentSessions"
+        case .resumeAgentSession: "resumeAgentSession"
         }
     }
 }

@@ -7,14 +7,24 @@ import spacesdevicecore
 struct AgentsTabView: View {
     @Bindable var model: SpacesMobileAppModel
     @State private var selectedSession: SelectedTerminalSessionRoute?
+    @State private var showsSessionSearch = false
 
     var body: some View {
         NavigationStack {
             // An agent row is a live session the user already started, so this tab opens sessions and
             // never shows the launch screen: the shared navigation's pending-launch route stays permanently
             // empty. Resuming a not-running pin awaits the daemon here instead and opens its session.
-            content.background(Theme.bg.ignoresSafeArea()).navigationTitle("Agents").tint(Theme.accent).terminalSessionNavigation(
-                model: model, selectedSession: $selectedSession, pendingTerminalLaunch: .constant(nil))
+            content.background(Theme.bg.ignoresSafeArea()).navigationTitle("Agents").tint(Theme.accent).toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showsSessionSearch = true
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }.accessibilityLabel("Search Sessions").accessibilityIdentifier("agents.searchSessions")
+                }
+            }.terminalSessionNavigation(model: model, selectedSession: $selectedSession, pendingTerminalLaunch: .constant(nil)).sheet(
+                isPresented: $showsSessionSearch
+            ) { SessionSearchSheet(appModel: model, onResumed: { selectedSession = $0 }) }
         }.accessibilityIdentifier("tab.agents")
     }
 

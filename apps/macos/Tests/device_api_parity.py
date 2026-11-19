@@ -671,6 +671,47 @@ def assert_saved_prompts_round_trip(args: argparse.Namespace, app: dict) -> None
         raise AssertionError("savedPromptsRevision did not rise across the prompt writes")
 
 
+def assert_agent_session_search_round_trip(args: argparse.Namespace, app: dict) -> None:
+    """Lists and searches the device's past agent conversations, checking the page shape every client
+    reads, and that resuming a Claude Code conversation whose folder is gone is refused with its session id
+    instead of launching anything. The device's own stores decide the content, so only shape is asserted."""
+
+    listed = result(
+        send("searchAgentSessions", {"query": "", "page": 0, "agents": None}, args, app), "agentSessionSearch", "searchAgentSessions list"
+    )
+    for key in ("results", "hasMore", "availableAgents", "progress"):
+        if key not in listed:
+            raise AssertionError(f"searchAgentSessions result missing {key}: {json.dumps(listed, indent=2, sort_keys=True)}")
+    for key in ("indexedSessions", "totalSessions", "isBuilding", "isRefreshing"):
+        if key not in listed["progress"]:
+            raise AssertionError(f"searchAgentSessions progress missing {key}: {json.dumps(listed, indent=2, sort_keys=True)}")
+    for hit in listed["results"]:
+        for key in ("agent", "sessionKey", "title", "lastActive", "sizeBytes", "workspace", "resumability"):
+            if key not in hit:
+                raise AssertionError(f"searchAgentSessions hit missing {key}: {json.dumps(hit, indent=2, sort_keys=True)}")
+        if hit["agent"] not in listed["availableAgents"]:
+            raise AssertionError(f"hit agent {hit['agent']} is not in availableAgents: {json.dumps(listed, indent=2, sort_keys=True)}")
+
+    result(
+        send("searchAgentSessions", {"query": "spaces parity no such words", "page": 0, "agents": ["codex"]}, args, app),
+        "agentSessionSearch",
+        "searchAgentSessions query",
+    )
+    negative = send("searchAgentSessions", {"query": "", "page": -1}, args, app)
+    if negative.get("ok") is not False or negative.get("errorCode") != "invalidArgument":
+        raise AssertionError(f"searchAgentSessions accepted a negative page: {json.dumps(negative, indent=2, sort_keys=True)}")
+
+    missing_key = "parity-session-not-on-this-device"
+    refused = send(
+        "resumeAgentSession",
+        {"agent": "claudeCode", "sessionKey": missing_key, "workingDirectory": "/nonexistent/spaces-device-api-parity"},
+        args,
+        app,
+    )
+    if refused.get("ok") is not False or refused.get("errorCode") != "invalidArgument" or missing_key not in refused.get("message", ""):
+        raise AssertionError(f"resumeAgentSession did not refuse a missing folder with the session id: {json.dumps(refused, indent=2, sort_keys=True)}")
+
+
 def run(args: argparse.Namespace) -> dict:
     args._request_timings = []
     app = client_app(args)
@@ -875,6 +916,7 @@ def run(args: argparse.Namespace) -> dict:
     wait_for_no_agent_row(args, app, workspace_id, agent_session_id)
 
     assert_saved_prompts_round_trip(args, app)
+    assert_agent_session_search_round_trip(args, app)
 
     overview_final = current_overview(args, app)
     final_workspace = find_workspace(overview_final, workspace_id) or {}

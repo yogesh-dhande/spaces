@@ -2859,6 +2859,11 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case deleteSavedPrompt(SpacesDeviceSavedPromptReference)
     /// Records that a prompt was copied, which moves it to the top of the library.
     case recordSavedPromptUse(SpacesDeviceSavedPromptReference)
+    /// Searches the coding-agent conversations in the agents' own stores on the device. Read-only.
+    case searchAgentSessions(SpacesDeviceAgentSessionSearchRequest)
+    /// Focuses the terminal already running a conversation found by `searchAgentSessions`, else resumes it
+    /// in a new terminal in the workspace the hit named, returning the session like `resumePinnedThread`.
+    case resumeAgentSession(SpacesDeviceResumeAgentSessionRequest)
 
     public var name: String {
         switch self {
@@ -2961,6 +2966,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .updateSavedPrompt: "updateSavedPrompt"
         case .deleteSavedPrompt: "deleteSavedPrompt"
         case .recordSavedPromptUse: "recordSavedPromptUse"
+        case .searchAgentSessions: "searchAgentSessions"
+        case .resumeAgentSession: "resumeAgentSession"
         case .restoreSessions: "restoreSessions"
         case .discardRestorableSessions: "discardRestorableSessions"
         }
@@ -3082,7 +3089,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
             .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions,
             .readAgentBrief, .listAutomations, .listAutomationRuns, .workspaceFileRead, .workspaceRevisionFileRead, .workspaceFileList,
             .workspaceRefList, .workspaceDiffManifestChunk, .workspaceDiffManifestRelease, .workspaceDiffFileChunk, .workspaceReviewCommentList,
-            .listSavedPrompts:
+            .listSavedPrompts, .searchAgentSessions:
             true
         default: false
         }
@@ -3192,6 +3199,8 @@ extension SpacesDeviceAPICommand: Codable {
         case updateSavedPrompt
         case deleteSavedPrompt
         case recordSavedPromptUse
+        case searchAgentSessions
+        case resumeAgentSession
     }
 
     public init(from decoder: any Decoder) throws {
@@ -3342,6 +3351,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .updateSavedPrompt: self = .updateSavedPrompt(try container.decode(SpacesDeviceSavedPromptUpdateRequest.self, forKey: key))
         case .deleteSavedPrompt: self = .deleteSavedPrompt(try container.decode(SpacesDeviceSavedPromptReference.self, forKey: key))
         case .recordSavedPromptUse: self = .recordSavedPromptUse(try container.decode(SpacesDeviceSavedPromptReference.self, forKey: key))
+        case .searchAgentSessions: self = .searchAgentSessions(try container.decode(SpacesDeviceAgentSessionSearchRequest.self, forKey: key))
+        case .resumeAgentSession: self = .resumeAgentSession(try container.decode(SpacesDeviceResumeAgentSessionRequest.self, forKey: key))
         }
     }
 
@@ -3449,6 +3460,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .updateSavedPrompt(let payload): try container.encode(payload, forKey: .updateSavedPrompt)
         case .deleteSavedPrompt(let payload): try container.encode(payload, forKey: .deleteSavedPrompt)
         case .recordSavedPromptUse(let payload): try container.encode(payload, forKey: .recordSavedPromptUse)
+        case .searchAgentSessions(let payload): try container.encode(payload, forKey: .searchAgentSessions)
+        case .resumeAgentSession(let payload): try container.encode(payload, forKey: .resumeAgentSession)
         }
     }
 }
@@ -3551,6 +3564,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case workspaceReviewCommentUpsert(SpacesDeviceWorkspaceReviewCommentUpsertResult)
     case restoredSessions(SpacesDeviceRestoredSessionsResult)
     case savedPrompts(SpacesDeviceSavedPromptsResult)
+    case agentSessionSearch(SpacesDeviceAgentSessionSearchResult)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -3585,6 +3599,7 @@ extension SpacesDeviceAPIResult: Codable {
         case workspaceReviewCommentUpsert
         case restoredSessions
         case savedPrompts
+        case agentSessionSearch
     }
 
     public init(from decoder: any Decoder) throws {
@@ -3628,6 +3643,7 @@ extension SpacesDeviceAPIResult: Codable {
             self = .workspaceReviewCommentUpsert(try container.decode(SpacesDeviceWorkspaceReviewCommentUpsertResult.self, forKey: key))
         case .restoredSessions: self = .restoredSessions(try container.decode(SpacesDeviceRestoredSessionsResult.self, forKey: key))
         case .savedPrompts: self = .savedPrompts(try container.decode(SpacesDeviceSavedPromptsResult.self, forKey: key))
+        case .agentSessionSearch: self = .agentSessionSearch(try container.decode(SpacesDeviceAgentSessionSearchResult.self, forKey: key))
         }
     }
 
@@ -3664,6 +3680,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .workspaceReviewCommentUpsert(let payload): try container.encode(payload, forKey: .workspaceReviewCommentUpsert)
         case .restoredSessions(let payload): try container.encode(payload, forKey: .restoredSessions)
         case .savedPrompts(let payload): try container.encode(payload, forKey: .savedPrompts)
+        case .agentSessionSearch(let payload): try container.encode(payload, forKey: .agentSessionSearch)
         }
     }
 }
@@ -3780,6 +3797,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     }
 
     public var savedPrompts: SpacesDeviceSavedPromptsResult? { if case .savedPrompts(let payload) = result { payload } else { nil } }
+
+    public var agentSessionSearch: SpacesDeviceAgentSessionSearchResult? {
+        if case .agentSessionSearch(let payload) = result { payload } else { nil }
+    }
 
     public var workspaceReviewCommentUpsert: SpacesDeviceWorkspaceReviewCommentUpsertResult? {
         if case .workspaceReviewCommentUpsert(let payload) = result { payload } else { nil }

@@ -154,6 +154,15 @@ let supportTargets: [Target] = ghosttyKitSupportTargets + macTestSupportTargets 
         dependencies: spacesDatabaseExtraDependencies,
         linkerSettings: [.linkedLibrary("sqlite3")]
     ),
+    // Decompression-only zstd for reading Codex's `.jsonl.zst` rollouts. macOS ships no libzstd and
+    // Linux hosts cannot be assumed to have one, so the source is vendored for both. The assembly
+    // Huffman decoder is not vendored, hence ZSTD_DISABLE_ASM.
+    .target(
+        name: "CZstd",
+        exclude: ["LICENSE"],
+        publicHeadersPath: "include",
+        cSettings: [.define("ZSTD_DISABLE_ASM")]
+    ),
     .target(name: "systembridge"),
     .target(name: "spacesruntimecore"),
     .target(name: "spacesptyshim"),
@@ -171,7 +180,8 @@ let baseTerminalTargets: [Target] = [
     .target(name: "spacesdevicecore", dependencies: ["spacesterminalcore"]),
     .target(
         name: "spacesdeviceapi",
-        dependencies: ["spacesdevicecore", "workspacecore", "spacesterminalcore", "spacesruntimecore"] + spacesDeviceAPIExtraDependencies
+        dependencies: ["spacesdevicecore", "workspacecore", "spacesterminalcore", "spacesruntimecore", "spacessessionindex"]
+            + spacesDeviceAPIExtraDependencies
     ),
     .target(
         name: "spacesclientcore",
@@ -204,9 +214,19 @@ let appTargets: [Target] = [
             "systembridge",
             "spacesterminalcore",
             "spacesdevicecore",
+            "spacessessionindex",
         ] + workspaceCoreExtraDependencies + [
             .product(name: "Yams", package: "Yams"),
         ],
+        linkerSettings: [.linkedLibrary("sqlite3")]
+    ),
+    .target(
+        name: "spacessessionindex",
+        dependencies: [
+            "spacesterminalcore",
+            "CZstd",
+            .product(name: "Yams", package: "Yams"),
+        ] + workspaceCoreExtraDependencies,
         linkerSettings: [.linkedLibrary("sqlite3")]
     ),
     .target(
@@ -235,10 +255,16 @@ let executableTargets: [Target] = [
             "spacesruntimecore",
             "spacesdeviceapi",
             "spacesclientcore",
+            "spacessessionindex",
         ],
         path: "Sources/spacesd"
     ),
     .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
+    // Performance regression benchmark for the session index; not part of verify.sh.
+    .executableTarget(
+        name: "spacessessionsearchbench",
+        dependencies: ["spacessessionindex", "spacesterminalcore"] + workspaceCoreExtraDependencies
+    ),
 ] + macExecutableTargets
 
 // On Linux only the daemon-side test targets exist: the others exercise AppKit/SwiftUI/Carbon
@@ -305,6 +331,11 @@ let executableTargets: [Target] = [
             name: "workspacecoreTests", dependencies: ["workspacecore"],
             sources: ["FileSystemWatcherLinuxInotifyTests.swift", "FileSystemWatcherInotifyRoutingTests.swift"]
         ),
+        .testTarget(
+            // The opencode suite builds its fixture database with the SQLite C API directly.
+            name: "spacessessionindexTests", dependencies: ["spacessessionindex", "spacesterminalcore"] + workspaceCoreExtraDependencies,
+            exclude: ["Fixtures"]
+        ),
     ]
 #else
     let testTargets: [Target] = [
@@ -321,8 +352,14 @@ let executableTargets: [Target] = [
             name: "workspacecoreTests",
             dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore", "spacesdevicecore", "spacestestsupport"]
         ),
+        .testTarget(
+            name: "spacessessionindexTests", dependencies: ["spacessessionindex", "spacesterminalcore"],
+            exclude: ["Fixtures"]
+        ),
         .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
-        .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore", "spacestestsupport"]),
+        .testTarget(
+            name: "spacesdeviceapiTests",
+            dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore", "spacestestsupport", "spacessessionindex"]),
         .testTarget(name: "spacesdevicecoreTests", dependencies: ["spacesdevicecore", "spacesterminalcore"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui", "spacesclientcore", "spacesdevicecore", "spacestestsupport"]),
         .testTarget(
@@ -357,9 +394,11 @@ let package = Package(
         .library(name: "spacesclientcore", targets: ["spacesclientcore"]),
         .library(name: "spacesruntimecore", targets: ["spacesruntimecore"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
+        .library(name: "spacessessionindex", targets: ["spacessessionindex"]),
         .library(name: "spacescli", targets: ["spacescli"]),
         .executable(name: "spacesd", targets: ["spacesd"]),
-        .executable(name: "spaces", targets: ["spaces"])
+        .executable(name: "spaces", targets: ["spaces"]),
+        .executable(name: "spacessessionsearchbench", targets: ["spacessessionsearchbench"])
     ] + macOnlyProducts + mobileGhosttyProducts,
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),

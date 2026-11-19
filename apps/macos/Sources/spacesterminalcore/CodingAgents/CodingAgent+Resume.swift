@@ -73,6 +73,16 @@ extension CodingAgent {
         }
     }
 
+    /// Whether the agent can resume a conversation only from the folder it ran in. Claude Code files its
+    /// transcripts under that folder and opencode scopes its sessions to it; the others locate a
+    /// conversation by its id wherever they are launched.
+    public var resumesOnlyFromOriginalFolder: Bool {
+        switch self {
+        case .claudeCode, .opencode: true
+        case .codex, .copilot, .pi, .amp: false
+        }
+    }
+
     /// The trimmed `sessionKey` when `resumeCommand` would actually resume it, else nil: the key is
     /// non-empty, the command launches a supported agent, and the command is not a one-shot run, which
     /// takes no resume selector at all (see `launchIsOneShotJob`). The capture already drops such a
@@ -636,9 +646,8 @@ extension CodingAgent {
             [
                 "--add-dir", "--add-github-mcp-tool", "--add-github-mcp-toolset", "--additional-mcp-config", "--agent", "--attachment", "--auto-tier",
                 "--bash-env", "-C", "--context", "--disable-mcp-server", "--dynamic-retrieval", "--enable-mcp-server", "--extension-sdk-path",
-                "--log-dir", "--log-level", "--max-ai-credits", "--max-autopilot-continues", "--mcp-github-auth", "--mode", "--model", "-n",
-                "--name", "--mouse", "--output-format", "--plugin-dir", "--reasoning-effort", "--session-id", "--share", "--stream",
-                "--usage-output-file",
+                "--log-dir", "--log-level", "--max-ai-credits", "--max-autopilot-continues", "--mcp-github-auth", "--mode", "--model", "-n", "--name",
+                "--mouse", "--output-format", "--plugin-dir", "--reasoning-effort", "--session-id", "--share", "--stream", "--usage-output-file",
             ]
         case .pi:
             // Read from pi 1.1.0's `--help`. `--append-system-prompt`, `--extension`, `--skill`,
@@ -646,8 +655,8 @@ extension CodingAgent {
             // here rather than variadic. `--list-models [search]` is optional-valued and one-shot, so it
             // never reaches the prompt scan.
             [
-                "--provider", "--model", "--api-key", "--system-prompt", "--append-system-prompt", "--mode", "--session-id", "--fork", "--session-dir",
-                "-n", "--name", "--models", "-t", "--tools", "-xt", "--exclude-tools", "--thinking", "-e", "--extension", "--skill",
+                "--provider", "--model", "--api-key", "--system-prompt", "--append-system-prompt", "--mode", "--session-id", "--fork",
+                "--session-dir", "-n", "--name", "--models", "-t", "--tools", "-xt", "--exclude-tools", "--thinking", "-e", "--extension", "--skill",
                 "--prompt-template", "--theme", "--use-theme", "--export", "--tui-mode",
             ]
         case .amp:

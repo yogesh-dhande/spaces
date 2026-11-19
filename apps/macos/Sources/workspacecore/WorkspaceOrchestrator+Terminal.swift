@@ -629,6 +629,11 @@ extension WorkspaceOrchestrator {
         return builtInSessionIsStillLive(sessionID: sessionID)
     }
 
+    /// The agent itself is still running: its row is not `.exited` and its terminal is live. An agent that
+    /// quit in a shell that stayed open keeps its row `.exited` on a live terminal, so terminal liveness
+    /// alone would report it running.
+    func builtInAgentIsRunning(_ record: AgentWindowRecord) -> Bool { record.status != .exited && builtInAgentSessionIsStillLive(record) }
+
     func builtInAgentSessionID(for record: AgentWindowRecord) -> String? {
         guard record.provider == .spaces else { return nil }
         let sessionID = record.terminalTrackingID

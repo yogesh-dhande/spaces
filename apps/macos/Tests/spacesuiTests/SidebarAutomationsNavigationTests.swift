@@ -103,28 +103,30 @@ extension ProcessProfileEnvironmentSuites {
             return controller
         }
 
-        @Test func upArrowFromTheFirstWorkspaceLeavesPromptsShowing() throws {
+        @Test func upArrowFromTheFirstWorkspaceLeavesSessionsShowing() throws {
             let controller = loadedController()
             let first = try #require(controller.deviceModel.workspacesByProject[Self.projectID]?.first, "the project must list its workspaces")
             controller.sidebar.selectWorkspace(first)
             #expect(controller.selectedWorkspaceID == Self.firstWorkspaceID)
 
-            #expect(controller.sidebar.navigateSidebarSelection(direction: -1), "the first workspace's up target is the Prompts row")
+            #expect(controller.sidebar.navigateSidebarSelection(direction: -1), "the first workspace's up target is the Sessions row")
 
-            #expect(controller.showingPrompts, "presenting Prompts clears the outline selection and must survive that re-entry")
+            #expect(controller.showingSessions, "presenting Sessions clears the outline selection and must survive that re-entry")
             #expect(controller.selectedWorkspaceID == nil)
         }
 
-        @Test func arrowNavigationKeepsMovingAfterLandingOnPrompts() throws {
+        @Test func arrowNavigationKeepsMovingAfterLandingOnSessions() throws {
             let controller = loadedController()
             let first = try #require(controller.deviceModel.workspacesByProject[Self.projectID]?.first, "the project must list its workspaces")
             controller.sidebar.selectWorkspace(first)
             #expect(controller.sidebar.navigateSidebarSelection(direction: -1))
 
-            #expect(controller.sidebar.navigateSidebarSelection(direction: 1), "down from Prompts returns to the first workspace")
+            #expect(controller.sidebar.navigateSidebarSelection(direction: 1), "down from Sessions returns to the first workspace")
             #expect(controller.selectedWorkspaceID == Self.firstWorkspaceID)
 
             #expect(controller.sidebar.navigateSidebarSelection(direction: -1))
+            #expect(controller.sidebar.navigateSidebarSelection(direction: -1), "up from Sessions reaches Prompts")
+            #expect(controller.showingPrompts)
             #expect(controller.sidebar.navigateSidebarSelection(direction: -1), "up from Prompts reaches Resources")
             #expect(controller.showingResources)
             #expect(controller.sidebar.navigateSidebarSelection(direction: -1), "up from Resources reaches Automations")
@@ -194,7 +196,7 @@ extension ProcessProfileEnvironmentSuites {
             #expect(controller.sidebar.navigateSidebarSelection(direction: 1) == false, "beta is the last row")
         }
 
-        @Test func upArrowWalksBackThroughTheHomeRowToPrompts() throws {
+        @Test func upArrowWalksBackThroughTheHomeRowToSessions() throws {
             let controller = loadedHomeRowController()
             let beta = try #require(controller.deviceModel.workspacesByProject["project-beta"]?.first, "the beta project must list its workspace")
             controller.sidebar.selectWorkspace(beta)
@@ -207,7 +209,7 @@ extension ProcessProfileEnvironmentSuites {
             #expect(controller.selectedWorkspaceID == "home-workspace", "up from alpha lands back on the home row, not project order")
 
             #expect(controller.sidebar.navigateSidebarSelection(direction: -1))
-            #expect(controller.showingPrompts, "up from the home row reaches Prompts")
+            #expect(controller.showingSessions, "up from the home row reaches Sessions")
         }
     }
 }
