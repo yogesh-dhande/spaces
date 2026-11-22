@@ -42,7 +42,7 @@ export default function PromptsDocsPage() {
           Discard and Save appear once you change something, and the editor says &quot;Edited · not
           saved&quot;. Copy on the open row copies what is in the editor, saved or not, without saving
           it, and reads &quot;Copy edited&quot; while there are unsaved changes. Click the row again
-          or press Esc to close it. New Prompt starts an empty one; with more than one device
+          or press Esc to close it. New prompt starts an empty one; with more than one device
           paired, you choose which device keeps it, starting with this Mac. Delete asks first.
         </Prose>
         <Prose>

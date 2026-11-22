@@ -109,6 +109,10 @@ public struct ThemeAppearanceTokens: Sendable {
     public let rowSelectedCard: ThemeColor
     public let rowSelectedCardBorder: ThemeColor
     public let chipBackground: ThemeColor
+    /// Quiet fill of an unbordered control that sits directly on a pane's background: search fields,
+    /// filter pop-ups, and low-emphasis buttons. The text color at a low alpha, so it reads as a
+    /// slightly recessed surface in both appearances.
+    public let controlFill: ThemeColor
 
     // Element pairs (foregrounds reuse the tokens above)
     public let iconProcessBackground: ThemeColor
@@ -125,8 +129,8 @@ public struct ThemeAppearanceTokens: Sendable {
         accentStrong: ThemeColor, accentTint: ThemeColor, onAccent: ThemeColor, primaryButtonFill: ThemeColor, primaryButtonText: ThemeColor,
         green: ThemeColor, red: ThemeColor, orange: ThemeColor, blue: ThemeColor, statusFailed: ThemeColor, connectionBannerFill: ThemeColor,
         onConnectionBanner: ThemeColor, rowHover: ThemeColor, rowSelected: ThemeColor, rowSelectedCard: ThemeColor, rowSelectedCardBorder: ThemeColor,
-        chipBackground: ThemeColor, iconProcessBackground: ThemeColor, iconAgentBackground: ThemeColor, iconPortBackground: ThemeColor,
-        statusRunningHalo: ThemeColor, terminal: GhosttyThemeExport
+        chipBackground: ThemeColor, controlFill: ThemeColor, iconProcessBackground: ThemeColor, iconAgentBackground: ThemeColor,
+        iconPortBackground: ThemeColor, statusRunningHalo: ThemeColor, terminal: GhosttyThemeExport
     ) {
         self.background = background
         self.surface = surface
@@ -156,6 +160,7 @@ public struct ThemeAppearanceTokens: Sendable {
         self.rowSelectedCard = rowSelectedCard
         self.rowSelectedCardBorder = rowSelectedCardBorder
         self.chipBackground = chipBackground
+        self.controlFill = controlFill
         self.iconProcessBackground = iconProcessBackground
         self.iconAgentBackground = iconAgentBackground
         self.iconPortBackground = iconPortBackground

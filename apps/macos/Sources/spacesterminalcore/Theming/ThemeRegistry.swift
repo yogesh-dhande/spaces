@@ -51,7 +51,7 @@ public enum ThemeRegistry {
         connectionBannerFill: ThemeColor(186, 67, 111), onConnectionBanner: ThemeColor(255, 255, 255), rowHover: ThemeColor(15, 32, 40, alpha: 0.04),
         rowSelected: ThemeColor(15, 122, 118, alpha: 0.14), rowSelectedCard: ThemeColor(15, 122, 118, alpha: 0.07),
         rowSelectedCardBorder: ThemeColor(13, 95, 93, alpha: 0.28), chipBackground: ThemeColor(15, 32, 40, alpha: 0.06),
-        iconProcessBackground: ThemeColor(58, 158, 95, alpha: 0.16), iconAgentBackground: ThemeColor(15, 32, 40, alpha: 0.08),
+        controlFill: ThemeColor(16, 32, 40, alpha: 0.06), iconProcessBackground: ThemeColor(58, 158, 95, alpha: 0.16), iconAgentBackground: ThemeColor(15, 32, 40, alpha: 0.08),
         iconPortBackground: ThemeColor(208, 122, 26, alpha: 0.12), statusRunningHalo: ThemeColor(58, 158, 95, alpha: 0.22),
         terminal: spacesBrandLightTerminal)
 
@@ -69,7 +69,7 @@ public enum ThemeRegistry {
         connectionBannerFill: ThemeColor(179, 78, 64), onConnectionBanner: ThemeColor(255, 255, 255),
         rowHover: ThemeColor(234, 240, 239, alpha: 0.06), rowSelected: ThemeColor(89, 219, 205, alpha: 0.18),
         rowSelectedCard: ThemeColor(89, 219, 205, alpha: 0.07), rowSelectedCardBorder: ThemeColor(61, 198, 184, alpha: 0.28),
-        chipBackground: ThemeColor(234, 240, 239, alpha: 0.08), iconProcessBackground: ThemeColor(76, 208, 122, alpha: 0.16),
+        chipBackground: ThemeColor(234, 240, 239, alpha: 0.08), controlFill: ThemeColor(234, 240, 239, alpha: 0.06), iconProcessBackground: ThemeColor(76, 208, 122, alpha: 0.16),
         iconAgentBackground: ThemeColor(234, 240, 239, alpha: 0.10), iconPortBackground: ThemeColor(245, 167, 66, alpha: 0.14),
         statusRunningHalo: ThemeColor(76, 208, 122, alpha: 0.22), terminal: spacesBrandDarkTerminal)
 }

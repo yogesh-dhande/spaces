@@ -292,14 +292,14 @@ import workspacecore
         let device = status(ofDevice: model.deviceID)
         let isOffline = device.record == nil
         let hasQuery = !model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        var message: String?
+        var emptyState: PaneEmptyStateContent?
         if isOffline {
-            message = "\(device.name) is offline"
+            emptyState = .sessionsOffline(deviceName: device.name)
         } else if model.hits.isEmpty {
             if model.progress == nil {
-                message = model.errorMessage == nil ? "Searching" : nil
+                emptyState = model.errorMessage == nil ? .sessionsSearching : nil
             } else if model.progress?.isBuilding != true {
-                message = hasQuery ? "No sessions match" : "No sessions on \(device.name)"
+                emptyState = .sessionsEmpty(hasQuery: hasQuery, deviceName: device.name)
             }
         }
         let state = SessionsPaneState(
@@ -308,7 +308,7 @@ import workspacecore
             }, selectedDeviceID: model.deviceID, agentChoices: isOffline ? [] : model.availableAgents, selectedAgents: model.selectedAgents,
             agentsTitle: model.agentsTitle, projectChoices: isOffline ? [] : model.availableProjects, selectedProjectID: model.selectedProjectID,
             countText: isOffline ? nil : model.countText, progressText: isOffline ? nil : model.progressText,
-            errorText: isOffline ? nil : model.errorMessage, message: message, rows: isOffline ? [] : model.rows(now: Date()), query: model.query,
+            errorText: isOffline ? nil : model.errorMessage, emptyState: emptyState, rows: isOffline ? [] : model.rows(now: Date()), query: model.query,
             selectedKey: model.selectedKey, resumingKey: model.resumingKey, resumeError: model.resumeError,
             canShowMore: !isOffline && model.canShowMore, isLoadingMore: model.isLoadingMore)
         pane.render(state, scrollSelectionIntoView: scrollSelectionIntoView)

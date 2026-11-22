@@ -475,9 +475,9 @@ The product rules Spaces follows, from the user's point of view: what happens, w
 
 ### Mac
 - The Prompts row sits below Resources and shows the number of prompts (hidden at zero). The pane is a table: Title, Prompt (one-line preview), Device (only with 2 or more paired devices; this Mac reads "This Mac"), Used (how long ago), and a Copy button per row.
-- Clicking a row opens it in place: its title becomes editable and the full text opens in an editor below, so the preview is empty while open. Discard and Save appear only while the prompt has unsaved edits, which the editor marks "Edited · not saved". Copy on an open prompt with unsaved edits reads "Copy edited". New Prompt opens an empty draft at the top; it is absent when no device is reachable.
+- Clicking a row opens it in place: its title becomes editable and the full text opens in an editor below, so the preview is empty while open. Discard and Save appear only while the prompt has unsaved edits, which the editor marks "Edited · not saved". Copy on an open prompt with unsaved edits reads "Copy edited". New prompt opens an empty draft at the top; it is absent when no device is reachable. An empty library offers "Create a prompt", which does the same.
 - Clicking the open row outside its title and Copy, or pressing Esc in the title or text, closes it, first asking Save, Discard, or Cancel when there are unsaved edits.
-- Leaving a prompt with unsaved edits inside the pane (another row, collapsing, New Prompt) or through the sidebar (any sidebar row or arrow navigation) asks Save, Discard, or Cancel. Any other way off the pane (the palette, a shortcut, a deep link) keeps the draft until the user returns to the pane. Quitting drops it.
+- Leaving a prompt with unsaved edits inside the pane (another row, collapsing, New prompt) or through the sidebar (any sidebar row or arrow navigation) asks Save, Discard, or Cancel. Any other way off the pane (the palette, a shortcut, a deep link) keeps the draft until the user returns to the pane. Quitting drops it.
 - In the command palette, choosing a prompt copies it, closes the palette so focus returns to the previous terminal, and shows a "Copied" confirmation in the main window with the title and the paste chord.
 
 ### iOS
