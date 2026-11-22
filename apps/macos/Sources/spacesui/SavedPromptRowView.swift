@@ -82,10 +82,9 @@ import systembridge
         usedLabel.lineBreakMode = .byClipping
         columns.append(usedLabel)
 
-        copyButton = NSButton(title: row.copyTitle, target: self, action: #selector(copyClicked))
+        copyButton = QuietButton(title: row.copyTitle, target: self, action: #selector(copyClicked))
         copyButton.setAccessibilityIdentifier(row.isExpanded ? "prompts-editor-copy" : "prompts-row-copy")
         copyButton.toolTip = "Copy prompt"
-        Theme.applySecondaryStyle(to: copyButton)
         Self.setCopyContent(copyButton, title: row.copyTitle, showsCopied: row.showsCopied)
         self.onCopy = onCopy
         columns.append(copyButton)
@@ -118,8 +117,7 @@ import systembridge
     @objc private func copyClicked() { onCopy?() }
 
     /// The Copy button's content: `title`, plus a check while the "Copied" confirmation shows. It runs on every
-    /// keystroke in the open row, so it sets only content: `Theme.applySecondaryStyle` adds layout constraints each
-    /// time it is applied, which is why the style is applied once when the row is built.
+    /// keystroke in the open row, so it sets only content; the button's fill and size are fixed when it is built.
     private static func setCopyContent(_ button: NSButton, title: String, showsCopied: Bool) {
         button.image = showsCopied ? NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Copied") : nil
         button.imagePosition = showsCopied ? .imageLeading : .noImage

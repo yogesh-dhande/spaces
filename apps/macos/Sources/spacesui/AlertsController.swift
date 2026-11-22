@@ -753,21 +753,9 @@ import workspacecore
             view.layer?.backgroundColor = host.sidebar.sidebarPanelBackgroundColor().cgColor
         }
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        let stack = PaneLayout.makeStack()
 
-        let headerTitle = NSTextField(labelWithString: "Alerts")
-        headerTitle.font = Typography.pageTitle
-        headerTitle.textColor = host.sidebar.sidebarPrimaryTextColor(isSelected: false)
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 8
-        headerRow.addArrangedSubview(headerTitle)
+        var headerActions: [NSView] = []
         if !plan.rows.isEmpty {
             // Disabled, not hidden, when every listed row is on an offline device: the list is still
             // there, it just cannot take a dismissal. `canDismiss` is part of the render signature, so a
@@ -776,49 +764,18 @@ import workspacecore
             let clearAllButton = NSButton(title: "Clear All", target: self, action: #selector(clearAllAlertsAction(_:)))
             clearAllButton.setAccessibilityIdentifier("alerts.clear-all")
             clearAllButton.isEnabled = canClearAny
-            Theme.applyTextStyle(to: clearAllButton, color: canClearAny ? Theme.accent : .tertiaryLabelColor)
-            let spacer = NSView()
-            spacer.translatesAutoresizingMaskIntoConstraints = false
-            spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-            headerRow.addArrangedSubview(spacer)
-            headerRow.addArrangedSubview(clearAllButton)
+            Theme.applyTextStyle(to: clearAllButton, color: canClearAny ? Theme.muted : Theme.mutedSecondary)
+            headerActions.append(clearAllButton)
         }
 
+        let headerRow = PaneHeaderView(title: "Alerts", actions: headerActions)
         stack.addArrangedSubview(headerRow)
         constrainFormFieldToFillWidth(headerRow, in: stack)
 
         if plan.rows.isEmpty {
-            let sep = NSView()
-            sep.translatesAutoresizingMaskIntoConstraints = false
-            sep.wantsLayer = true
-            bindAppearanceReactiveLayer(sep) { [unowned host] view in
-                view.layer?.backgroundColor = host.sidebar.sidebarCardBorderColor(isSelected: false).cgColor
-            }
-            sep.heightAnchor.constraint(equalToConstant: 1).isActive = true
-            stack.addArrangedSubview(sep)
-            constrainFormFieldToFillWidth(sep, in: stack)
-
-            let icon = NSImageView()
-            icon.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "All clear")
-            icon.contentTintColor = host.sidebar.sidebarRunningIndicatorColor()
-            icon.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 28), icon.heightAnchor.constraint(equalToConstant: 28)])
-            let emptyTitle = NSTextField(labelWithString: "No attention required")
-            emptyTitle.font = Typography.rowLabel
-            emptyTitle.textColor = .labelColor
-            let emptyDetail = NSTextField(labelWithString: "All running workspaces are healthy.")
-            emptyDetail.font = Typography.metadata
-            emptyDetail.textColor = .secondaryLabelColor
-            let emptyStack = NSStackView()
-            emptyStack.orientation = .vertical
-            emptyStack.alignment = .centerX
-            emptyStack.spacing = 6
-            emptyStack.translatesAutoresizingMaskIntoConstraints = false
-            emptyStack.addArrangedSubview(icon)
-            emptyStack.addArrangedSubview(emptyTitle)
-            emptyStack.addArrangedSubview(emptyDetail)
-            stack.addArrangedSubview(emptyStack)
-            constrainFormFieldToFillWidth(emptyStack, in: stack)
+            let emptyState = PaneEmptyStateView(content: .alertsAllClear)
+            stack.addArrangedSubview(emptyState)
+            constrainFormFieldToFillWidth(emptyState, in: stack)
 
             showScrollableDetailStack(stack, in: host.detailContainer)
             renderedAlerts = RenderedAlertsDetail(signature: signature, rowsByAttentionID: [:], ageFieldsByAttentionID: [:])

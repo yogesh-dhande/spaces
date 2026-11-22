@@ -25,6 +25,16 @@ The visual system and reusable interaction patterns for the Spaces Mac and iOS a
 - Group to show structure, but avoid deep nesting.
 - A secondary column beside a pane's own content (a coding agent's brief) is a fixed-width (300 pt) strip on `surface`, set off from the content by a 1 pt `border` on its leading edge rather than a shadow or gap, so it reads as its own region without competing with the pane's banner. It carries a small header (a title and a muted relative-time caption) over a read-only, selectable body, and has no controls of its own: showing and hiding it belongs to a footer glyph and an overflow-menu item.
 
+## Home Panes
+
+Alerts, Automations, Resources, Prompts, and Sessions (and any later list pane) share one layout, built from the shared pane views in `spacesui` (`PaneHeaderView`, `PaneTabsView`, `QuietSearchFieldView`, `QuietPopUpView`, `PaneEmptyStateView`). Rows are spaced 16 pt apart and inset the same amount, so moving between panes does not shift anything.
+
+- **Title row.** The page title (`pageTitle`) sits on the left and the pane's actions on the right, vertically centered on a 28 pt row. Every pane has a title. A pane has at most one primary action: an accent-filled (`primaryButtonFill`) 28 pt button, radius 6, with a leading `plus`, 13 pt semibold label in sentence case ("New prompt", "New automation"), 11 pt before the icon, 6 pt between icon and label, 14 pt after the label. Secondary title-row actions are text buttons in the muted label color (Alerts' "Clear All").
+- **Search row.** When a pane filters by text, the search field sits directly under the title row and fills the width: no border, the `controlFill` fill, radius 6, 28 pt tall, with a magnifier glyph. A muted count may sit at its right.
+- **Tabs and filters row.** Panes with sections use underline tabs, not a segmented control: plain text buttons, the selected tab in the text color with medium weight and a 2 pt underline in the text color, the others in `mutedSecondary`, with a 1 pt `border` line under the whole row. Filters sit right-aligned in the same row. Each tab is a button that reports its selected state to assistive technology. A pane that only filters (Sessions) has no tabs: its quiet pop-ups sit left-aligned in one row under the search row.
+- **Quiet controls.** Filter pop-ups and low-emphasis row buttons (Copy) have no bezel or border: the `controlFill` fill, radius 6, a 12 pt label and a small chevron for pop-ups, 26 pt tall (24 pt for row buttons).
+- **Empty state.** One style for every pane, centered with generous space above: a 24 pt SF Symbol in `mutedSecondary`, a title (14 pt medium, text color), one detail line (12 pt, `muted`), and an optional text action in the accent color that does what the pane's primary action does. An empty result of a search or filter has a title only and no action. A healthy empty state (Alerts) uses the same muted symbol, not green.
+
 ## Color And Surfaces
 
 - Colors come from the shared theme tokens, never from one-off values in a view. The values live in `ThemeRegistry` (`spacesterminalcore`): each theme defines one semantic token set per appearance plus the terminal colors exported to embedded Ghostty surfaces, so app chrome and terminals share one palette. `Theme` is the adapter on each platform (AppKit in `spacesui`, SwiftUI in `apps/ios`). Add a new color to the token set, not as an ad hoc color in an adapter or view.
@@ -180,7 +190,7 @@ The visual system and reusable interaction patterns for the Spaces Mac and iOS a
 
 ## Empty, Missing, And Draft States
 
-- In dense views, show empty or missing values as muted placeholder text, not large empty-state treatments, and keep enough context to act in place.
+- In dense views, show empty or missing values as muted placeholder text, not large empty-state treatments, and keep enough context to act in place. A whole pane with nothing to list uses the home panes' empty state instead.
 - A pane whose only content is its recovery actions may center the subject's name, its path in a monospaced caption, and the pill actions that apply, with their shortcut hints beneath.
 - Draft state is obvious and easy to complete or cancel. When a draft cannot be sent, explain the missing prerequisite directly under it; do not add a success hint when sending is available.
 

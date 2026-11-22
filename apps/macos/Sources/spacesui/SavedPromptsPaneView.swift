@@ -1,7 +1,7 @@
 import AppKit
 import spacesterminalcore
 
-/// The Prompts pane's views: the header (title, search, New Prompt) and the table.
+/// The Prompts pane's views: the title row (title, New prompt), the search row, and the table.
 ///
 /// A render whose layout matches the last one only updates the lines' contents. Otherwise it rebuilds the
 /// header line, divider, and row lines, but never the header controls or the open prompt's editor. The search
@@ -11,7 +11,7 @@ import spacesterminalcore
 /// line, and `render` restores its caret.
 @MainActor final class SavedPromptsPaneView: NSObject {
     /// The pane's content, shown through `showScrollableDetailStack`.
-    let stack = NSStackView()
+    let stack = PaneLayout.makeStack()
 
     var onSearchChange: (String) -> Void = { _ in }
     var onNewPrompt: () -> Void = {}
@@ -19,10 +19,11 @@ import spacesterminalcore
     var onRowCopy: (String) -> Void = { _ in }
 
     private let editorActions: SavedPromptEditorActions
-    private let searchField = NSSearchField()
-    private let newPromptButton = NSButton(title: "New Prompt", target: nil, action: nil)
+    private let searchView = QuietSearchFieldView(placeholder: "Search titles and text")
+    private var searchField: NSSearchField { searchView.field }
+    private let newPromptButton = PanePrimaryButton(title: "New prompt", symbol: "plus", target: nil, action: nil)
     private let table = NSStackView()
-    private let emptyLabel = NSTextField(labelWithString: "")
+    private let emptyState = PaneEmptyStateView(content: .savedPrompts(query: "", canCreate: false))
     private var editor: (key: String, view: SavedPromptEditorView)?
     /// What the table's lines were last built or updated from, to tell whether a render needs a rebuild.
     private var applied: (rows: [SavedPromptsPaneModel.Row], showsDeviceColumn: Bool)?
@@ -33,7 +34,7 @@ import spacesterminalcore
         static let preview = TableGrid.ColumnWidth.growable(preferred: 340, minimum: 160)
         static let device = TableGrid.ColumnWidth.capped(preferred: 120, minimum: 72)
         static let used = TableGrid.ColumnWidth.fixed(48)
-        // Wide enough for "Copy edited" in the secondary button style (its label plus 36pt of padding).
+        // Wide enough for "Copy edited" in the quiet button style (its label plus 24pt of padding).
         static let copy = TableGrid.ColumnWidth.fixed(116)
         static let sideInset: CGFloat = 4
     }
@@ -42,40 +43,20 @@ import spacesterminalcore
         self.editorActions = editorActions
         super.init()
 
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let titleLabel = NSTextField(labelWithString: "Prompts")
-        titleLabel.font = Typography.pageTitle
-        titleLabel.textColor = Theme.text
-
-        searchField.placeholderString = "Search titles and text"
-        searchField.sendsSearchStringImmediately = true
         searchField.stringValue = query
         searchField.target = self
         searchField.action = #selector(searchChanged)
         searchField.setAccessibilityIdentifier("prompts-search")
-        searchField.translatesAutoresizingMaskIntoConstraints = false
-        searchField.widthAnchor.constraint(lessThanOrEqualToConstant: 420).isActive = true
-        searchField.setContentHuggingPriority(NSLayoutConstraint.Priority(250), for: .horizontal)
 
         newPromptButton.target = self
         newPromptButton.action = #selector(newPromptClicked)
-        newPromptButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New prompt")
-        newPromptButton.imagePosition = .imageLeading
         newPromptButton.setAccessibilityIdentifier("prompts-new")
-        Theme.applySecondaryStyle(to: newPromptButton)
 
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let headerRow = NSStackView(views: [titleLabel, searchField, spacer, newPromptButton])
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 12
+        let headerRow = PaneHeaderView(title: "Prompts", actions: [newPromptButton])
         stack.addArrangedSubview(headerRow)
         constrainFormFieldToFillWidth(headerRow, in: stack)
+        stack.addArrangedSubview(searchView)
+        constrainFormFieldToFillWidth(searchView, in: stack)
 
         table.orientation = .vertical
         table.alignment = .leading
@@ -85,12 +66,10 @@ import spacesterminalcore
         stack.addArrangedSubview(table)
         constrainFormFieldToFillWidth(table, in: stack)
 
-        emptyLabel.font = Typography.rowDetail
-        emptyLabel.textColor = Theme.muted
-        emptyLabel.alignment = .center
-        emptyLabel.setAccessibilityIdentifier("prompts-empty")
-        stack.addArrangedSubview(emptyLabel)
-        constrainFormFieldToFillWidth(emptyLabel, in: stack)
+        emptyState.setAccessibilityIdentifier("prompts-empty")
+        emptyState.onAction = { [weak self] in self?.onNewPrompt() }
+        stack.addArrangedSubview(emptyState)
+        constrainFormFieldToFillWidth(emptyState, in: stack)
     }
 
     @objc private func searchChanged() { onSearchChange(searchField.stringValue) }
@@ -99,12 +78,12 @@ import spacesterminalcore
     /// Redraws the table. `editorState` is the open draft's row key and what its editor shows, or nil when
     /// no editor is open.
     func render(
-        rows: [SavedPromptsPaneModel.Row], showsDeviceColumn: Bool, canCreate: Bool, emptyMessage: String?,
+        rows: [SavedPromptsPaneModel.Row], showsDeviceColumn: Bool, canCreate: Bool, emptyState emptyContent: PaneEmptyStateContent?,
         editorState: (key: String, state: SavedPromptEditorState)?
     ) {
         newPromptButton.isHidden = !canCreate
-        emptyLabel.stringValue = emptyMessage ?? ""
-        emptyLabel.isHidden = emptyMessage == nil
+        if let emptyContent { emptyState.update(emptyContent) }
+        emptyState.isHidden = emptyContent == nil
 
         let (editorView, isNewEditor) = resolveEditor(for: editorState)
         let previous = applied

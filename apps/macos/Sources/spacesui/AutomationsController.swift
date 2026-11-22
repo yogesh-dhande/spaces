@@ -117,17 +117,15 @@ import workspacecore
         // A dropped device would otherwise vanish from the filter; keep "All devices" selected instead.
         if let filter = deviceFilterID, !inputs.contains(where: { $0.deviceID == filter }) { deviceFilterID = nil }
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        let stack = PaneLayout.makeStack()
 
-        stack.addArrangedSubview(makeHeaderRow(inputs: inputs))
-        constrainFormFieldToFillWidth(stack.arrangedSubviews[0], in: stack)
+        let headerRow = makeHeaderRow()
+        stack.addArrangedSubview(headerRow)
+        constrainFormFieldToFillWidth(headerRow, in: stack)
 
-        let tabControl = makeTabControl()
-        stack.addArrangedSubview(tabControl)
+        let tabs = makeTabs(inputs: inputs)
+        stack.addArrangedSubview(tabs)
+        constrainFormFieldToFillWidth(tabs, in: stack)
 
         for device in AutomationsViewModel.unreachableDevices(from: inputs) {
             let marker = makeUnreachableMarker(device)
@@ -215,10 +213,16 @@ import workspacecore
 
     // MARK: - Header & tabs
 
-    /// The pane's controls row. It carries no page title: the tab control directly below it already names
-    /// the pane, and the sidebar row it was opened from names it again.
-    private func makeHeaderRow(inputs: [AutomationDeviceInput]) -> NSView {
-        let devicePopUp = NSPopUpButton()
+    private func makeHeaderRow() -> NSView {
+        let newButton = PanePrimaryButton(title: "New automation", symbol: "plus", target: self, action: #selector(newAutomationTapped))
+        newButton.toolTip = "Create an automation"
+        return PaneHeaderView(title: "Automations", actions: [newButton])
+    }
+
+    /// The Automations / Runs tabs with the device filter at the row's right.
+    private func makeTabs(inputs: [AutomationDeviceInput]) -> NSView {
+        let deviceFilter = QuietPopUpView()
+        let devicePopUp = deviceFilter.popUp
         devicePopUp.addItem(withTitle: "All devices")
         devicePopUp.itemArray.last?.representedObject = nil
         for input in inputs {
@@ -228,27 +232,10 @@ import workspacecore
         }
         devicePopUp.target = self
         devicePopUp.action = #selector(deviceFilterChanged(_:))
-        devicePopUp.setContentHuggingPriority(.required, for: .horizontal)
 
-        let newButton = actionButton(
-            title: "New automation", symbol: "plus", tooltip: "Create an automation", action: #selector(newAutomationTapped), primary: true,
-            target: host)
-        newButton.target = self
-
-        let row = NSStackView(views: [NSView(), devicePopUp, newButton])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-        return row
-    }
-
-    private func makeTabControl() -> NSView {
-        let segmented = NSSegmentedControl(
-            labels: ["Automations", "Runs"], trackingMode: .selectOne, target: self, action: #selector(tabChanged(_:)))
-        segmented.selectedSegment = selectedTab.rawValue
-        segmented.translatesAutoresizingMaskIntoConstraints = false
-        return segmented
+        let tabs = PaneTabsView(titles: ["Automations", "Runs"], selected: selectedTab.rawValue, filters: [deviceFilter])
+        tabs.onSelect = { [weak self] index in self?.selectTab(Tab(rawValue: index) ?? .automations) }
+        return tabs
     }
 
     private func makeUnreachableMarker(_ device: AutomationUnreachableDevice) -> NSView {
@@ -276,7 +263,7 @@ import workspacecore
     private func appendAutomationsTab(to stack: NSStackView, inputs: [AutomationDeviceInput]) {
         let rows = AutomationsViewModel.filterAutomations(AutomationsViewModel.mergedAutomations(from: inputs), deviceID: deviceFilterID)
         guard !rows.isEmpty else {
-            appendEmptyState(to: stack, icon: "clock.arrow.circlepath", title: "No automations", detail: "Create one to run a command on a schedule.")
+            appendEmptyState(.noAutomations, to: stack)
             return
         }
         // The device column earns its width only when the table actually spans devices; with one device
@@ -516,7 +503,7 @@ import workspacecore
     private func appendRunsTab(to stack: NSStackView, inputs: [AutomationDeviceInput]) {
         let rows = AutomationsViewModel.filterRuns(AutomationsViewModel.mergedRuns(from: inputs), deviceID: deviceFilterID)
         guard !rows.isEmpty else {
-            appendEmptyState(to: stack, icon: "list.bullet.rectangle", title: "No runs yet", detail: "Runs appear here once an automation fires.")
+            appendEmptyState(.noRuns, to: stack)
             return
         }
         for row in rows {
@@ -678,23 +665,9 @@ import workspacecore
         return card
     }
 
-    private func appendEmptyState(to stack: NSStackView, icon: String, title: String, detail: String) {
-        let iconView = NSImageView()
-        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: title)
-        iconView.contentTintColor = .tertiaryLabelColor
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 26), iconView.heightAnchor.constraint(equalToConstant: 26)])
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = Typography.emptyStateTitle
-        titleLabel.textColor = .labelColor
-        let detailLabel = NSTextField(labelWithString: detail)
-        detailLabel.font = Typography.metadata
-        detailLabel.textColor = .secondaryLabelColor
-        let empty = NSStackView(views: [iconView, titleLabel, detailLabel])
-        empty.orientation = .vertical
-        empty.alignment = .centerX
-        empty.spacing = 6
-        empty.translatesAutoresizingMaskIntoConstraints = false
+    private func appendEmptyState(_ content: PaneEmptyStateContent, to stack: NSStackView) {
+        let empty = PaneEmptyStateView(content: content)
+        empty.onAction = { [weak self] in self?.newAutomationTapped() }
         stack.addArrangedSubview(empty)
         constrainFormFieldToFillWidth(empty, in: stack)
     }
@@ -770,8 +743,7 @@ import workspacecore
         showAutomationsDetail()
     }
 
-    @objc private func tabChanged(_ sender: NSSegmentedControl) {
-        let nextTab = Tab(rawValue: sender.selectedSegment) ?? .automations
+    private func selectTab(_ nextTab: Tab) {
         if nextTab != selectedTab { resetRetainedRunHistory() }
         selectedTab = nextTab
         showAutomationsDetail()

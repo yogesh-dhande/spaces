@@ -218,12 +218,10 @@ import workspacecore
         guard let pane else { return }
         let showsDevices = SavedPromptsPaneModel.showsDeviceChoices(pairedDeviceCount: host.deviceModel.deviceSections.count)
         let rows = currentRows(showsDevices: showsDevices)
-        let emptyMessage: String? =
-            rows.isEmpty
-            ? (model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? "No saved prompts. New Prompt saves one you can copy into any terminal." : "No matching prompts") : nil
+        let canCreate = !reachable.isEmpty
+        let emptyState = rows.isEmpty ? PaneEmptyStateContent.savedPrompts(query: model.query, canCreate: canCreate) : nil
         pane.render(
-            rows: rows, showsDeviceColumn: showsDevices, canCreate: !reachable.isEmpty, emptyMessage: emptyMessage,
+            rows: rows, showsDeviceColumn: showsDevices, canCreate: canCreate, emptyState: emptyState,
             editorState: model.draft.map { ($0.key, editorState(for: $0, showsDevices: showsDevices)) })
     }
 

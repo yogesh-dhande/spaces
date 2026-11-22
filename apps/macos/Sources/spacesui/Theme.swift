@@ -60,6 +60,8 @@ enum Theme {
     /// Subtle accent border for a selected palette row.
     static let rowSelectedCardBorder = dynamic(\.rowSelectedCardBorder)
     static let chipBg = dynamic(\.chipBackground)
+    /// Quiet fill of unbordered controls placed on a pane: search field, filter pop-ups, quiet buttons.
+    static let controlFill = dynamic(\.controlFill)
 
     // MARK: Element pairs
 

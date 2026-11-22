@@ -8,16 +8,16 @@ import spacesterminalcore
 /// The table is rebuilt only when its shape changes: the mode switch, or the Device column appearing
 /// once a second device reports.
 @MainActor final class ResourcesPaneView: NSObject {
-    let stack = NSStackView()
+    let stack = PaneLayout.makeStack()
     var onModeChange: ((ResourcesMode) -> Void)?
     var onSortChange: ((ResourcesSortColumn) -> Void)?
     var onJump: ((ResourcesRow) -> Void)?
 
     private let terminalsCard = ResourcesCardView(title: "Your terminals", caption: "agents, dev servers, tests")
     private let spacesCard = ResourcesCardView(title: "Spaces itself", caption: "not counted in your terminals")
-    private let modeControl = NSSegmentedControl(labels: ["Terminals", "Workspaces"], trackingMode: .selectOne, target: nil, action: nil)
+    private let modeTabs: PaneTabsView
     private let tableStack = NSStackView()
-    private let placeholder = NSTextField(labelWithString: "")
+    private let placeholder = PaneEmptyStateView(content: .resources(hasMeasurement: false))
     private let cpuHeader = NSButton()
     private let memoryHeader = NSButton()
 
@@ -28,17 +28,16 @@ import spacesterminalcore
 
     init(mode: ResourcesMode, sort: ResourcesSortColumn) {
         self.sort = sort
+        modeTabs = PaneTabsView(titles: ["Terminals", "Workspaces"], selected: mode.rawValue)
         super.init()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        modeTabs.onSelect = { [weak self] index in self?.onModeChange?(ResourcesMode(rawValue: index) ?? .terminals) }
 
-        modeControl.selectedSegment = mode.rawValue
-        modeControl.target = self
-        modeControl.action = #selector(modeChanged)
-
-        let header = makeHeader()
+        let header = PaneHeaderView(title: "Resources")
+        let subtitle = NSTextField(
+            wrappingLabelWithString: "Updated every 2 seconds while this pane is open. CPU is a share of one core, so a busy process can pass 100%.")
+        subtitle.font = Typography.metadata
+        subtitle.textColor = Theme.muted
+        subtitle.preferredMaxLayoutWidth = 520
         let cards = makeCards()
         let caption = NSTextField(labelWithString: "YOUR TERMINALS")
         caption.font = Typography.metadataTitle
@@ -53,36 +52,15 @@ import spacesterminalcore
         tableStack.spacing = 0
         tableStack.edgeInsets = NSEdgeInsets(top: 6, left: ResourcesTableLayout.sideInset, bottom: 6, right: ResourcesTableLayout.sideInset)
         tableStack.translatesAutoresizingMaskIntoConstraints = false
-        placeholder.font = Typography.rowDetail
-        placeholder.textColor = Theme.muted
 
-        for view in [header, cards, caption, tableStack, footnote] { stack.addArrangedSubview(view) }
+        for view in [header, modeTabs, subtitle, cards, caption, tableStack, footnote] { stack.addArrangedSubview(view) }
+        stack.setCustomSpacing(8, after: modeTabs)
         stack.setCustomSpacing(18, after: cards)
         stack.setCustomSpacing(6, after: caption)
-        for view in [header, cards, tableStack, footnote] { constrainFormFieldToFillWidth(view, in: stack) }
+        for view in [header, modeTabs, cards, tableStack, footnote] { constrainFormFieldToFillWidth(view, in: stack) }
     }
 
     // MARK: - Building
-
-    private func makeHeader() -> NSView {
-        let title = NSTextField(labelWithString: "Resources")
-        title.font = Typography.pageTitle
-        title.textColor = Theme.text
-        let subtitle = NSTextField(
-            wrappingLabelWithString: "Updated every 2 seconds while this pane is open. CPU is a share of one core, so a busy process can pass 100%.")
-        subtitle.font = Typography.metadata
-        subtitle.textColor = Theme.muted
-        subtitle.preferredMaxLayoutWidth = 520
-        let titles = NSStackView(views: [title, subtitle])
-        titles.orientation = .vertical
-        titles.alignment = .leading
-        titles.spacing = 2
-        let row = NSStackView(views: [titles, NSView(), modeControl])
-        row.orientation = .horizontal
-        row.alignment = .top
-        row.spacing = 12
-        return row
-    }
 
     private func makeCards() -> NSView {
         // Stacked so each card gets the full pane width; beside each other, the cards truncate device names and details.
@@ -148,14 +126,14 @@ import spacesterminalcore
     ) {
         terminalsCard.update(lines: terminals)
         spacesCard.update(lines: spaces)
-        modeControl.selectedSegment = mode.rawValue
+        modeTabs.select(mode.rawValue)
         if self.sort != sort {
             self.sort = sort
             updateSortHeaders()
         }
         if tableShape?.mode != mode || tableShape?.showsDevice != showsDevice { rebuildTable(mode: mode, showsDevice: showsDevice) }
         updateRows(rows, mode: mode, showsDevice: showsDevice)
-        placeholder.stringValue = hasMeasurement ? "No terminals are running." : "Measuring…"
+        placeholder.update(.resources(hasMeasurement: hasMeasurement))
         placeholder.isHidden = !rows.isEmpty
     }
 
@@ -171,7 +149,7 @@ import spacesterminalcore
         tableStack.setCustomSpacing(4, after: header)
         tableStack.setCustomSpacing(4, after: divider)
         let inset = ResourcesTableLayout.sideInset * 2
-        for line in [header, divider] { line.widthAnchor.constraint(equalTo: tableStack.widthAnchor, constant: -inset).isActive = true }
+        for line in [header, divider, placeholder] { line.widthAnchor.constraint(equalTo: tableStack.widthAnchor, constant: -inset).isActive = true }
         tableShape = (mode, showsDevice)
     }
 
@@ -217,7 +195,6 @@ import spacesterminalcore
 
     // MARK: - Actions
 
-    @objc private func modeChanged() { onModeChange?(ResourcesMode(rawValue: modeControl.selectedSegment) ?? .terminals) }
     @objc private func cpuHeaderTapped() { onSortChange?(.cpu) }
     @objc private func memoryHeaderTapped() { onSortChange?(.memory) }
 }

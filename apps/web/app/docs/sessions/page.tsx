@@ -93,11 +93,12 @@ export default function SessionsDocsPage() {
 
       <Section id="mac" title="On the Mac">
         <Prose>
-          Open the Sessions row in the sidebar, below Prompts. Choose the device and, optionally, the
-          agents and a project, then type in the search field. Results are one list, newest match
-          first, and each row names the project and workspace it opens in. The arrow keys move the
-          selection and Return opens it. The pane opens on the device you searched last, or this Mac the first time. If that device
-          is offline the pane says so and shows no results.
+          Open the Sessions row in the sidebar, below Prompts. Type in the search field, and use the
+          device, agents, and project menus under it to narrow the search. Results are one list,
+          newest match first, and each row names the project and workspace it opens in. The arrow
+          keys move the selection and Return opens it. The pane opens on the device you searched
+          last, or this Mac the first time. If that device is offline the pane says so and shows no
+          results.
         </Prose>
       </Section>
 
