@@ -1,9 +1,9 @@
 import SwiftUI
 import spacesdevicecore
 
-/// Search Sessions: finds a coding-agent conversation among everything a paired device's agents have stored
-/// and resumes it. The device and the agent and project filters are rows that push their own lists, so a phone with many
-/// devices never has to fit them in a tab strip.
+/// Sessions: finds a coding-agent conversation among everything a paired device's agents have stored
+/// and resumes it. The device, agents, and project filters are chips under the search field that push
+/// their own lists, so a phone with many devices never has to fit them in a tab strip.
 struct SessionSearchSheet: View {
     enum Route: Hashable {
         case devices
@@ -27,7 +27,7 @@ struct SessionSearchSheet: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            root.background(Theme.bg).navigationTitle("Search Sessions").navigationBarTitleDisplayMode(.inline).toolbar {
+            root.background(Theme.bg).navigationTitle("Sessions").navigationBarTitleDisplayMode(.inline).toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }.foregroundStyle(Theme.accent).frame(minHeight: 44).accessibilityIdentifier("sessions.done")
                 }
@@ -59,16 +59,9 @@ struct SessionSearchSheet: View {
     private var root: some View {
         VStack(spacing: 0) {
             if let name = model.deviceName {
-                filterRow(label: "Device", value: name, accessibility: "Device: \(name). Change device", id: "sessions.device", route: .devices)
-                filterRow(
-                    label: "Agents", value: SessionSearchRowText.agentsSummary(model.effectiveAgents),
-                    accessibility: "Agents: \(SessionSearchRowText.agentsSummary(model.effectiveAgents)). Change agents", id: "sessions.agents",
-                    route: .agents)
-                filterRow(
-                    label: "Projects", value: SessionSearchRowText.projectSummary(model.effectiveProject),
-                    accessibility: "Projects: \(SessionSearchRowText.projectSummary(model.effectiveProject)). Change project",
-                    id: "sessions.projects", route: .projects)
                 searchField
+                filterChips(deviceName: name)
+                if !model.isDeviceOffline { statusLine }
                 content
             } else {
                 ContentUnavailableView("No Devices", systemImage: "desktopcomputer", description: Text("Pair a device to search its sessions."))
@@ -76,20 +69,56 @@ struct SessionSearchSheet: View {
         }
     }
 
-    private func filterRow(label: String, value: String, accessibility: String, id: String, route: Route) -> some View {
+    /// Device, agents, and project as one scrollable row of chips. Each shows the current choice and
+    /// opens its picker.
+    private func filterChips(deviceName: String) -> some View {
+        let agents = SessionSearchRowText.agentsSummary(model.effectiveAgents)
+        let project = SessionSearchRowText.projectSummary(model.effectiveProject)
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                filterChip(
+                    value: deviceName, symbol: "desktopcomputer", accessibility: "Device: \(deviceName). Change device", id: "sessions.device",
+                    route: .devices)
+                filterChip(
+                    value: agents, symbol: "cpu", accessibility: "Agents: \(agents). Change agents", id: "sessions.agents", route: .agents)
+                filterChip(
+                    value: project, symbol: "folder", accessibility: "Projects: \(project). Change project", id: "sessions.projects",
+                    route: .projects)
+            }.padding(.horizontal, 16)
+        }.padding(.bottom, 6)
+    }
+
+    private func filterChip(value: String, symbol: String, accessibility: String, id: String, route: Route) -> some View {
         Button {
             path.append(route)
         } label: {
-            HStack(spacing: 10) {
-                Text(label).foregroundStyle(Theme.mutedSecondary)
-                Text(value).fontWeight(.semibold).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.tail).frame(
-                    maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Theme.mutedSecondary).accessibilityHidden(true)
-            }.font(.subheadline).padding(.horizontal, 12).frame(minHeight: 44).background(
-                Theme.surface2, in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-            ).contentShape(Rectangle())
-        }.buttonStyle(.plain).padding(.horizontal, 16).padding(.bottom, 8).accessibilityElement(children: .ignore).accessibilityLabel(accessibility)
-            .accessibilityAddTraits(.isButton).accessibilityIdentifier(id)
+            HStack(spacing: 5) {
+                Image(systemName: symbol).accessibilityHidden(true)
+                Text(value).lineLimit(1)
+                Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).accessibilityHidden(true)
+            }.font(.footnote.weight(.medium)).foregroundStyle(Theme.text).padding(.horizontal, 10).frame(minHeight: 32).background(
+                Theme.surface2, in: Capsule()
+            ).contentShape(Capsule())
+        }.buttonStyle(.plain).accessibilityElement(children: .ignore).accessibilityLabel(accessibility).accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier(id)
+    }
+
+    /// The count of loaded sessions, with the device's indexing progress while it builds and any search
+    /// error.
+    private var statusLine: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let progress = model.progress, progress.isBuilding {
+                Text("Indexing \(progress.indexedSessions) of \(progress.totalSessions) sessions").accessibilityIdentifier("sessions.indexing")
+            }
+            if !model.hits.isEmpty {
+                Text(SessionSearchRowText.countSummary(loaded: model.hits.count, hasMore: model.results.hasMore)).accessibilityIdentifier(
+                    "sessions.count")
+            }
+            if let error = model.searchError {
+                Text(error).foregroundStyle(Theme.red).accessibilityIdentifier("sessions.error")
+            }
+        }.font(.footnote).foregroundStyle(Theme.mutedSecondary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16)
+            .padding(.bottom, 4)
     }
 
     private var searchField: some View {
@@ -112,27 +141,23 @@ struct SessionSearchSheet: View {
 
     @ViewBuilder private var content: some View {
         if model.isDeviceOffline {
-            statusMessage("\(model.deviceName ?? "This device") is offline", id: "sessions.offline")
+            ContentUnavailableView("\(model.deviceName ?? "This device") is offline", systemImage: "wifi.slash").accessibilityIdentifier(
+                "sessions.offline")
+        } else if model.hits.isEmpty, !model.results.hasMore {
+            // A page can come back empty yet have more after it (the server drops hits that resume in another
+            // project), so the list with its Show more stands in for the empty state then.
+            if model.isLoading {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.searchError == nil, model.progress != nil, !model.isIndexBuilding {
+                ContentUnavailableView(
+                    model.query.trimmingCharacters(in: .whitespaces).isEmpty ? "No sessions yet." : "No sessions match.",
+                    systemImage: "magnifyingglass"
+                ).accessibilityIdentifier("sessions.empty")
+            } else {
+                Spacer(minLength: 0)
+            }
         } else {
             List {
-                if let progress = model.progress, progress.isBuilding {
-                    Text("Indexing \(progress.indexedSessions) of \(progress.totalSessions) sessions").font(.footnote).foregroundStyle(
-                        Theme.mutedSecondary
-                    ).listRowBackground(Color.clear).listRowSeparator(.hidden).accessibilityIdentifier("sessions.indexing")
-                }
-                if let error = model.searchError {
-                    Text(error).font(.footnote).foregroundStyle(Theme.red).listRowBackground(Color.clear).listRowSeparator(.hidden)
-                        .accessibilityIdentifier("sessions.error")
-                }
-                if model.hits.isEmpty {
-                    if model.isLoading {
-                        ProgressView().frame(maxWidth: .infinity).listRowBackground(Color.clear).listRowSeparator(.hidden)
-                    } else if model.searchError == nil, model.progress != nil, !model.isIndexBuilding {
-                        Text(model.query.trimmingCharacters(in: .whitespaces).isEmpty ? "No sessions yet." : "No sessions match.").font(.subheadline)
-                            .foregroundStyle(Theme.muted).frame(maxWidth: .infinity).listRowBackground(Color.clear).listRowSeparator(.hidden)
-                            .accessibilityIdentifier("sessions.empty")
-                    }
-                }
                 ForEach(model.hits, id: \.listID) { hit in
                     SessionSearchRow(
                         hit: hit, query: model.query, now: appModel.relativeTimeReference,
@@ -152,12 +177,6 @@ struct SessionSearchSheet: View {
                 }
             }.listStyle(.plain).scrollContentBackground(.hidden)
         }
-    }
-
-    private func statusMessage(_ text: String, id: String) -> some View {
-        Text(text).font(.subheadline).foregroundStyle(Theme.muted).multilineTextAlignment(.center).padding(.horizontal, 24).frame(
-            maxWidth: .infinity, maxHeight: .infinity, alignment: .center
-        ).accessibilityIdentifier(id)
     }
 
     private func resume(_ hit: SpacesDeviceAgentSessionHit) async {

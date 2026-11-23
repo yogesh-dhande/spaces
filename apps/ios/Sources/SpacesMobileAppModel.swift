@@ -1564,124 +1564,160 @@ private enum SpacesMobileMutationTimeoutRecovery {
         SpacesMobileAgentGrouping.groups(devices: deviceOverviewContexts, showsDeviceSegment: showsDeviceSegment)
     }
 
-    /// Automation rows for the Automations tab, derived from the active device's overview.
-    var automationRows: [SpacesMobileAutomationRow] {
-        guard let overview else { return [] }
+    /// Automation rows for `deviceID`, which the Automations tab chooses for itself.
+    func automationRows(forDeviceID deviceID: String) -> [SpacesMobileAutomationRow] {
+        guard let overview = overview(forDeviceID: deviceID) else { return [] }
         return SpacesMobileAutomations.rows(automations: overview.automations, runs: overview.automationRuns)
     }
 
-    /// Currently-running automation-run count on the active device — the Automations tab's badge.
-    /// Failed/timed-out runs already badge Alerts (see `automationAlerts`), so this counts only
-    /// in-flight runs, giving the tab a live "something is executing right now" pulse.
+    /// Currently-running automation-run count across every paired device: the Automations tab's badge. The
+    /// tab's device is its own choice, so the badge is not tied to it. Failed/timed-out runs already badge
+    /// Alerts (see `automationAlerts`), so this counts only in-flight runs, giving the tab a live
+    /// "something is executing right now" pulse.
     var automationRunningRunCount: Int {
-        guard let overview else { return 0 }
-        return SpacesMobileAutomations.runningCount(overview.automationRuns)
-    }
-
-    /// Manually fires an automation, respecting the daemon's concurrency gate. There is no separate
-    /// confirmation or toast for the started/queued/skipped outcome: the automation row's status dot
-    /// reflects it once the refreshed overview lands, mirroring how the Mac's Automations pane surfaces
-    /// this (a reload, not an optimistic local merge — automation mutation responses carry no overview).
-    func triggerAutomation(id: String) async {
-        guard !isMutating else { return }
-        isMutating = true
-        defer { isMutating = false }
-        let identity = overviewIdentity
-        do {
-            _ = try await bridgeClient.triggerAutomation(id: id, commandChannel: commandChannel)
-            guard identity == overviewIdentity else { return }
-            // The command changed the device, so every overview fetch issued before it describes a
-            // device without the change. Bumped like any other device-changing call so one of those in
-            // flight is discarded rather than published, and so the read below issues its own request
-            // instead of joining it.
-            mutationGeneration &+= 1
-            await refresh()
-        } catch {
-            guard identity == overviewIdentity else { return }
-            handleBridgeError(error)
+        pairedDevices.reduce(0) { total, device in
+            total + (overview(forDeviceID: device.id).map { SpacesMobileAutomations.runningCount($0.automationRuns) } ?? 0)
         }
     }
 
-    /// Sets a one-time next run for an automation, overriding only its next occurrence. Refreshes the
-    /// overview on success exactly like `triggerAutomation`, since the response carries no overview and
-    /// the automation's next fire time is what changed.
+    /// How an automation command to a device ended.
+    private enum AutomationCommandOutcome {
+        case done
+        /// Another mutation is in flight, so nothing was sent.
+        case skipped
+        /// The device was unpaired, or its connection changed while the command was in flight, so nothing
+        /// is applied.
+        case stale
+        case failed(Error)
+    }
+
+    /// Sends an automation command to `deviceID` and reloads that device's overview. Automation mutation
+    /// responses carry no overview, so the daemon's change is read back instead of merged locally. The
+    /// selected device reloads through `refresh`, another paired device through its own client and
+    /// `acceptNonSelectedDeviceOverview`, the same path its stream push takes.
+    private func performAutomationCommand(
+        deviceID: String, _ request: (SpacesDeviceAPIClient, SpacesDeviceAPICommandChannel) async throws -> SpacesDeviceAPIResponse
+    ) async -> AutomationCommandOutcome {
+        guard !isMutating else { return .skipped }
+        guard let connection = mutationConnection(forDeviceID: deviceID) else { return .stale }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            _ = try await request(connection.client, connection.channel)
+            guard isCurrent(connection.token) else { return .stale }
+            if connection.token.isSelected {
+                // The command changed the device, so every overview fetch issued before it describes a
+                // device without the change. Bumped like any other device-changing call so one of those
+                // in flight is discarded rather than published, and so the read below issues its own
+                // request instead of joining it.
+                mutationGeneration &+= 1
+                await refresh()
+            } else {
+                await fetchNonSelectedDeviceOverview(connection, deviceID: deviceID)
+                guard isCurrent(connection.token) else { return .stale }
+            }
+            return .done
+        } catch {
+            guard isCurrent(connection.token) else { return .stale }
+            return .failed(error)
+        }
+    }
+
+    /// Manually fires an automation on `deviceID`, respecting the daemon's concurrency gate. There is no
+    /// separate confirmation or toast for the started/queued/skipped outcome: the automation row's status
+    /// dot reflects it once the refreshed overview lands, mirroring how the Mac's Automations pane surfaces
+    /// this (a reload, not an optimistic local merge).
+    func triggerAutomation(id: String, deviceID: String) async {
+        if case .failed(let error) = await performAutomationCommand(
+            deviceID: deviceID, { client, channel in try await client.triggerAutomation(id: id, commandChannel: channel) })
+        {
+            handleBridgeError(error, deviceID: deviceID)
+        }
+    }
+
+    /// Sets a one-time next run for an automation on `deviceID`, overriding only its next occurrence.
+    /// Reloads the overview on success exactly like `triggerAutomation`, since the response carries no
+    /// overview and the automation's next fire time is what changed.
     ///
     /// Returns nil once the daemon accepts the time, or the rejection text to show. The next-run sheet
     /// prints that beside its picker instead of routing it to the app-wide error banner: the user is
     /// looking at the control that caused it and stays there to correct it.
-    func setAutomationNextRun(id: String, nextRunTime: Date) async -> String? {
+    func setAutomationNextRun(id: String, nextRunTime: Date, deviceID: String) async -> String? {
+        let outcome = await performAutomationCommand(deviceID: deviceID) { client, channel in
+            try await client.setAutomationNextRun(id: id, nextRunTime: nextRunTime, commandChannel: channel)
+        }
+        switch outcome {
+        case .done, .stale: return nil
         // The sheet's Schedule button is already disabled while a mutation is in flight, so reaching this
         // means nothing was sent; reporting it keeps the sheet open rather than closing as though the time
         // had been accepted.
-        guard !isMutating else { return "Another action is still in progress." }
-        isMutating = true
-        defer { isMutating = false }
-        let identity = overviewIdentity
-        do {
-            _ = try await bridgeClient.setAutomationNextRun(id: id, nextRunTime: nextRunTime, commandChannel: commandChannel)
-            guard identity == overviewIdentity else { return nil }
-            // Bumped before the read for the reason given in triggerAutomation.
-            mutationGeneration &+= 1
-            await refresh()
-            return nil
-        } catch {
-            guard identity == overviewIdentity else { return nil }
-            return error.localizedDescription
+        case .skipped: return "Another action is still in progress."
+        case .failed(let error): return error.localizedDescription
         }
     }
 
-    /// Cancels a running (or queued) automation run.
-    func cancelAutomationRun(runID: String) async {
-        guard !isMutating else { return }
-        isMutating = true
-        defer { isMutating = false }
-        let identity = overviewIdentity
-        do {
-            _ = try await bridgeClient.cancelAutomationRun(runID: runID, commandChannel: commandChannel)
-            guard identity == overviewIdentity else { return }
-            // Bumped before the read for the reason given in triggerAutomation.
-            mutationGeneration &+= 1
-            await refresh()
-        } catch {
-            guard identity == overviewIdentity else { return }
-            handleBridgeError(error)
+    /// Cancels a running (or queued) automation run on `deviceID`.
+    func cancelAutomationRun(runID: String, deviceID: String) async {
+        if case .failed(let error) = await performAutomationCommand(
+            deviceID: deviceID, { client, channel in try await client.cancelAutomationRun(runID: runID, commandChannel: channel) })
+        {
+            handleBridgeError(error, deviceID: deviceID)
         }
     }
 
-    /// Ends a finished run's still-live attributed coding agents. There is no optimistic local merge,
-    /// mirroring `cancelAutomationRun`: the run row's agent chips reflect the outcome once the refreshed
-    /// overview lands.
-    func endAutomationAgents(runID: String) async {
-        guard !isMutating else { return }
-        isMutating = true
-        defer { isMutating = false }
-        let identity = overviewIdentity
-        do {
-            _ = try await bridgeClient.endAutomationAgents(runID: runID, commandChannel: commandChannel)
-            guard identity == overviewIdentity else { return }
-            // Bumped before the read for the reason given in triggerAutomation.
-            mutationGeneration &+= 1
-            await refresh()
-        } catch {
-            guard identity == overviewIdentity else { return }
-            handleBridgeError(error)
+    /// Ends a finished run's still-live attributed coding agents on `deviceID`. There is no optimistic
+    /// local merge, mirroring `cancelAutomationRun`: the run row's agent chips reflect the outcome once the
+    /// refreshed overview lands.
+    func endAutomationAgents(runID: String, deviceID: String) async {
+        if case .failed(let error) = await performAutomationCommand(
+            deviceID: deviceID, { client, channel in try await client.endAutomationAgents(runID: runID, commandChannel: channel) })
+        {
+            handleBridgeError(error, deviceID: deviceID)
         }
     }
 
-    /// Fetches one automation's retained run history directly from the daemon for the per-automation "View
-    /// Runs" screen, so it reads the daemon's kept-per-automation rows instead of the overview's global
-    /// recent-runs window (which a chatty automation can fill, leaving a quiet automation's history empty).
-    /// Returns nil on error, and the caller keeps whatever it was already showing. Not a mutation, so it
-    /// does not touch `isMutating` or trigger an overview refresh.
-    func fetchAutomationRuns(automationID: String) async -> [TerminalServiceAutomationRunSummary]? {
-        let identity = overviewIdentity
+    /// Re-reads `deviceID`'s overview for a screen that picks its own device: the selected device through
+    /// `refresh`, any other paired device through its own client and `acceptNonSelectedDeviceOverview`, the
+    /// path its stream push takes.
+    func refresh(deviceID: String) async {
+        guard let connection = mutationConnection(forDeviceID: deviceID) else { return }
+        if connection.token.isSelected {
+            await refresh()
+            return
+        }
+        await fetchNonSelectedDeviceOverview(connection, deviceID: deviceID)
+    }
+
+    /// Fetches a non-selected device's overview and accepts it unless a stream push for that device landed
+    /// while the fetch was in flight: the push is newer, and accepting the older snapshot over it would bring
+    /// back outdated schedules or dismissed alerts until the next change. `isCurrent` alone misses this, since
+    /// a push on the same connection leaves its identity unchanged.
+    private func fetchNonSelectedDeviceOverview(_ connection: MutationConnection, deviceID: String) async {
+        let deliveryGeneration = nonSelectedDeviceDeliveryGenerations[deviceID, default: 0]
         do {
-            let runs = try await bridgeClient.listAutomationRuns(automationID: automationID, commandChannel: commandChannel)
-            guard identity == overviewIdentity else { return nil }
+            let refreshed = try await connection.client.fetchOverview(commandChannel: connection.channel)
+            guard isCurrent(connection.token), nonSelectedDeviceDeliveryGenerations[deviceID, default: 0] == deliveryGeneration else { return }
+            acceptNonSelectedDeviceOverview(refreshed, deviceID: deviceID)
+        } catch {
+            guard isCurrent(connection.token) else { return }
+            handleBridgeError(error, deviceID: deviceID)
+        }
+    }
+
+    /// Fetches one automation's retained run history directly from `deviceID`'s daemon for the
+    /// per-automation screen, so it reads the daemon's kept-per-automation rows instead of the overview's
+    /// global recent-runs window (which a chatty automation can fill, leaving a quiet automation's history
+    /// empty). Returns nil on error, and the caller keeps whatever it was already showing. Not a mutation,
+    /// so it does not touch `isMutating` or trigger an overview refresh.
+    func fetchAutomationRuns(automationID: String, deviceID: String) async -> [TerminalServiceAutomationRunSummary]? {
+        guard let connection = mutationConnection(forDeviceID: deviceID) else { return nil }
+        do {
+            let runs = try await connection.client.listAutomationRuns(automationID: automationID, commandChannel: connection.channel)
+            guard isCurrent(connection.token) else { return nil }
             return runs
         } catch {
-            guard identity == overviewIdentity else { return nil }
-            handleBridgeError(error)
+            guard isCurrent(connection.token) else { return nil }
+            handleBridgeError(error, deviceID: deviceID)
             return nil
         }
     }

@@ -2,14 +2,16 @@ import SwiftUI
 import spacesdevicecore
 import spacesterminalcore
 
-/// Shared run-row rendering for the two run-history surfaces (`AutomationRunsView`'s global "Recent
-/// Runs" list and `AutomationDetailView`'s per-automation runs section): the row itself plus the two
+/// Shared run-row rendering for the two run-history surfaces (the Automations tab's Runs list and
+/// `AutomationDetailView`'s per-automation runs section): the row itself plus the two
 /// confirmation dialogs that gate its trailing actions. `title` is parameterized because the two
 /// screens want a different row title for the same run: the global screen shows the automation name
 /// (many automations share one list), the detail screen shows the run's outcome (the automation name is
 /// already the screen's own navigation title, so repeating it on every row would be redundant).
 struct AutomationRunRowsList: View {
     @Bindable var model: SpacesMobileAppModel
+    /// The device the runs belong to: Cancel, End Agents, and every session lookup go to it.
+    let deviceID: String
     let rows: [SpacesMobileAutomationRunRow]
     let title: (TerminalServiceAutomationRunSummary) -> String
     /// Called after a Cancel or End Agents mutation completes, so the caller can re-fetch whatever run
@@ -33,7 +35,7 @@ struct AutomationRunRowsList: View {
             Button("Cancel Run", role: .destructive) {
                 guard let pendingCancelRunID else { return }
                 Task {
-                    await model.cancelAutomationRun(runID: pendingCancelRunID)
+                    await model.cancelAutomationRun(runID: pendingCancelRunID, deviceID: deviceID)
                     await onMutated()
                 }
             }
@@ -42,7 +44,7 @@ struct AutomationRunRowsList: View {
             Button("End Agents", role: .destructive) {
                 guard let pendingEndAgentsRunID else { return }
                 Task {
-                    await model.endAutomationAgents(runID: pendingEndAgentsRunID)
+                    await model.endAutomationAgents(runID: pendingEndAgentsRunID, deviceID: deviceID)
                     await onMutated()
                 }
             }
@@ -101,7 +103,7 @@ struct AutomationRunRowsList: View {
             // tap independent of this row's).
             if isNavigable {
                 Button {
-                    guard let session = SpacesMobileAutomations.runSession(for: run, overview: model.overview) else { return }
+                    guard let session = SpacesMobileAutomations.runSession(for: run, overview: model.overview(forDeviceID: deviceID)) else { return }
                     onOpenSession(session)
                 } label: {
                     band
@@ -130,7 +132,7 @@ struct AutomationRunRowsList: View {
             Text(agent.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent").font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).lineLimit(1)
         }
         return Button {
-            guard let session = SpacesMobileAutomations.agentSession(for: agent, overview: model.overview) else { return }
+            guard let session = SpacesMobileAutomations.agentSession(for: agent, overview: model.overview(forDeviceID: deviceID)) else { return }
             onOpenSession(session)
         } label: {
             chip

@@ -6,8 +6,8 @@ import XCTest
 /// Demo Mode's recording carries no automations and no runs (`overview.automations` and
 /// `overview.automationRuns` are both empty), so what a demo user sees on this tab is its empty state.
 /// That is what this asserts: the tab renders its own screen rather than a blank one, it tells the user
-/// where automations come from, and Recent Runs is offered but inert because there is no run to show.
-/// Detail-screen coverage — recent runs, the next-run affordance and its sheet — needs an automation in
+/// where automations come from, and its Runs segment shows its own empty state because there is no run.
+/// Detail-screen coverage (the run history, the next-run affordance and its sheet) needs an automation in
 /// the recording to reach, so it is not asserted here.
 final class AutomationsTabSmokeUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
@@ -25,10 +25,12 @@ final class AutomationsTabSmokeUITests: XCTestCase {
             SpacesMobileUITestDriver.waitForAnyElement(withIdentifierPrefix: "automations.row.", in: app, timeout: 2),
             "A device with no automations listed an automation row")
 
-        // Recent Runs stays on screen and disabled: the toolbar action is a property of the tab, and
-        // there is nothing behind it until an automation fires.
-        let recentRuns = app.buttons["automations.recentRuns"]
-        XCTAssertTrue(recentRuns.waitForExistence(timeout: 10), "The Automations toolbar offered no Recent Runs")
-        XCTAssertFalse(recentRuns.isEnabled, "Recent Runs was enabled with no runs to show")
+        // Runs is a segment of the tab itself, and with nothing fired it says so.
+        let runs = app.buttons["Runs"]
+        XCTAssertTrue(runs.waitForExistence(timeout: 10), "The Automations tab offered no Runs segment")
+        runs.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["automations.runs.empty"].waitForExistence(timeout: 10),
+            "A device with no runs did not show the empty Runs state")
     }
 }

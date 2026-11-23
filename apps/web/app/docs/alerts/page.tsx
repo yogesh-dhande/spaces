@@ -100,8 +100,8 @@ export default function AlertsDocsPage() {
       <Section id="dismissing" title="Dismissing an alert">
         <Prose>
           Dismiss one alert from its row (&quot;Dismiss Alert&quot;), with <InlineCode>⌘X</InlineCode>{" "}
-          in the command palette, or with &quot;Clear All&quot; on the Mac or &quot;Clear&quot; on
-          iPhone, which dismiss every listed alert across every reachable paired device at once. The
+          in the command palette, or with &quot;Clear All&quot; on the Mac or iPhone,
+          which dismiss every listed alert across every reachable paired device at once. The
           device an alert came from keeps its dismissal, so dismissing it on one of your devices
           dismisses it on all of them. A dismissed
           alert stays dismissed until the event behind it changes again, except a blocked agent&apos;s

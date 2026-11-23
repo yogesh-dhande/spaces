@@ -65,9 +65,9 @@ export default function PromptsDocsPage() {
         <Prose>
           In a terminal, tap the Prompts key beside the composer. A sheet lists your prompts with a
           search field; tap Copy on one to put it on the clipboard and close the sheet, then paste into
-          the session. Library in the sheet opens the full list, where you can open a prompt to edit or
-          delete it and tap the plus to write a new one. As on the Mac, leaving a prompt with unsaved
-          edits asks Save, Discard, or Cancel.
+          the session. Tap a row to open the prompt and edit it, swipe a row to delete it, and tap the
+          plus in the sheet&apos;s navigation bar to write a new one. As on the Mac, leaving a prompt
+          with unsaved edits asks Save, Discard, or Cancel.
         </Prose>
       </Section>
 

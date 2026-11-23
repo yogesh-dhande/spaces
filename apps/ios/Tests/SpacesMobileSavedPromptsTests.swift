@@ -307,13 +307,26 @@
             let a = FakePromptDevice(prompts: [.prompt("a1", title: "A", used: 1), .prompt("a2", title: "B", used: 2)])
             let model = makeModel(a: a)
             await eventually("loads") { self.titles(model).count == 2 }
-            model.savedPrompts.beginEditing(try XCTUnwrap(model.savedPrompts.entries(matching: "A").first))
+            let entry = try XCTUnwrap(model.savedPrompts.entries(matching: "A").first)
 
-            let deleted = await model.savedPrompts.deleteDraft()
+            let failure = await model.savedPrompts.delete(entry)
 
-            XCTAssertTrue(deleted)
+            XCTAssertNil(failure)
             XCTAssertEqual(a.commands.last, .delete(id: "a1"))
             XCTAssertEqual(titles(model), ["B"])
+            XCTAssertNil(model.savedPrompts.draft, "deleting from the list opens nothing")
+        }
+
+        func testDeleteReportsTheDevicesMessageWhenThePromptIsAlreadyGone() async throws {
+            let a = FakePromptDevice(prompts: [.prompt("a1", title: "A", used: 1)])
+            let model = makeModel(a: a)
+            await eventually("loads") { self.titles(model).count == 1 }
+            let entry = try XCTUnwrap(model.savedPrompts.entries(matching: "A").first)
+            _ = await model.savedPrompts.delete(entry)
+
+            let failure = await model.savedPrompts.delete(entry)
+
+            XCTAssertEqual(failure, "That prompt no longer exists.")
         }
 
         func testTextTypedWhileACreateWasInFlightIsKeptAsAnEditOfTheCreatedPrompt() async throws {
@@ -334,22 +347,6 @@
             XCTAssertEqual(model.savedPrompts.draft?.promptID, "new-1")
             XCTAssertEqual(model.savedPrompts.draft?.text, "Text and more")
             XCTAssertTrue(model.savedPrompts.isDraftDirty)
-        }
-
-        func testADeleteResultDoesNotCloseAReplacementDraft() async throws {
-            let a = FakePromptDevice(prompts: [.prompt("a1", title: "A", used: 1), .prompt("a2", title: "B", used: 2)])
-            let model = makeModel(a: a)
-            await eventually("loads") { self.titles(model).count == 2 }
-            model.savedPrompts.beginEditing(try XCTUnwrap(model.savedPrompts.entries(matching: "A").first))
-            let deleting = try XCTUnwrap(model.savedPrompts.draft)
-            model.savedPrompts.beginEditing(try XCTUnwrap(model.savedPrompts.entries(matching: "B").first))
-            model.savedPrompts.draft?.text = "typed in B"
-
-            let closes = model.savedPrompts.finishDelete(SpacesDeviceSavedPromptsResult(prompts: [], revision: 2), deleted: deleting)
-
-            XCTAssertFalse(closes)
-            XCTAssertEqual(model.savedPrompts.draft?.promptID, "a2")
-            XCTAssertEqual(model.savedPrompts.draft?.text, "typed in B")
         }
 
         func testACleanDraftFollowsRemoteEditsAndADirtyOneIsKept() async throws {

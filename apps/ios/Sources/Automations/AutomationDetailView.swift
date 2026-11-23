@@ -9,6 +9,8 @@ import spacesterminalcore
 /// elsewhere with no separate confirmation.
 struct AutomationDetailView: View {
     @Bindable var model: SpacesMobileAppModel
+    /// The device the automation lives on: its overview feeds this screen and every action goes to it.
+    let deviceID: String
     let automationID: String
     @Binding var selectedSession: SelectedTerminalSessionRoute?
     /// Retained run history fetched directly from the daemon (nil until first fetched), reconciled with
@@ -17,18 +19,24 @@ struct AutomationDetailView: View {
     @State private var fetchedRuns: [TerminalServiceAutomationRunSummary]?
     @State private var isShowingNextRunSheet = false
 
-    private var automation: TerminalServiceAutomationSummary? { model.automationRows.first(where: { $0.automation.id == automationID })?.automation }
+    private var overview: SpacesDeviceOverviewPayload? { model.overview(forDeviceID: deviceID) }
+
+    private var deviceName: String? { model.pairedDevices.first { $0.id == deviceID }?.name }
+
+    private var automation: TerminalServiceAutomationSummary? {
+        model.automationRows(forDeviceID: deviceID).first(where: { $0.automation.id == automationID })?.automation
+    }
 
     private var runs: [SpacesMobileAutomationRunRow] {
         SpacesMobileAutomations.mergedRunRows(
-            overviewRuns: model.overview?.automationRuns ?? [], historyRuns: fetchedRuns ?? [], automationID: automationID)
+            overviewRuns: overview?.automationRuns ?? [], historyRuns: fetchedRuns ?? [], automationID: automationID)
     }
 
     var body: some View { content.navigationTitle(automation?.name ?? "Automation").tint(Theme.accent).task { await loadRuns() } }
 
     /// Fetches this automation's run history through the daemon's retained-runs endpoint, supplying the
     /// older tail the overview window doesn't carry.
-    private func loadRuns() async { if let runs = await model.fetchAutomationRuns(automationID: automationID) { fetchedRuns = runs } }
+    private func loadRuns() async { if let runs = await model.fetchAutomationRuns(automationID: automationID, deviceID: deviceID) { fetchedRuns = runs } }
 
     @ViewBuilder private var content: some View {
         if let automation {
@@ -38,19 +46,19 @@ struct AutomationDetailView: View {
                     runsSection
                 }.padding(.vertical, 12)
             }.scrollContentBackground(.hidden).background(Theme.bg.ignoresSafeArea()).refreshable {
-                await model.refresh()
+                await model.refresh(deviceID: deviceID)
                 await loadRuns()
             }.sheet(isPresented: $isShowingNextRunSheet) {
-                AutomationNextRunSheet(model: model, automation: automation, onMutated: { await loadRuns() })
+                AutomationNextRunSheet(model: model, deviceID: deviceID, automation: automation, onMutated: { await loadRuns() })
             }
         } else {
             // Reachable if the automation is deleted on the Mac while this screen is open on iOS: the
-            // overview refresh that drops it from `model.automationRows` lands while the user is still
+            // overview refresh that drops it from the device's automation rows lands while the user is still
             // looking at its detail screen.
             ContentUnavailableView {
                 Label("Automation Removed", systemImage: "clock.arrow.circlepath")
             } description: {
-                Text("This automation no longer exists on \(model.activeDeviceName ?? "this device").")
+                Text("This automation no longer exists on \(deviceName ?? "this device").")
             }.background(Theme.bg.ignoresSafeArea())
         }
     }
@@ -64,7 +72,7 @@ struct AutomationDetailView: View {
             VStack(spacing: 0) {
                 factRow(label: "Schedule", value: SpacesMobileAutomations.triggerSummary(automation))
                 nextRunRow(automation)
-                if let workspaceName = SpacesMobileAutomations.workspaceName(for: automation, in: model.overview?.workspaces ?? []) {
+                if let workspaceName = SpacesMobileAutomations.workspaceName(for: automation, in: overview?.workspaces ?? []) {
                     factRow(label: "Workspace", value: workspaceName)
                 }
                 factRow(label: "Enabled", value: automation.enabled ? "Yes" : "No")
@@ -127,12 +135,9 @@ struct AutomationDetailView: View {
                 ).padding(.horizontal, 20).padding(.top, 8)
             } else {
                 AutomationRunRowsList(
-                    model: model, rows: runs, title: { SpacesMobileAutomations.statusTitle($0) }, onMutated: { await loadRuns() },
-                    onOpenSession: { session in
-                        // Automations are scoped to the selected device, so a run's session always belongs to it.
-                        guard let activeDeviceID = model.activeDeviceID else { return }
-                        selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: activeDeviceID)
-                    }
+                    model: model, deviceID: deviceID, rows: runs, title: { SpacesMobileAutomations.statusTitle($0) },
+                    onMutated: { await loadRuns() },
+                    onOpenSession: { session in selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: deviceID) }
                 ).padding(.top, 4)
             }
         }

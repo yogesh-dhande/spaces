@@ -523,6 +523,12 @@
             XCTAssertEqual(SessionSearchRowText.agentsSummary([.codex, .claudeCode]), "Claude Code, Codex")
         }
 
+        func testStatusLineCountsLoadedSessionsAndMarksMorePages() {
+            XCTAssertEqual(SessionSearchRowText.countSummary(loaded: 20, hasMore: true), "20+ sessions")
+            XCTAssertEqual(SessionSearchRowText.countSummary(loaded: 7, hasMore: false), "7 sessions")
+            XCTAssertEqual(SessionSearchRowText.countSummary(loaded: 1, hasMore: false), "1 session")
+        }
+
         // MARK: - Demo backend
 
         func testSheetModelLoadsTheDemoSeedAndFiltersByAgent() async throws {

@@ -334,6 +334,11 @@ enum SessionSearchRowText {
 
     static func projectSummary(_ project: SpacesDeviceAgentSessionProject?) -> String { project.map(projectName) ?? "All projects" }
 
+    /// The status line's count of the sessions loaded so far; a "+" says more pages are available.
+    static func countSummary(loaded: Int, hasMore: Bool) -> String {
+        "\(loaded)\(hasMore ? "+" : "") \(loaded == 1 && !hasMore ? "session" : "sessions")"
+    }
+
     static func agentsSummary(_ agents: Set<CodingAgent>) -> String {
         agents.isEmpty ? "All agents" : CodingAgent.allCases.filter(agents.contains).map(\.displayName).joined(separator: ", ")
     }

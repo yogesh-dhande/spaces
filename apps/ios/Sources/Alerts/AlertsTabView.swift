@@ -14,8 +14,7 @@ struct AlertsTabView: View {
         NavigationStack {
             content.background(Theme.bg.ignoresSafeArea()).navigationTitle("Alerts").tint(Theme.accent).toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Clear") { Task { await model.clearAlerts() } }.font(.system(size: 13, weight: .semibold)).disabled(!model.canClearAlerts)
-                        .accessibilityIdentifier("alerts.clear")
+                    Button("Clear All") { Task { await model.clearAlerts() } }.disabled(!model.canClearAlerts).accessibilityIdentifier("alerts.clear")
                 }
             }.terminalSessionNavigation(model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
         }.accessibilityIdentifier("tab.alerts").onChange(of: model.pendingAlertTerminalRoute, initial: true) { _, route in
@@ -33,7 +32,7 @@ struct AlertsTabView: View {
     @ViewBuilder private var content: some View {
         if model.alertItems.isEmpty {
             ContentUnavailableView {
-                Label("No Alerts", systemImage: "bell")
+                Label("No attention required", systemImage: "checkmark.circle")
             } description: {
                 Text("Agents waiting for input and exited runs show up here.")
             }.accessibilityIdentifier("alerts.empty")

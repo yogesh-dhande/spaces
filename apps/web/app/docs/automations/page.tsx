@@ -201,15 +201,17 @@ export default function AutomationsDocsPage() {
 
       <Section id="on-iphone" title="On iPhone">
         <Prose>
-          The Automations tab shows the paired device&apos;s automations. Creating, editing, and deleting
-          an automation stay Mac-only. Each row shows a status dot for its most recent run, its trigger,
-          the next fire time, and whether it is disabled; tapping a row opens that automation&apos;s
-          detail screen, with its schedule, command, and run history. Run Now, and setting a one-time next
-          run, live in a sheet opened from the detail screen&apos;s &quot;Next run&quot; row. A Runs screen
-          (from the detail screen or the toolbar&apos;s Recent Runs) lists every run the same way the
-          Mac&apos;s Runs tab does, with Cancel on a running one and End agents on a finished one with a
-          lingering agent; tapping a run row opens its live terminal while it runs or its read-only
-          transcript once it has ended.
+          The Automations tab shows one paired device&apos;s automations. The device menu in its toolbar
+          lists every paired device, and your choice applies only to this tab and is remembered; every
+          action from the tab goes to that device. Creating, editing, and deleting an automation stay
+          Mac-only. A switch under the title flips between Automations and Runs. Each automation row
+          shows a status dot for its most recent run, its trigger, the next fire time, and whether it is
+          disabled; tapping a row opens that automation&apos;s detail screen, with its schedule, command,
+          and run history. Run Now, and setting a one-time next run, live in a sheet opened from the
+          detail screen&apos;s &quot;Next run&quot; row. Runs lists every run the same way the Mac&apos;s
+          Runs tab does, with Cancel on a running one and End agents on a finished one with a lingering
+          agent; tapping a run row opens its live terminal while it runs or its read-only transcript
+          once it has ended.
         </Prose>
       </Section>
 

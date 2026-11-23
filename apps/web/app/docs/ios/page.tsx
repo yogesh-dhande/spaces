@@ -88,7 +88,7 @@ export default function IOSDocsPage() {
             <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
               <li>• Open a session to watch its output and type into it, the same shell every other client sees.</li>
               <li>• Compose a longer message and attach an image, then send it in one go.</li>
-              <li>• The Prompts key opens your saved prompts: search, then tap Copy to put one on the clipboard and paste it into the session. Library opens the full list to create, edit, and delete prompts.</li>
+              <li>• The Prompts key opens your saved prompts: search, then tap Copy to put one on the clipboard and paste it into the session. Tap a prompt to edit it, swipe to delete it, and use the plus to create one.</li>
               <li>• A tap acts as a click when the program inside the session tracks the mouse.</li>
               <li>• Long-press to select a word, keep your finger down to extend the selection, and drag the handles to adjust either end. A menu offers Copy and Select All; the selection is yours alone and ends when you type or tap. Drag past the top or bottom edge to keep selecting through scrollback.</li>
               <li>• In a program that tracks the mouse, a long-press drag goes to the program. A Select key appears in the key row while it does; tap it and the next long press selects text instead.</li>
