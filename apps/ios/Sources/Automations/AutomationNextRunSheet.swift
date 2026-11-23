@@ -12,6 +12,8 @@ import spacesterminalcore
 /// note saying what to do about it rather than letting the user post a request that can only fail.
 struct AutomationNextRunSheet: View {
     @Bindable var model: SpacesMobileAppModel
+    /// The device the automation lives on, which Run Now and Schedule are sent to.
+    let deviceID: String
     let automation: TerminalServiceAutomationSummary
     /// Runs after Run Now and after an accepted schedule, so the detail screen refetches its run history.
     let onMutated: () async -> Void
@@ -20,8 +22,9 @@ struct AutomationNextRunSheet: View {
     @State private var nextRun: Date
     @State private var errorMessage: String?
 
-    init(model: SpacesMobileAppModel, automation: TerminalServiceAutomationSummary, onMutated: @escaping () async -> Void) {
+    init(model: SpacesMobileAppModel, deviceID: String, automation: TerminalServiceAutomationSummary, onMutated: @escaping () async -> Void) {
         self.model = model
+        self.deviceID = deviceID
         self.automation = automation
         self.onMutated = onMutated
         // Opens on the instant the automation is already set to fire at, same as the Mac popover, so
@@ -45,7 +48,7 @@ struct AutomationNextRunSheet: View {
 
             Button {
                 Task {
-                    await model.triggerAutomation(id: automation.id)
+                    await model.triggerAutomation(id: automation.id, deviceID: deviceID)
                     await onMutated()
                     dismiss()
                 }
@@ -89,7 +92,7 @@ struct AutomationNextRunSheet: View {
             return
         }
         Task {
-            errorMessage = await model.setAutomationNextRun(id: automation.id, nextRunTime: nextRun)
+            errorMessage = await model.setAutomationNextRun(id: automation.id, nextRunTime: nextRun, deviceID: deviceID)
             guard errorMessage == nil else { return }
             await onMutated()
             dismiss()

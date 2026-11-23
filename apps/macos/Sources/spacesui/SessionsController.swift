@@ -295,7 +295,9 @@ import workspacecore
         var emptyState: PaneEmptyStateContent?
         if isOffline {
             emptyState = .sessionsOffline(deviceName: device.name)
-        } else if model.hits.isEmpty {
+        } else if model.hits.isEmpty, !model.canShowMore {
+            // A page can come back empty yet have more after it (the server drops hits that resume in another
+            // project), so Show more stands in for the empty state then.
             if model.progress == nil {
                 emptyState = model.errorMessage == nil ? .sessionsSearching : nil
             } else if model.progress?.isBuilding != true {

@@ -104,9 +104,10 @@ export default function SessionsDocsPage() {
 
       <Section id="iphone" title="On iPhone">
         <Prose>
-          On the Agents tab, tap the magnifier to open Search Sessions. A Device row and an Agents row
-          sit under the search field; the sheet opens on the device you searched last, or the one you
-          are using. Tap a result to resume it or jump to it, and the sheet closes onto its terminal.
+          On the Agents tab, tap the magnifier to open Sessions. A row of chips under the search field
+          shows the device, the agents, and the project; tap one to change it. The sheet opens on the
+          device you searched last, or the one you are using, and a line under the chips counts the
+          sessions found. Tap a result to resume it or jump to it, and the sheet closes onto its terminal.
           Touch and hold a result to copy its conversation id. An offline device shows &quot;is
           offline&quot; in place of results.
         </Prose>

@@ -2,59 +2,131 @@ import SwiftUI
 import spacesdevicecore
 import spacesterminalcore
 
+/// Which list the Automations tab shows under its title.
+enum AutomationsTabSection: String, CaseIterable, Identifiable {
+    case automations = "Automations"
+    case runs = "Runs"
+
+    var id: String { rawValue }
+}
+
 /// Root content of the Automations tab (see `AutomationsTabView` for the tab shell). Automations are a
 /// headline feature, so they get their own bottom tab rather than living under Settings or joining the
-/// workspace-scoped Alerts/Spaces/Agents tabs — an automation is device-scoped, not tied to any one
-/// workspace. iOS view scope is deliberately narrow: view automations and runs, trigger a run, cancel a
-/// running run, and open a run's terminal — no create/edit/delete, which stay Mac-only.
+/// workspace-scoped Alerts/Spaces/Agents tabs. iOS view scope is deliberately narrow: view automations and
+/// runs, trigger a run, cancel a running run, and open a run's terminal. Create, edit, and delete stay
+/// Mac-only.
 ///
-/// Tapping a row opens that automation's detail screen (`AutomationDetailView`), where its schedule,
-/// command, and run history live and "Run Now" is the explicit manual trigger — unlike the Agents/Spaces
-/// tabs, an automation tap has somewhere to navigate to, so it opens that rather than firing a side
-/// effect blind. The toolbar's Recent Runs stays a flat cross-automation view, reached the same way.
+/// The tab has its own device (see `AutomationsPreferences`), chosen from the toolbar menu, and never
+/// reads or writes the app-wide active device: what it lists, and where every action from it and its
+/// detail screens goes, is the chosen device.
+///
+/// A segmented control switches between the device's automations and its recent runs. Tapping an
+/// automation opens its detail screen (`AutomationDetailView`), where its schedule, command, and run
+/// history live and "Run Now" is the explicit manual trigger.
 struct AutomationsListView: View {
     @Bindable var model: SpacesMobileAppModel
+    @State private var rememberedDeviceID = AutomationsPreferences().deviceID
+    @State private var section = AutomationsTabSection.automations
     @State private var selectedAutomationID: String?
-    @State private var isShowingRecentRuns = false
     @State private var selectedSession: SelectedTerminalSessionRoute?
     /// Required by `terminalSessionNavigation`'s shared modifier, which installs both a session route and
     /// a pending-launch route; the Automations tab never launches a session (it only opens one that
     /// already exists), so this stays nil.
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
 
-    private var rows: [SpacesMobileAutomationRow] { model.automationRows }
+    private var deviceID: String? {
+        AutomationsPreferences.resolvedDeviceID(remembered: rememberedDeviceID, pairedDeviceIDs: model.pairedDevices.map(\.id))
+    }
+
+    private var deviceName: String? { model.pairedDevices.first { $0.id == deviceID }?.name }
+
+    private var isDeviceOffline: Bool { deviceID.map { model.offlineDeviceIDs.contains($0) } ?? false }
 
     var body: some View {
-        content.navigationTitle("Automations").tint(Theme.accent).toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Recent Runs") { isShowingRecentRuns = true }.font(.system(size: 13, weight: .semibold)).disabled(
-                    (model.overview?.automationRuns.isEmpty ?? true)
-                ).accessibilityIdentifier("automations.recentRuns")
-            }
+        content.background(Theme.bg.ignoresSafeArea()).navigationTitle("Automations").tint(Theme.accent).toolbar {
+            ToolbarItem(placement: .topBarTrailing) { deviceMenu }
         }.navigationDestination(item: $selectedAutomationID) { automationID in
-            AutomationDetailView(model: model, automationID: automationID, selectedSession: $selectedSession)
-        }.navigationDestination(isPresented: $isShowingRecentRuns) {
-            AutomationRunsView(model: model, title: "Recent Runs", selectedSession: $selectedSession)
+            if let deviceID { AutomationDetailView(model: model, deviceID: deviceID, automationID: automationID, selectedSession: $selectedSession) }
         }.terminalSessionNavigation(model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
     }
 
-    @ViewBuilder private var content: some View {
-        if rows.isEmpty {
-            ContentUnavailableView {
-                Label("No Automations", systemImage: "clock.arrow.circlepath")
-            } description: {
-                Text(
-                    "Automations run commands on \(model.activeDeviceName ?? "this device") on a schedule — manually or with cron. Create them in Spaces on your Mac."
-                )
-            }.background(Theme.bg.ignoresSafeArea()).accessibilityIdentifier("automations.empty")
-        } else {
-            ScrollView { LazyVStack(spacing: 0) { ForEach(rows) { row in automationRow(row) } }.padding(.vertical, 12) }.scrollContentBackground(
-                .hidden
-            ).background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
+    @ViewBuilder private var deviceMenu: some View {
+        if let deviceName {
+            Menu {
+                Picker(
+                    "Device",
+                    selection: Binding(
+                        get: { deviceID ?? "" },
+                        set: { chosen in
+                            rememberedDeviceID = chosen
+                            AutomationsPreferences().deviceID = chosen
+                            selectedAutomationID = nil
+                        })
+                ) {
+                    ForEach(model.pairedDevices) { device in
+                        Text(model.offlineDeviceIDs.contains(device.id) ? "\(device.name) (offline)" : device.name).tag(device.id)
+                            .accessibilityIdentifier("automations.device.\(device.id)")
+                    }
+                }
+            } label: {
+                Text(deviceName)
+            }.accessibilityIdentifier("automations.device")
         }
     }
 
-    private func automationRow(_ row: SpacesMobileAutomationRow) -> some View {
+    @ViewBuilder private var content: some View {
+        if let deviceID, let deviceName {
+            VStack(spacing: 0) {
+                Picker("Show", selection: $section) { ForEach(AutomationsTabSection.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
+                    .padding(.horizontal, 16).padding(.vertical, 8).accessibilityIdentifier("automations.section")
+                if isDeviceOffline {
+                    ContentUnavailableView("\(deviceName) is offline", systemImage: "wifi.slash").accessibilityIdentifier("automations.offline")
+                } else {
+                    switch section {
+                    case .automations: automationsList(deviceID: deviceID)
+                    case .runs: runsList(deviceID: deviceID)
+                    }
+                }
+            }
+        } else {
+            ContentUnavailableView("No Devices", systemImage: "desktopcomputer", description: Text("Pair a device to see its automations."))
+        }
+    }
+
+    @ViewBuilder private func automationsList(deviceID: String) -> some View {
+        let rows = model.automationRows(forDeviceID: deviceID)
+        if rows.isEmpty {
+            ContentUnavailableView {
+                Label("No automations", systemImage: "clock.arrow.circlepath")
+            } description: {
+                Text("Create automations in Spaces on your Mac.")
+            }.accessibilityIdentifier("automations.empty")
+        } else {
+            List { ForEach(rows) { row in automationRow(row, deviceID: deviceID).bandListRow() } }.listStyle(.plain).scrollContentBackground(.hidden)
+                .refreshable { await model.refresh(deviceID: deviceID) }
+        }
+    }
+
+    @ViewBuilder private func runsList(deviceID: String) -> some View {
+        let overview = model.overview(forDeviceID: deviceID)
+        let rows = SpacesMobileAutomations.runRows(overview?.automationRuns ?? [])
+        if rows.isEmpty {
+            ContentUnavailableView {
+                Label("No runs yet", systemImage: "list.bullet.rectangle")
+            } description: {
+                Text("Runs appear here once an automation fires.")
+            }.accessibilityIdentifier("automations.runs.empty")
+        } else {
+            List {
+                AutomationRunRowsList(
+                    model: model, deviceID: deviceID, rows: rows, title: { $0.automationName ?? "Automation" }, onMutated: {},
+                    onOpenSession: { session in selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: deviceID) }
+                ).bandListRow()
+            }.listStyle(.plain).scrollContentBackground(.hidden).refreshable { await model.refresh(deviceID: deviceID) }
+        }
+    }
+
+    private func automationRow(_ row: SpacesMobileAutomationRow, deviceID: String) -> some View {
         let automation = row.automation
         var detailParts = [
             SpacesMobileAutomations.triggerSummary(automation),
@@ -63,7 +135,9 @@ struct AutomationsListView: View {
             // `SpacesMobileAppModel.relativeTimeReference`.
             SpacesMobileAutomations.nextFireDescription(automation, relativeTo: model.relativeTimeReference),
         ]
-        if let workspaceName = SpacesMobileAutomations.workspaceName(for: automation, in: model.overview?.workspaces ?? []) {
+        if let workspaceName = SpacesMobileAutomations.workspaceName(
+            for: automation, in: model.overview(forDeviceID: deviceID)?.workspaces ?? [])
+        {
             detailParts.append(workspaceName)
         }
         let detail = detailParts.compactMap { $0 }.joined(separator: " · ")
@@ -88,45 +162,6 @@ struct AutomationsListView: View {
                 RowChevron()
             }
         }.buttonStyle(.plain).accessibilityIdentifier("automations.row.\(row.id)")
-    }
-}
-
-/// Runs list across every automation ("Recent Runs", from the toolbar) — newest first, with a Cancel
-/// action on running rows and an End Agents action on finished runs that still have a live attributed
-/// coding agent. Purely overview-derived: unlike the per-automation detail screen, this is genuinely the
-/// live recent-runs window, so there is no retained-history fetch to reconcile. Tapping a navigable run
-/// row opens its terminal session (live while running, its read-only ended transcript once finished);
-/// tapping an attributed-agent chip opens that agent's own session — see
-/// `SpacesMobileAutomations.runSession`/`agentSession`.
-struct AutomationRunsView: View {
-    @Bindable var model: SpacesMobileAppModel
-    let title: String
-    @Binding var selectedSession: SelectedTerminalSessionRoute?
-
-    private var rows: [SpacesMobileAutomationRunRow] { SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: nil) }
-
-    var body: some View { content.navigationTitle(title).tint(Theme.accent) }
-
-    @ViewBuilder private var content: some View {
-        if rows.isEmpty {
-            ContentUnavailableView {
-                Label("No Runs", systemImage: "list.bullet.rectangle")
-            } description: {
-                Text("Runs appear here once an automation fires.")
-            }.background(Theme.bg.ignoresSafeArea())
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    AutomationRunRowsList(
-                        model: model, rows: rows, title: { $0.automationName ?? "Automation" }, onMutated: {},
-                        onOpenSession: { session in
-                            // Automations are scoped to the selected device, so a run's session always belongs to it.
-                            guard let activeDeviceID = model.activeDeviceID else { return }
-                            selectedSession = SelectedTerminalSessionRoute(session: session, deviceID: activeDeviceID)
-                        })
-                }.padding(.vertical, 12)
-            }.scrollContentBackground(.hidden).background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
-        }
     }
 }
 

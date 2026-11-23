@@ -1,7 +1,7 @@
 import SwiftUI
 import spacesdevicecore
 
-/// One prompt: its title and text, editable, with Copy, Save, Discard, and Delete.
+/// One prompt: its title and text, editable, with Copy, Save, and Discard.
 ///
 /// Edits are held in `SavedPromptsModel.draft` until Save or Discard. Copy takes the text as it is on
 /// screen, unsaved edits included, and never saves. While the draft is dirty the system back button is
@@ -13,7 +13,6 @@ struct SavedPromptDetailView: View {
 
     @State private var showsCopied = false
     @State private var copiedResetTask: Task<Void, Never>?
-    @State private var isConfirmingDelete = false
     @State private var isAskingAboutUnsavedChanges = false
     @State private var isWorking = false
 
@@ -32,20 +31,6 @@ struct SavedPromptDetailView: View {
                             }.accessibilityIdentifier("prompts.detail.back")
                         }
                     }
-                    if !draft.isNew {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button(role: .destructive) {
-                                isConfirmingDelete = true
-                            } label: {
-                                Image(systemName: "trash")
-                            }.foregroundStyle(Theme.red).accessibilityLabel("Delete prompt").accessibilityIdentifier("prompts.detail.delete")
-                        }
-                    }
-                }.confirmationDialog("Delete \u{201C}\(draft.title)\u{201D}?", isPresented: $isConfirmingDelete, titleVisibility: .visible) {
-                    Button("Delete", role: .destructive) { Task { await delete() } }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("This removes the prompt from \(deviceName(draft)).")
                 }.confirmationDialog("Save your changes?", isPresented: $isAskingAboutUnsavedChanges, titleVisibility: .visible) {
                     Button("Save") { Task { await save(thenLeave: true) } }
                     Button("Discard", role: .destructive) {
@@ -111,8 +96,6 @@ struct SavedPromptDetailView: View {
         }
     }
 
-    private func deviceName(_ draft: SavedPromptDraft) -> String { model.reachableDevices.first { $0.id == draft.deviceID }?.name ?? "this device" }
-
     private func copy(_ draft: SavedPromptDraft) {
         model.copy(deviceID: draft.deviceID, promptID: draft.promptID, text: draft.text)
         showsCopied = true
@@ -132,11 +115,5 @@ struct SavedPromptDetailView: View {
         case .updated: if thenLeave, !model.isDraftDirty { onFinished() }
         case .failed: break
         }
-    }
-
-    private func delete() async {
-        isWorking = true
-        defer { isWorking = false }
-        if await model.deleteDraft() { onFinished() }
     }
 }

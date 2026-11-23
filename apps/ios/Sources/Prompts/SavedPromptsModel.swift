@@ -193,27 +193,18 @@ struct SavedPromptDraft: Equatable {
 
     func discardEdits() { draft?.discardEdits() }
 
-    /// Deletes the draft's prompt; true when it is gone and still the open draft, so the screen should close.
-    func deleteDraft() async -> Bool {
-        guard let current = draft, let promptID = current.promptID else { return false }
-        guard let connection = connectionForDevice(current.deviceID) else {
-            draft?.errorMessage = "This device is not reachable."
-            return false
-        }
+    /// Deletes `entry` from its device, for the list's swipe action. Returns the failure message to show,
+    /// or nil once the prompt is gone. Never touches the draft: a swipe happens on the list, where no
+    /// prompt is open.
+    func delete(_ entry: SavedPromptLibrary.Entry) async -> String? {
+        guard let connection = connectionForDevice(entry.deviceID) else { return "This device is not reachable." }
         do {
-            let result = try await connection.client.deleteSavedPrompt(id: promptID, commandChannel: connection.channel)
-            return finishDelete(result, deleted: current)
+            let result = try await connection.client.deleteSavedPrompt(id: entry.prompt.id, commandChannel: connection.channel)
+            apply(result, deviceID: entry.deviceID)
+            return nil
         } catch {
-            if isOpen(current) { draft?.errorMessage = Self.message(for: error) }
-            return false
+            return Self.message(for: error)
         }
-    }
-
-    /// Installs a delete's response. The user may have opened another prompt while the delete was in
-    /// flight; closing the screen would then discard that prompt's edits.
-    func finishDelete(_ result: SpacesDeviceSavedPromptsResult, deleted: SavedPromptDraft) -> Bool {
-        apply(result, deviceID: deleted.deviceID)
-        return isOpen(deleted)
     }
 
     private static func message(for error: Error) -> String {

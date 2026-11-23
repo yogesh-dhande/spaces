@@ -8,7 +8,8 @@
     private actor SpacesMobileAutomationsRequestRecorder {
         private var requests: [SpacesDeviceAPIRequest] = []
 
-        func append(_ request: SpacesDeviceAPIRequest) { requests.append(request) }
+        /// Skips the saved-prompts fetch a paired device triggers on its own, which no automation test is about.
+        func append(_ request: SpacesDeviceAPIRequest) { if request.commandName != "listSavedPrompts" { requests.append(request) } }
         func snapshot() -> [SpacesDeviceAPIRequest] { requests }
     }
 
@@ -511,8 +512,8 @@
                 automations: [makeAutomation(id: "automation-a", name: "Deploy")],
                 automationRuns: [makeRun(id: "run-1", automationID: "automation-a", status: "running")])
 
-            XCTAssertEqual(model.automationRows.map(\.automation.id), ["automation-a"])
-            XCTAssertEqual(model.automationRows.first?.lastRunStatus, "running")
+            XCTAssertEqual(model.automationRows(forDeviceID: Self.testDeviceID).map(\.automation.id), ["automation-a"])
+            XCTAssertEqual(model.automationRows(forDeviceID: Self.testDeviceID).first?.lastRunStatus, "running")
         }
 
         func testModelAutomationRowsEmptyWhenNoAutomations() {
@@ -522,7 +523,7 @@
             // Drives the Automations tab's empty state (`AutomationsListView.content`): no automations on
             // the active device means an empty `automationRows`, which the view reads to show the
             // feature-pitch `ContentUnavailableView` instead of the list.
-            XCTAssertTrue(model.automationRows.isEmpty)
+            XCTAssertTrue(model.automationRows(forDeviceID: Self.testDeviceID).isEmpty)
         }
 
         func testModelAutomationRunningRunCountReflectsOverview() {
@@ -575,6 +576,44 @@
             XCTAssertEqual(model.undismissedAlertCount, 1)
         }
 
+        /// The tab's device is its own choice, so a command addressed to a device that is not the app's active
+        /// one goes to that device's connection only, and its own overview is what reloads.
+        func testAutomationCommandsGoToTheChosenDeviceNotTheActiveOne() async {
+            let activeRecorder = SpacesMobileAutomationsRequestRecorder()
+            let otherRecorder = SpacesMobileAutomationsRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let otherRun = makeRun(id: "run-other", automationID: "automation-b", status: "running")
+            let otherOverview = makeOverview(automations: [makeAutomation(id: "automation-b", name: "Backup")], automationRuns: [otherRun])
+            let emptyOverview = makeOverview()
+            let activeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                await activeRecorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(emptyOverview))
+            }
+            let otherClient = SpacesDeviceAPIClient(settings: settings) { request in
+                await otherRecorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(otherOverview))
+            }
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: activeClient))
+            let other = SpacesMobilePairedDeviceRecord(
+                id: "device-b", name: "Device B", hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "fp-device-b",
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
+            model.pairedDevices.append(other)
+            let otherSettings = SpacesMobileDeviceStore.settings(from: other, installationID: settings.installationID)
+            model.setNonActiveDeviceStreamClientForTesting(otherClient, settings: otherSettings, deviceID: "device-b")
+            model.setDeviceOverviewForTesting(emptyOverview, deviceID: "device-b")
+
+            await model.triggerAutomation(id: "automation-b", deviceID: "device-b")
+            await model.cancelAutomationRun(runID: "run-other", deviceID: "device-b")
+
+            let otherNames = await otherRecorder.snapshot().map(\.commandName)
+            let activeNames = await activeRecorder.snapshot().map(\.commandName)
+            XCTAssertEqual(otherNames, ["triggerAutomation", "overview", "cancelAutomationRun", "overview"])
+            XCTAssertEqual(activeNames, [], "the active device is never contacted")
+            XCTAssertEqual(model.automationRows(forDeviceID: "device-b").map(\.automation.id), ["automation-b"])
+            XCTAssertEqual(model.automationRows(forDeviceID: "device-b").first?.lastRunStatus, "running")
+            XCTAssertTrue(model.automationRows(forDeviceID: Self.testDeviceID).isEmpty)
+        }
+
         func testTriggerAutomationSendsTriggerThenReloadsOverview() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
@@ -587,9 +626,9 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
-            await model.triggerAutomation(id: "automation-a")
+            await model.triggerAutomation(id: "automation-a", deviceID: Self.testDeviceID)
 
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["triggerAutomation", "overview"])
@@ -598,7 +637,7 @@
                 return
             }
             XCTAssertEqual(payload.id, "automation-a")
-            XCTAssertEqual(model.automationRows.first?.lastRunStatus, "running")
+            XCTAssertEqual(model.automationRows(forDeviceID: Self.testDeviceID).first?.lastRunStatus, "running")
             XCTAssertFalse(model.isMutating)
             XCTAssertNil(model.errorMessage)
         }
@@ -615,9 +654,9 @@
                 if request.commandName == "setAutomationNextRun" { return SpacesDeviceAPIResponse(ok: true, message: "Scheduled next run.") }
                 return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
-            let rejection = await model.setAutomationNextRun(id: "automation-a", nextRunTime: nextRun)
+            let rejection = await model.setAutomationNextRun(id: "automation-a", nextRunTime: nextRun, deviceID: Self.testDeviceID)
 
             XCTAssertNil(rejection)
             let requests = await recorder.snapshot()
@@ -628,7 +667,7 @@
             }
             XCTAssertEqual(payload.id, "automation-a")
             XCTAssertEqual(payload.nextRunTime, TerminalSessionTimestamp.fractionalString(from: nextRun))
-            XCTAssertEqual(model.automationRows.first?.automation.nextFireTime, scheduled.nextFireTime)
+            XCTAssertEqual(model.automationRows(forDeviceID: Self.testDeviceID).first?.automation.nextFireTime, scheduled.nextFireTime)
             XCTAssertFalse(model.isMutating)
             XCTAssertNil(model.errorMessage)
         }
@@ -644,9 +683,9 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(overview))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
-            let rejection = await model.setAutomationNextRun(id: "automation-a", nextRunTime: Date(timeIntervalSinceReferenceDate: 1_000_000))
+            let rejection = await model.setAutomationNextRun(id: "automation-a", nextRunTime: Date(timeIntervalSinceReferenceDate: 1_000_000), deviceID: Self.testDeviceID)
 
             XCTAssertEqual(rejection, "Enable the automation to schedule its next run.")
             XCTAssertNil(model.errorMessage)
@@ -665,9 +704,9 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
-            await model.cancelAutomationRun(runID: "run-1")
+            await model.cancelAutomationRun(runID: "run-1", deviceID: Self.testDeviceID)
 
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["cancelAutomationRun", "overview"])
@@ -676,7 +715,7 @@
                 return
             }
             XCTAssertEqual(payload.runID, "run-1")
-            XCTAssertEqual(model.automationRows.first?.lastRunStatus, "canceled")
+            XCTAssertEqual(model.automationRows(forDeviceID: Self.testDeviceID).first?.lastRunStatus, "canceled")
             XCTAssertFalse(model.isMutating)
             XCTAssertNil(model.errorMessage)
         }
@@ -694,9 +733,9 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
-            await model.endAutomationAgents(runID: "run-1")
+            await model.endAutomationAgents(runID: "run-1", deviceID: Self.testDeviceID)
 
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["endAutomationAgents", "overview"])
@@ -734,14 +773,13 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "Triggered automation.", result: .automationRuns(.init(rows: [triggeredRun])))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            model.activeDeviceID = "device-1"
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
             // A refresh's fetch, held open on the transport: this is the overview that predates the trigger.
             let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
 
-            let trigger = Task { await model.triggerAutomation(id: "automation-a") }
+            let trigger = Task { await model.triggerAutomation(id: "automation-a", deviceID: Self.testDeviceID) }
             for _ in 0..<100 { await Task.yield() }
             await overviewGate.open()
             await trigger.value
@@ -750,7 +788,7 @@
             let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
             XCTAssertEqual(overviewFetches, 2, "the trigger's read issues its own overview request instead of only joining the refresh before it")
             XCTAssertEqual(
-                model.automationRows.first?.lastRunStatus, "running", "the fresh overview lands, not the stale one the held refresh answered with")
+                model.automationRows(forDeviceID: Self.testDeviceID).first?.lastRunStatus, "running", "the fresh overview lands, not the stale one the held refresh answered with")
         }
 
         func testSetAutomationNextRunReadsPastARefreshIssuedBeforeTheCommand() async {
@@ -781,13 +819,12 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "Scheduled next run.")
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            model.activeDeviceID = "device-1"
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
             let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
 
-            let schedule = Task { await model.setAutomationNextRun(id: "automation-a", nextRunTime: freshNextRun) }
+            let schedule = Task { await model.setAutomationNextRun(id: "automation-a", nextRunTime: freshNextRun, deviceID: Self.testDeviceID) }
             for _ in 0..<100 { await Task.yield() }
             await overviewGate.open()
             _ = await schedule.value
@@ -796,7 +833,7 @@
             let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
             XCTAssertEqual(overviewFetches, 2, "the schedule's read issues its own overview request instead of only joining the refresh before it")
             XCTAssertEqual(
-                model.automationRows.first?.automation.nextFireTime, TerminalSessionTimestamp.fractionalString(from: freshNextRun),
+                model.automationRows(forDeviceID: Self.testDeviceID).first?.automation.nextFireTime, TerminalSessionTimestamp.fractionalString(from: freshNextRun),
                 "the fresh next-run time lands, not the stale one the held refresh answered with")
         }
 
@@ -821,13 +858,12 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "Canceled automation run.", result: .automationRuns(.init(rows: [canceledRun])))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            model.activeDeviceID = "device-1"
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
             let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
 
-            let cancel = Task { await model.cancelAutomationRun(runID: "run-1") }
+            let cancel = Task { await model.cancelAutomationRun(runID: "run-1", deviceID: Self.testDeviceID) }
             for _ in 0..<100 { await Task.yield() }
             await overviewGate.open()
             await cancel.value
@@ -836,7 +872,7 @@
             let overviewFetches = await recorder.snapshot().count { $0.commandName == "overview" }
             XCTAssertEqual(overviewFetches, 2, "the cancel's read issues its own overview request instead of only joining the refresh before it")
             XCTAssertEqual(
-                model.automationRows.first?.lastRunStatus, "canceled", "the fresh overview lands, not the stale one the held refresh answered with")
+                model.automationRows(forDeviceID: Self.testDeviceID).first?.lastRunStatus, "canceled", "the fresh overview lands, not the stale one the held refresh answered with")
         }
 
         func testEndAutomationAgentsReadsPastARefreshIssuedBeforeTheCommand() async {
@@ -862,13 +898,12 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "Ended automation agents.", result: .automationRuns(.init(rows: [endedRun])))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            model.activeDeviceID = "device-1"
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
 
             let firstRefresh = Task { await model.refresh() }
             while await recorder.snapshot().count(where: { $0.commandName == "overview" }) < 1 { await Task.yield() }
 
-            let endAgents = Task { await model.endAutomationAgents(runID: "run-1") }
+            let endAgents = Task { await model.endAutomationAgents(runID: "run-1", deviceID: Self.testDeviceID) }
             for _ in 0..<100 { await Task.yield() }
             await overviewGate.open()
             await endAgents.value
@@ -892,7 +927,7 @@
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(await responder.current()))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
             await model.refresh()
 
             let counter = SpacesMobileChangeCounter()
@@ -918,7 +953,7 @@
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(overview))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now }))
             let initialReference = model.relativeTimeReference
 
             clock.advance(10)
@@ -941,7 +976,7 @@
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(await responder.current()))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now }))
             await model.refresh()
 
             let counter = SpacesMobileChangeCounter()
@@ -965,7 +1000,7 @@
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(overview))
             }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now }))
             await model.refresh()
 
             clock.advance(300)  // five minutes with nothing refreshing
@@ -983,9 +1018,9 @@
                 if request.commandName == "triggerAutomation" { await gate.wait() }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: request.commandName == "overview" ? .overview(staleOverview) : nil)
             }
-            let model = SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client))
 
-            let task = Task { await model.triggerAutomation(id: "old-automation") }
+            let task = Task { await model.triggerAutomation(id: "old-automation", deviceID: Self.testDeviceID) }
             await Task.yield()
             model.handleAuthenticationFailure(message: "Switched devices.")
             await gate.open()
@@ -1001,9 +1036,9 @@
                 if request.commandName == "cancelAutomationRun" { await gate.wait() }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: request.commandName == "overview" ? .overview(staleOverview) : nil)
             }
-            let model = SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client))
 
-            let task = Task { await model.cancelAutomationRun(runID: "old-run") }
+            let task = Task { await model.cancelAutomationRun(runID: "old-run", deviceID: Self.testDeviceID) }
             await Task.yield()
             model.handleAuthenticationFailure(message: "Switched devices.")
             await gate.open()
@@ -1019,9 +1054,9 @@
                 if request.commandName == "endAutomationAgents" { await gate.wait() }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: request.commandName == "overview" ? .overview(staleOverview) : nil)
             }
-            let model = SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client))
 
-            let task = Task { await model.endAutomationAgents(runID: "old-run") }
+            let task = Task { await model.endAutomationAgents(runID: "old-run", deviceID: Self.testDeviceID) }
             await Task.yield()
             model.handleAuthenticationFailure(message: "Switched devices.")
             await gate.open()
@@ -1037,9 +1072,9 @@
                 if request.commandName == "listAutomationRuns" { await gate.wait() }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .automationRuns(.init(rows: staleRuns)))
             }
-            let model = SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client))
 
-            let task = Task { await model.fetchAutomationRuns(automationID: "old-automation") }
+            let task = Task { await model.fetchAutomationRuns(automationID: "old-automation", deviceID: Self.testDeviceID) }
             await Task.yield()
             model.handleAuthenticationFailure(message: "Switched devices.")
             await gate.open()
@@ -1063,14 +1098,20 @@
             let client =
                 device?.client(settings: settings)
                 ?? SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let model = paired(SpacesMobileAppModel(settings: settings, bridgeClient: client))
+            model.overview = device?.currentOverview
+            return model
+        }
+
+        /// Pairs `model` with `testDeviceID` and selects it. Automation commands are addressed to a paired
+        /// device, so a model under test needs one even when it holds a single connection.
+        private func paired(_ model: SpacesMobileAppModel) -> SpacesMobileAppModel {
             model.pairedDevices = [
                 SpacesMobilePairedDeviceRecord(
                     id: Self.testDeviceID, name: Self.testDeviceID, hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "fp-device-a",
                     createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
             ]
             model.activeDeviceID = Self.testDeviceID
-            model.overview = device?.currentOverview
             return model
         }
 
