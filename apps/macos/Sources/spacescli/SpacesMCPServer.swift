@@ -17,6 +17,9 @@ final class SpacesMCPStdioServer {
         case profile(TerminalServiceProfileCommandResponse)
         case agentSessions(MCPAgentSessionsToolResponse)
         case agentBrief(MCPAgentBriefToolResponse)
+        /// Markdown returned as-is (`spaces_workflow`). It never touches the daemon, so it neither carries
+        /// nor drains pending agent events: draining would consume events with nowhere to put them.
+        case workflow(String)
     }
 
     /// JSON envelope for the agent-session-carrying tools, mirroring `TerminalServiceProfileCommandResponse`'s
@@ -549,6 +552,15 @@ final class SpacesMCPStdioServer {
                     TerminalServiceProfileCommandResponse(
                         message: devices.isEmpty ? "No paired devices." : SpacesPairedDeviceSelection.deviceRows(devices)))
             },
+            MCPToolDescriptor(
+                name: "spaces_workflow",
+                description:
+                    "Get the full step-by-step instructions for a Spaces workflow. Call this BEFORE doing the work: the workflows carry rules the individual tools do not. Workflows: "
+                    + MCPWorkflow.allCases.map { "\($0.rawValue) (\($0.purpose))" }.joined(separator: "; ") + ".",
+                properties: [
+                    "name": ["type": "string", "enum": MCPWorkflow.allCases.map(\.rawValue), "description": "The workflow to read."] as [String: Any]
+                ], required: ["name"]
+            ) { _, arguments in .workflow(try decodeMCPArguments(WorkflowArguments.self, from: arguments).workflow.steps) },
         ]
     }
 
@@ -589,6 +601,7 @@ final class SpacesMCPStdioServer {
                 id: id,
                 result: [
                     "protocolVersion": "2024-11-05", "capabilities": ["tools": [:]], "serverInfo": ["name": "spaces", "version": AppVersion.current],
+                    "instructions": MCPWorkflow.instructions,
                 ])
         case "notifications/initialized": return
         case "ping": try sendResponse(id: id, result: [:])
@@ -609,6 +622,10 @@ final class SpacesMCPStdioServer {
             let name = trimmedName
             let arguments = params["arguments"] as? [String: Any] ?? [:]
             let profileResponse = try callTool(name: name, arguments: arguments)
+            if case .workflow(let text) = profileResponse {
+                try sendToolResult(id: id, text: text, isError: false)
+                return
+            }
             let withPendingEvents = try attachingPendingAgentEvents(to: profileResponse)
             try sendToolResult(id: id, text: try encodedText(withPendingEvents), isError: false)
         } catch { try respondToFailedToolCall(id: id, error: error) }
@@ -671,6 +688,7 @@ final class SpacesMCPStdioServer {
         case .profile(let profile): return .profile(profile.addingPendingAgentEvents(events))
         case .agentSessions(let agentSessions): return .agentSessions(agentSessions.addingPendingAgentEvents(events))
         case .agentBrief(let agentBrief): return .agentBrief(agentBrief.addingPendingAgentEvents(events))
+        case .workflow: return response
         }
     }
 
@@ -686,6 +704,7 @@ final class SpacesMCPStdioServer {
         case .profile(let profile): return try encodedJSON(profile)
         case .agentSessions(let agentSessions): return try encodedJSON(agentSessions)
         case .agentBrief(let agentBrief): return try encodedJSON(agentBrief)
+        case .workflow(let text): return text
         }
     }
 
