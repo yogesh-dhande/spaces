@@ -1,8 +1,7 @@
 import Foundation
 
-/// The one-line headline of a coding agent's brief: what `agent list`/`agent status`, the Device API
-/// agent-session rows, and the blocked/done notification block show in the slot the full markdown document
-/// would not fit.
+/// The one-line headline of a coding agent's brief: what `agent list`/`agent status` and the Device API
+/// agent-session rows show in the slot the full markdown document would not fit.
 ///
 /// It is the brief's first line that still has text once its leading markdown block markers (heading `#`,
 /// list `-` or `*`, quote `>`, numbered `1.`) and surrounding whitespace are removed, capped at `maxLength`

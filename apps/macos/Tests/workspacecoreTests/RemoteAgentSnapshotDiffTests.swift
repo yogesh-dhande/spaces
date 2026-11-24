@@ -61,9 +61,8 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
     }
 
     /// A status change to `exited` (the child process ended but its terminal survived, so the row stays
-    /// in the listing) delivers a single `.exited` transition carrying the fresh row, from every prior
-    /// live state.
-    func testTransitionToExitedStatusEmitsExitedCarryingNewRow() throws {
+    /// in the listing) delivers a single `.exited` transition from every prior live state.
+    func testTransitionToExitedStatusEmitsExitedAndKeepsTheRowInTheSnapshot() throws {
         for previousStatus in ["spinning", "waiting", "done"] {
             let baseline = RemoteAgentSnapshotDiff.diff(
                 previous: [:], newRows: [row(terminal: "term-1", status: previousStatus)], watchedTerminalSessionIDs: ["term-1"])
@@ -72,9 +71,7 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
                 previous: baseline.snapshot, newRows: [row(terminal: "term-1", status: "exited")], watchedTerminalSessionIDs: ["term-1"])
 
             XCTAssertEqual(result.transitions.map(\.kind), [.exited], "\(previousStatus) → exited must emit one exited transition")
-            // Unlike the row-disappearance case, the status-transition exit renders from the fresh row and
-            // the agent stays in the snapshot (its terminal is still watched).
-            XCTAssertEqual(result.transitions.first?.row.status, "exited")
+            // Unlike the row-disappearance case, the agent stays in the snapshot (its terminal is still watched).
             XCTAssertEqual(Set(result.snapshot.keys), ["term-1"])
         }
     }
@@ -108,8 +105,6 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
         let result = RemoteAgentSnapshotDiff.diff(previous: baseline.snapshot, newRows: [], watchedTerminalSessionIDs: ["term-1"])
 
         XCTAssertEqual(result.transitions.map(\.kind), [.exited])
-        // The exit renders from the last-seen row and the agent leaves the next snapshot.
-        XCTAssertEqual(result.transitions.first?.row.status, "done")
         XCTAssertTrue(result.snapshot.isEmpty)
     }
 

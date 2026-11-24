@@ -30,6 +30,14 @@ final class CallerTerminalCheckTests: XCTestCase {
 
     func testUnknownOrEndedTerminalKeepsItsOwnHandling() { XCTAssertTrue(check(shellPID: nil).permits(sessionID: "s", callerProcessID: getpid())) }
 
+    /// A process naming its own terminal to others needs that terminal live: an ended session inherited
+    /// through tmux or an IDE would send replies nowhere.
+    func testRunsInsideRequiresALiveTerminalAndAncestry() {
+        XCTAssertTrue(check(shellPID: getpid()).runsInside(sessionID: "s", processID: getpid()))
+        XCTAssertFalse(check(shellPID: getpid()).runsInside(sessionID: "s", processID: getppid()))
+        XCTAssertFalse(check(shellPID: nil).runsInside(sessionID: "s", processID: getpid()))
+    }
+
     func testRefusalNamesTheCauseAndTheExplicitSessionEscape() throws {
         let message = try XCTUnwrap(CallerOutsideTerminalError().errorDescription)
         XCTAssertTrue(message.contains("not running inside the Spaces terminal"))

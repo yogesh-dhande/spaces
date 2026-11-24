@@ -1,4 +1,5 @@
 import Foundation
+import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
 
@@ -402,6 +403,18 @@ public enum SpacesDevicePairingClient {
         let slug = source.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
             in: CharacterSet(charactersIn: "-"))
         return "device-\(slug.prefix(48))"
+    }
+
+    /// The id a client that pairs with this profile's daemon stores it under: `stablePairedDeviceID` over
+    /// the daemon's own certificate fingerprint, the same value its pairing link and `device pair --json`
+    /// advertise. The port never reaches the id (see `stablePairedDeviceID`), so no Device API setting is
+    /// read. Throws when the daemon has never created its identity, since then nothing can have paired
+    /// with it.
+    public static func localPairedDeviceID(profile: SpacesProfile? = nil) throws -> String {
+        guard let fingerprint = TerminalServiceTLSIdentityStore.existingCertificateFingerprint(profile: try profile ?? SpacesProfile.current()) else {
+            throw SpacesClientError.invalidArgument("This machine's Spaces service has no device identity yet, so no paired device knows it.")
+        }
+        return stablePairedDeviceID(certificateFingerprint: fingerprint, port: SpacesDeviceAPIDefaults.port)
     }
 
     static func sshValidationFailureMessage(destination: String, detail: String, exitStatus: Int32) -> String {

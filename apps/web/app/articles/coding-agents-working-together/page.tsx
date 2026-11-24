@@ -184,20 +184,20 @@ const article: ArticleData = {
             "**It makes a review workspace from that branch.** It calls `spaces_workspace_create` with the project and `branch: \"login-fix-review\"`, plus `baseBranch: \"login-fix\"` (`baseBranch` is optional), then `spaces_workspace_start`. On the same machine, workspaces share the project's one clone, so the new worktree has Claude's commits without a push. Another machine (`device`) has its own clone, so Claude Code pushes `login-fix` first; that machine fetches the branch from your git remote when it creates the workspace, and Claude Code then looks up the new workspace's id there with `spaces_workspace_list`.",
             "**It spawns Codex there.** `spaces_agent_spawn` with `command: \"codex\"` and the review workspace's id. The call returns once Codex is running, with Codex's session id, and Claude Code's terminal is now subscribed to it. Codex may still be at a first-run trust or sign-in prompt that needs an answer, which Claude Code can see with `spaces_terminal_tail`.",
             "**It sends the task.** `spaces_terminal_send` with `submit: true` and text like: \"Review the commits on this branch against main for correctness and missed edge cases. Don't edit files. Put your findings in your brief with spaces_agent_brief_write: a one-line headline, then each finding by severity with file and line.\"",
-            "**It goes idle.** When Codex finishes its turn, a block in this shape arrives in Claude Code's terminal:"
+            "**It goes idle.** When Codex finishes its turn, a line in this shape arrives in Claude Code's terminal, naming the device when Codex runs on another machine:"
           ]
         },
         {
           "type": "code",
-          "text": "[spaces] Codex (codex) is done\n  project: <project name>\n  workspace: <path to the login-fix-review worktree>\n  branch: login-fix-review\n  session: <Codex's session id>\n  brief: <the first line of Codex's brief>\n  link: spaces://terminal/<Codex's session id>"
+          "text": "[spaces] <Codex's session id> is done\n[spaces] <Codex's session id> on <the device's id> is done"
         },
         {
           "type": "figure",
           "src": "/media/mac-event.png",
           "width": 2200,
-          "height": 1458,
-          "alt": "Claude Code's terminal on the Mac showing a [spaces] Codex (codex) is done block for the login-fix-review workspace on build-server, followed by Claude Code quoting Codex's brief.",
-          "caption": "The done event as it lands in the lead's terminal. Here the lead runs on the Mac and Codex on a paired server; the lead then reads Codex's brief."
+          "height": 1456,
+          "alt": "Claude Code's terminal on the Mac showing a one-line [spaces] event naming the reviewer's session and build-server's device id as done, followed by Claude Code summarizing the reviewer's brief.",
+          "caption": "The done event as it lands in the lead's terminal. Here the lead runs on the Mac and the reviewer, opencode in this run, on a paired server; the lead then reads its brief."
         },
         {
           "type": "ol",

@@ -188,12 +188,12 @@ final class TerminalServiceProtocolTests: XCTestCase {
         // result, so a client reads them from `pendingAgentEvents` — the busy-time counterpart to idle
         // injection. The field is present only when the piggyback drained a row, and omitted otherwise.
         let response = TerminalServiceProfileCommandResponse(message: "Listed agent sessions.").addingPendingAgentEvents([
-            "[spaces] A (claude) is blocked", "[spaces] B (codex) is done",
+            "[spaces] term-a is blocked", "[spaces] term-b on device-1 is done",
         ])
         let encoded = try JSONEncoder().encode(response)
         let json = String(decoding: encoded, as: UTF8.self)
         XCTAssertTrue(json.contains(#""pendingAgentEvents""#))
-        XCTAssertTrue(json.contains(#""[spaces] A (claude) is blocked""#))
+        XCTAssertTrue(json.contains(#""[spaces] term-a is blocked""#))
         XCTAssertEqual(try JSONDecoder().decode(TerminalServiceProfileCommandResponse.self, from: encoded), response)
 
         // Nothing to attach leaves the response unchanged and the field omitted (nil or empty alike).

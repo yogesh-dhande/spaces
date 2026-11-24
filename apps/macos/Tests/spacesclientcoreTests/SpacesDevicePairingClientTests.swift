@@ -94,6 +94,25 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         }
     }
 
+    /// A client pairing with this profile's daemon names it from the fingerprint the daemon advertises, on
+    /// whatever port it listens on, so this machine computes that same id for itself.
+    func testLocalPairedDeviceIDIsTheIDAPairingClientStoresForThisDaemon() throws {
+        let profile = makeProfile()
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(
+            root: TerminalServicePaths.terminalRootDirectory(profile: profile).appendingPathComponent("daemon-tls", isDirectory: true))
+
+        let localID = try SpacesDevicePairingClient.localPairedDeviceID(profile: profile)
+
+        for port in [47_847, 48_123] {
+            XCTAssertEqual(
+                localID, SpacesDevicePairingClient.stablePairedDeviceID(certificateFingerprint: identity.certificateFingerprint, port: port))
+        }
+    }
+
+    func testLocalPairedDeviceIDThrowsWithoutADaemonIdentity() {
+        XCTAssertThrowsError(try SpacesDevicePairingClient.localPairedDeviceID(profile: makeProfile()))
+    }
+
     func testProfileWithoutADaemonIdentityIsNotTreatedAsSelfAndCreatesNone() throws {
         let profile = makeProfile()
 

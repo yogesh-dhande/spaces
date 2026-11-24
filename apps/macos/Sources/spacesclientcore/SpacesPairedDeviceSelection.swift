@@ -6,6 +6,19 @@ import spacesdevicecore
 /// must match exactly one device case-insensitively. Failures list the candidates so agents can
 /// self-correct without a separate discovery round trip.
 public enum SpacesPairedDeviceSelection {
+    /// The device a `--device` / `device` argument targets, or nil when the call runs on this machine:
+    /// no selector, or the id paired devices know this machine by. Pairing is one-way, so this machine
+    /// is never a paired record; an agent replying to `[from <session> on <device>]:` passes that id
+    /// back as `device`, and when the sender is on this machine it has to mean "here".
+    public static func target(
+        _ selector: String?, database: SpacesClientDatabase? = nil,
+        localDeviceID: () -> String? = { try? SpacesDevicePairingClient.localPairedDeviceID() }
+    ) throws -> SpacesPairedDeviceRecord? {
+        guard let selector else { return nil }
+        if selector.trimmingCharacters(in: .whitespacesAndNewlines) == localDeviceID() { return nil }
+        return try resolve(selector, database: database)
+    }
+
     public static func resolve(_ nameOrID: String, database providedDatabase: SpacesClientDatabase? = nil) throws -> SpacesPairedDeviceRecord {
         let selector = nameOrID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selector.isEmpty else { throw SpacesClientError.invalidArgument("Device name or ID is required.") }

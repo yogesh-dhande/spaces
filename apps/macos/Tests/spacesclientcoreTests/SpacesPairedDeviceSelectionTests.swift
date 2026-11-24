@@ -15,6 +15,17 @@ final class SpacesPairedDeviceSelectionTests: XCTestCase {
         XCTAssertEqual(try SpacesPairedDeviceSelection.resolve(" Build Box ", database: database).id, "device-aaa")
     }
 
+    func testTargetTreatsThisMachinesOwnIDAsLocalWhileOtherSelectorsStillResolve() throws {
+        let database = try makeDatabase(devices: [device(id: "device-aaa", name: "Build Box")])
+
+        XCTAssertNil(try SpacesPairedDeviceSelection.target(nil, database: database, localDeviceID: { "device-local" }))
+        XCTAssertNil(try SpacesPairedDeviceSelection.target(" device-local ", database: database, localDeviceID: { "device-local" }))
+        XCTAssertEqual(try SpacesPairedDeviceSelection.target("device-aaa", database: database, localDeviceID: { "device-local" })?.id, "device-aaa")
+        XCTAssertThrowsError(try SpacesPairedDeviceSelection.target("device-zzz", database: database, localDeviceID: { "device-local" }))
+        // A machine with no device identity yet has no id to match, so the selector is an ordinary one.
+        XCTAssertThrowsError(try SpacesPairedDeviceSelection.target("device-local", database: database, localDeviceID: { nil }))
+    }
+
     func testAmbiguousNameListsCandidates() throws {
         let database = try makeDatabase(devices: [device(id: "device-one", name: "Linux Box"), device(id: "device-two", name: "linux box")])
 

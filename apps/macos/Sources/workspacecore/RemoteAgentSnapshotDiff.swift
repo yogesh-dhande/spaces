@@ -45,17 +45,13 @@ public enum RemoteAgentSnapshotDiff {
     }
 
     public struct Transition: Equatable {
-        /// The watched child's terminal session id (the edge key), which also targets the deep link.
+        /// The watched child's terminal session id (the edge key), which the notification line names.
         public let terminalSessionID: String
         public let kind: TransitionKind
-        /// The row the notification renders from. For `exited` this is the last-seen row (the agent is
-        /// absent from the new listing), so its label and brief headline survive the disappearance.
-        public let row: SpacesDeviceAgentSessionRow
 
-        public init(terminalSessionID: String, kind: TransitionKind, row: SpacesDeviceAgentSessionRow) {
+        public init(terminalSessionID: String, kind: TransitionKind) {
             self.terminalSessionID = terminalSessionID
             self.kind = kind
-            self.row = row
         }
     }
 
@@ -74,12 +70,12 @@ public enum RemoteAgentSnapshotDiff {
                 snapshot[terminalSessionID] = new
                 guard let prev else { continue }  // first observation of this agent: seed silently
                 if let kind = statusTransition(from: prev.status, to: new.status) {
-                    transitions.append(Transition(terminalSessionID: terminalSessionID, kind: kind, row: new))
+                    transitions.append(Transition(terminalSessionID: terminalSessionID, kind: kind))
                 }
-            } else if let prev {
-                // Previously observed, now gone from the listing: the agent exited. Render from the
-                // last-seen row and leave it out of the next snapshot — the caller drops the edge.
-                transitions.append(Transition(terminalSessionID: terminalSessionID, kind: .exited, row: prev))
+            } else if prev != nil {
+                // Previously observed, now gone from the listing: the agent exited. Leave it out of the
+                // next snapshot; the caller drops the edge.
+                transitions.append(Transition(terminalSessionID: terminalSessionID, kind: .exited))
             }
         }
         return (transitions, snapshot)

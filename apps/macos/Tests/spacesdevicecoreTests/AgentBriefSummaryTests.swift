@@ -2,8 +2,7 @@ import Testing
 
 @testable import spacesdevicecore
 
-/// The headline a brief shows wherever only one line fits: `agent list`, the agent-session rows, and the
-/// blocked/done notification block.
+/// The headline a brief shows wherever only one line fits: `agent list` and the agent-session rows.
 @Suite struct AgentBriefSummaryTests {
     @Test func headingMarkerIsStripped() {
         #expect(AgentBriefSummary.summary(of: "## Fixing the flaky test\n\nStep 2 of 3") == "Fixing the flaky test")

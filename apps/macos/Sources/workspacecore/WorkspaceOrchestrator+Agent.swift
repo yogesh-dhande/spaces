@@ -26,8 +26,8 @@ extension WorkspaceOrchestrator {
             // configured `.agent` launch gets no row until the agent's hooks report it, or until this
             // pass's own detection insert below writes one, so the kind sampled at that moment can be nil;
             // repeated `working` signals are a deliberate no-op that never refreshes it once the row
-            // exists. Without this the row could reach its exit still carrying no kind and the exit block
-            // would name an anonymous "coding agent" for an agent listings had identified all along.
+            // exists. Without this the row could reach its exit still carrying no kind, and listings would
+            // stop naming an agent they had identified all along once it exited.
             if try refreshPersistedForegroundAgentDetails(sessionID: sessionID, runtimeState: session.runtimeState) { didMutate = true }
             let ownership = builtInTerminalSessionOwnership(sessionID: sessionID, index: ownershipIndex)
             // A session Spaces launched to run exactly one coding agent (`.agent` launch kind, no other
@@ -107,8 +107,8 @@ extension WorkspaceOrchestrator {
     /// anything was written.
     ///
     /// Both facts have to be captured while the agent runs, because live foreground state goes nil the
-    /// moment the agent process ends and both are read after it has. The kind is what the exit
-    /// notification's `(<kind>)` parenthetical and an orchestration row's `agent:` field name; the command
+    /// moment the agent process ends and both are read after it has. The kind is what an orchestration
+    /// row's `agent:` field names; the command
     /// is what session restore relaunches an agent the user typed into a terminal from, read at the next
     /// daemon start when the stale-session repair has already nulled the runtime row's foreground columns.
     /// Either observation can land after the row exists (`registerAgentWindow` samples the kind, but a
@@ -1034,19 +1034,15 @@ extension WorkspaceOrchestrator {
     /// subscriber set is read inside the claim's transaction: a watcher that attached between a check here
     /// and the claim would otherwise be owed a notice that was never rendered.
     ///
-    /// It is rendered from the row as the DATABASE holds it, never from `record`. Callers reach this
-    /// chokepoint holding a pre-exit snapshot — the two reconcile loops each read their own, passes apart —
-    /// and the row can have learned facts since, above all its detected agent kind, which the foreground
-    /// reconciler persists the moment classification lands. Rendering a stale snapshot would name the
-    /// anonymous "coding agent" for an agent the database can name, and nothing downstream could repair it:
-    /// live foreground state is cleared by the very exit being announced, so it is nil exactly here. A row
-    /// that is already gone has no exit left to claim (the claim's own condition), so it is reported
-    /// unclaimed rather than announced from stale state.
+    /// The notice and the event are built from the row as the DATABASE holds it, never from `record`:
+    /// callers reach this chokepoint holding a pre-exit snapshot (the two reconcile loops each read their
+    /// own, passes apart). A row that is already gone has no exit left to claim (the claim's own
+    /// condition), so it is reported unclaimed rather than announced from stale state.
     private func claimAgentExit(
         _ record: AgentWindowRecord, eventType: String, eventSource: String, environmentKeys: [String]?, engine: AgentNotificationEngine
     ) throws -> Bool {
         guard let current = try store.agentWindow(id: record.id) else { return false }
-        let exitedNotice = try engine.renderLine(agent: current, transition: .exited)
+        let exitedNotice = engine.renderLine(agent: current, transition: .exited)
         let message = agentSessionEventMessage(
             provider: current.provider, label: current.label, terminalTrackingID: current.terminalTrackingID, sessionKey: current.sessionKey,
             environmentKeys: environmentKeys)
@@ -1126,15 +1122,12 @@ extension WorkspaceOrchestrator {
         return runtimeState.foregroundDetectedAgentKind?.displayLabel
     }
 
-    /// The coding agent kind for an agent row — the `agent:` field of an orchestration row and the
-    /// `(<kind>)` parenthetical of every notification block. The row's persisted kind is authoritative:
-    /// it was written when detection classified the session and is refreshed by every later observation,
-    /// so it still names the agent at exit, when the live foreground state has already reverted to a plain
-    /// shell (or vanished with the session) and would report nothing. Live state is read only for a row
-    /// that has no persisted kind yet. Nil when no kind was ever detected, which renders honestly as
-    /// "coding agent" downstream. It answers for the record it is HANDED, so a caller holding a snapshot
-    /// taken before the kind was persisted must re-read the row first — see `claimAgentExit`, the one
-    /// caller that reaches this across such a gap.
+    /// The coding agent kind for an agent row, the `agent:` field of an orchestration row. The row's
+    /// persisted kind is authoritative: it was written when detection classified the session and is
+    /// refreshed by every later observation, so it still names an exited agent, whose live foreground
+    /// state has already reverted to a plain shell (or vanished with the session) and would report
+    /// nothing. Live state is read only for a row that has no persisted kind yet. Nil when no kind was
+    /// ever detected.
     public func resolvedAgentKind(_ agent: AgentWindowRecord) -> String? {
         agent.detectedAgentKind ?? liveDetectedAgentKind(terminalSessionID: agent.terminalTrackingID)
     }
@@ -1308,7 +1301,7 @@ extension WorkspaceOrchestrator {
     /// The stored form of a brief, or nil when nothing is left to store. A brief is markdown, so it keeps
     /// its line structure: CRLF line endings become LF, and newlines and tabs survive while every other
     /// control character (general category Cc) is removed, so the document can never carry terminal
-    /// control sequences into a client that renders it or into the notification block its headline feeds.
+    /// control sequences into a client that renders it or into a listing its headline feeds.
     /// Format characters (Cf) are kept on purpose: `CharacterSet.controlCharacters` also covers them, and
     /// removing U+200D ZERO WIDTH JOINER breaks compound emoji apart. The result is then trimmed and capped
     /// at `agentBriefCharacterLimit` characters.

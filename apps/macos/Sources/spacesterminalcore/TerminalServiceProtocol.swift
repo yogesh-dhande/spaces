@@ -431,7 +431,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     /// The brief `agentBriefRead` returned. Nil for every other command.
     public let agentBrief: TerminalServiceAgentBriefResult?
     public let agentSpawn: TerminalServiceAgentSpawnResult?
-    /// Rendered notification blocks a watched child queued for this terminal while it was busy, drained
+    /// Rendered notification lines a watched child queued for this terminal while it was busy, drained
     /// and attached to the response of the orchestrator's next `spaces_*` MCP tool call (the busy-time
     /// counterpart to idle injection). Nil/omitted unless the piggyback path drained at least one row;
     /// carried only on the MCP piggyback path, so every other command leaves it nil.
