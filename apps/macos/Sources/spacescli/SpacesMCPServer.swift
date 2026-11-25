@@ -94,6 +94,8 @@ final class SpacesMCPStdioServer {
     /// Reads the binary identity this process is running at construction — i.e. at `spaces mcp` start,
     /// before any tool call can have failed — which is what bounds the re-exec (see `MCPStaleImageReload`).
     private let staleImageReload: MCPStaleImageReload
+    /// The connected agent's own id, stated in the `initialize` instructions.
+    private let senderIdentity: MCPSenderIdentity
     /// Bytes read from `input` that have not yet been split into a complete newline-delimited message.
     /// Internal because the stale-image reload gates on it being empty, and that invariant is unit-tested.
     var readBuffer = Data()
@@ -101,9 +103,13 @@ final class SpacesMCPStdioServer {
     /// they are drained. Internal so the deferral is unit-testable.
     var deferredReloadTarget: String?
 
-    init(input: FileHandle = .standardInput, output: FileHandle = .standardOutput, staleImageReload: MCPStaleImageReload = MCPStaleImageReload()) {
+    init(
+        input: FileHandle = .standardInput, output: FileHandle = .standardOutput, staleImageReload: MCPStaleImageReload = MCPStaleImageReload(),
+        senderIdentity: MCPSenderIdentity = .live
+    ) {
         self.input = input
         self.output = output
+        self.senderIdentity = senderIdentity
         self.staleImageReload = staleImageReload
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -270,7 +276,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_terminal_send",
                 description:
-                    "Send text or raw bytes to an explicit Spaces terminal session. Text with submit=true reliably submits: the session host writes the text as a paste and then a separate Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with submit presses Enter alone (e.g. to answer a TUI dialog).",
+                    "Send text or raw bytes to an explicit Spaces terminal session. Text with submit=true reliably submits: the session host writes the text as a paste and then a separate Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste; one call is enough, submit-safety is server-side. An empty text with submit presses Enter alone (e.g. to answer a TUI dialog). A message to another coding agent should start with the `[from ...]: ` id given in this server's instructions so it can reply; never add it to dialog answers, keystrokes, or shell commands.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."),
                     "text": stringSchema("Text to send. Use an empty string with submit to press Enter alone."),
@@ -282,26 +288,9 @@ final class SpacesMCPStdioServer {
                 let args = try decodeMCPArguments(TerminalSendArguments.self, from: arguments)
                 let input = try args.input.resolvedInput()
                 let sessionID = try mcpRequired(args.session, field: "session")
-                let appendNewline = args.submit ?? false
-                if let device = try server.resolvedDevice(args.device) {
-                    let text: String?
-                    let bytes: Data?
-                    switch input {
-                    case .text(let value):
-                        text = value
-                        bytes = nil
-                    case .bytes(let value):
-                        text = nil
-                        bytes = value
-                    }
-                    let response = try SpacesDeviceClient.sendTerminalInput(
-                        sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline,
-                        context: DeviceRequestContext(device: device, clientApp: cliDeviceClientApp()))
-                    return .profile(TerminalServiceProfileCommandResponse(message: response.message))
-                }
                 return .profile(
-                    try TerminalService.sendProfileCommand(
-                        .terminalSend(.init(sessionID: sessionID, input: input, appendNewline: appendNewline)), timeout: 5))
+                    try sendTerminalInput(
+                        input, sessionID: sessionID, appendNewline: args.submit ?? false, device: try server.resolvedDevice(args.device)))
             },
             MCPToolDescriptor(
                 name: "spaces_agent_list",
@@ -489,7 +478,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_agent_subscribe",
                 description:
-                    "Watch a child coding-agent session from the current (or an explicit) terminal. While watching, each time the child goes blocked/done/exited you get one event block (a `[spaces] <label> (<kind>) is <blocked|done|exited>` line followed by indented project/workspace/branch/session/brief/link fields). When you are idle it is injected into your terminal; when you are busy it is attached as `pendingAgentEvents` on the result of your next spaces_* tool call, so you learn a child is blocked without waiting for your own turn boundary. Fails until the child has emitted its first hook signal (there is no agent row to watch before then), so retry after the child starts working.",
+                    "Watch a child coding-agent session from the current (or an explicit) terminal. While watching, each time the child goes blocked/done/exited you get one event line: `[spaces] <session> is <blocked|done|exited>`, or `[spaces] <session> on <device> is <blocked|done|exited>` for a child on a paired device, naming the session and device ids the other spaces_* tools take. When you are idle it is injected into your terminal; when you are busy it is attached as `pendingAgentEvents` on the result of your next spaces_* tool call, so you learn a child is blocked without waiting for your own turn boundary. Fails until the child has emitted its first hook signal (there is no agent row to watch before then), so retry after the child starts working.",
                 properties: [
                     "session": stringSchema("Child terminal session ID to watch."),
                     "subscriber": stringSchema("Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
@@ -601,7 +590,7 @@ final class SpacesMCPStdioServer {
                 id: id,
                 result: [
                     "protocolVersion": "2024-11-05", "capabilities": ["tools": [:]], "serverInfo": ["name": "spaces", "version": AppVersion.current],
-                    "instructions": MCPWorkflow.instructions,
+                    "instructions": MCPWorkflow.instructions(senderIdentity: senderIdentity),
                 ])
         case "notifications/initialized": return
         case "ping": try sendResponse(id: id, result: [:])
@@ -713,10 +702,7 @@ final class SpacesMCPStdioServer {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
-    private func resolvedDevice(_ device: String?) throws -> SpacesPairedDeviceRecord? {
-        guard let device else { return nil }
-        return try SpacesPairedDeviceSelection.resolve(device)
-    }
+    private func resolvedDevice(_ device: String?) throws -> SpacesPairedDeviceRecord? { try SpacesPairedDeviceSelection.target(device) }
 
     /// Maps a paired-device project summary to the profile summary shape so remote and local
     /// `spaces_project_list` results share one JSON shape.

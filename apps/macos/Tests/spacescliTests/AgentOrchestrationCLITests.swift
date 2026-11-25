@@ -231,11 +231,9 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertEqual(try AgentKillCommand.parse(["session-1", "--device", "phone"]).device, "phone")
     }
 
-    func testAgentSpawnWithDeviceRequiresWorkspace() throws {
-        // The workspace guard runs before device resolution, so it fails deterministically without a
-        // paired device.
+    func testAgentSpawnWithAnUnknownDeviceFailsNamingIt() throws {
         let spawn = try AgentSpawnCommand.parse(["--command", "claude", "--device", "phone"])
-        XCTAssertThrowsError(try spawn.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required"), "\(error)") }
+        XCTAssertThrowsError(try spawn.run()) { error in XCTAssertTrue(error.localizedDescription.contains("No device matches 'phone'"), "\(error)") }
     }
 
     func testAgentSubscribeAndUnsubscribeAcceptDeviceForCrossDeviceWatch() throws {

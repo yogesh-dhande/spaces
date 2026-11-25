@@ -268,8 +268,7 @@ public final class WorkspaceOrchestrator {
     /// agent exited when reconciliation — not a hook — detected the exit. Delivery routes through the
     /// process-wide submitter the daemon installs; with none installed (non-daemon callers, tests that
     /// build an engine directly) delivery throws, which the engine reads as a vanished subscriber and
-    /// which is unreachable when the agent has no subscribers. The `(<kind>)` parenthetical reuses the
-    /// same kind resolution `agent list` uses.
+    /// which is unreachable when the agent has no subscribers.
     func makeAgentNotificationEngine() -> AgentNotificationEngine {
         let submitter = Self.agentNotificationLineSubmitterOverrideStore.get()
         return AgentNotificationEngine(
@@ -277,7 +276,7 @@ public final class WorkspaceOrchestrator {
             deliver: { sessionID, line in
                 guard let submitter else { throw WorkspaceError.invalidArgument(message: "No agent notification submitter is configured.") }
                 try submitter(sessionID, line)
-            }, resolveAgentKind: { [self] agent in resolvedAgentKind(agent) }, logError: { Self.writeStandardError($0) })
+            }, logError: { Self.writeStandardError($0) })
     }
 
     struct ResolvedBrowserSession {
@@ -2484,7 +2483,7 @@ public final class WorkspaceOrchestrator {
                 // name.
                 guard let name = sanitizedFocusName(record.effectiveLabel) else { return nil }
                 return (name, "terminal")
-            } // A running pin is represented by its row above; only a not-running pin is a row of its own.
+            }  // A running pin is represented by its row above; only a not-running pin is a row of its own.
             + workspacePinnedThreads.compactMap { pin -> (name: String, kind: String)? in
                 guard pin.agentSessionID == nil, let name = sanitizedFocusName(pin.name) else { return nil }
                 return (name, "coding agent")

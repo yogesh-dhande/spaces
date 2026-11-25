@@ -322,9 +322,9 @@ public enum DatabaseSchema {
         },
         // Records the coding agent kind (claude/codex/opencode) detected for an agent session, so the
         // identity survives the agent process ending: the live foreground state it is detected from is
-        // cleared by the exit, and the exit notification the child's subscribers receive names the kind.
-        // Existing rows carry NULL, which renders honestly as "coding agent" until a detection lands —
-        // the same reading a row whose foreground was never classified has always had.
+        // cleared by the exit, and listings still name an exited agent's kind. Existing rows carry NULL,
+        // which reads as no detected kind until a detection lands, the same reading a row whose
+        // foreground was never classified has always had.
         //
         // The frozen pre-v10 shape is created first for the same reason the v7→v8 and v8→v9 steps create
         // theirs, and it is load-bearing rather than defensive: NO migration step has ever created

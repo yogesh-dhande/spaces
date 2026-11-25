@@ -126,20 +126,13 @@ tail_count() {
   "$SPACES_CLI" terminal tail "$session_id" --lines 120 | grep -Fc "$needle" || true
 }
 
-# Polls for the injected notification block in the subscriber's tail. The block is multi-line — a
-# `[spaces] <label> (<kind>) is <transition>` sentence line followed by two-space-indented `key: value`
-# lines — so the fragments land on separate lines and are checked independently against the whole tail
-# rather than chained per-line. `session: <child>` pins the child's session field and
-# `link: spaces://terminal/<child>` its deep link, both of which the block always carries.
+# Polls for the injected one-line notification `[spaces] <child-session> is <transition>` in the
+# subscriber's tail.
 wait_for_notification() {
-  local subscriber="$1" transition="$2" child="$3" timeout="${4:-15}" start tail
+  local subscriber="$1" transition="$2" child="$3" timeout="${4:-15}" start
   start="$(now_ms)"
   while true; do
-    tail="$("$SPACES_CLI" terminal tail "$subscriber" --lines 120)"
-    if printf '%s\n' "$tail" | grep -Fq "[spaces]" \
-      && printf '%s\n' "$tail" | grep -Fq "is $transition" \
-      && printf '%s\n' "$tail" | grep -Fq "session: $child" \
-      && printf '%s\n' "$tail" | grep -Fq "link: spaces://terminal/$child"; then
+    if "$SPACES_CLI" terminal tail "$subscriber" --lines 120 | grep -Fq "[spaces] $child is $transition"; then
       return 0
     fi
     if (( "$(now_ms)" - start >= timeout * 1000 )); then
@@ -262,10 +255,7 @@ part_a() {
   signal "$O" working
   status="$(json_field "$("$SPACES_CLI" agent status --session "$O" --json)" 'd.get("status") or ""')"
   [[ "$status" == "spinning" ]] || fail "expected O busy (spinning) before queue test, got: $status"
-  # The needle pins the block's `brief:` continuation line carrying the headline of the brief written in
-  # step 1b, so a status transition must not drop the brief from the injected notification. The headline is
-  # unique to C in this fixture, so counting its line tracks C's done block specifically.
-  local done_needle="brief: investigating flaky test"
+  local done_needle="[spaces] $C is done"
   local before_done
   before_done="$(tail_count "$O" "$done_needle")"
   signal "$C" "done"
@@ -428,7 +418,7 @@ PROBE
 # Step 8: a coding agent that emits no session-end hook (codex and opencode never do) quits on its own,
 # leaving its shell alive. Only the daemon's foreground reconciler can observe that, and two of its
 # reconcile loops see the same transition, so this pins the two facts a subscribed orchestrator depends
-# on: one exit is announced exactly once, and the announcement names the child's coding agent.
+# on: one exit is announced exactly once, and the exited row still names the child's coding agent.
 part_a_hookless_exit() {
   [[ -n "${SHELL:-}" ]] || fail "SHELL must be set: this step runs the same login shell Spaces launches sessions with."
   local K W agent_id agent_pid
@@ -480,19 +470,13 @@ part_a_hookless_exit() {
   # Settle before counting: the duplicate this pins was a second reconcile pass recording the same exit
   # within the same second as the first.
   sleep 3
-  local exited_blocks kind_blocks reconciler_exits
-  exited_blocks="$(tail_count "$W" "is exited")"
-  [[ "$exited_blocks" == "1" ]] || fail "expected exactly one injected exited block in W's tail, got $exited_blocks"
-  pass "step 8c: one child exit injected exactly one exited block"
-  kind_blocks="$(tail_count "$W" "(codex) is exited")"
-  if [[ "$kind_blocks" != "1" ]]; then
-    "$SPACES_CLI" terminal tail "$W" --lines 120 >&2
-    fail "the injected block did not name the child's coding agent (codex)"
-  fi
-  pass "step 8d: the injected block named the child's coding agent"
+  local exited_lines reconciler_exits
+  exited_lines="$(tail_count "$W" "[spaces] $K is exited")"
+  [[ "$exited_lines" == "1" ]] || fail "expected exactly one injected exited line in W's tail, got $exited_lines"
+  pass "step 8c: one child exit injected exactly one exited line"
   reconciler_exits="$(agent_event_count "$agent_id" exit foreground_reconciler)"
   [[ "$reconciler_exits" == "1" ]] || fail "expected exactly one reconciler exit event for K=$K, got $reconciler_exits"
-  pass "step 8e: exactly one reconciler exit was recorded for the child"
+  pass "step 8d: exactly one reconciler exit was recorded for the child"
 }
 
 # ---------------------------------------------------------------------------

@@ -30,16 +30,19 @@ enum MCPWorkflow: String, CaseIterable {
         }
     }
 
-    /// Index served in the `initialize` result. Claude Code truncates server instructions past 4096
-    /// characters, so this lists only what each workflow is for and where the steps come from.
-    static var instructions: String {
+    /// Index served in the `initialize` result, followed by the connected agent's own id when it has
+    /// one. Claude Code truncates server instructions past 4096 characters, so the index lists only what
+    /// each workflow is for and where the steps come from, and the id paragraph stays short.
+    static func instructions(senderIdentity: MCPSenderIdentity) -> String {
         let index = allCases.map { "- \($0.rawValue): \($0.purpose)." }.joined(separator: "\n")
-        return """
+        let text = """
             Spaces runs coding agents (Claude Code, Codex, opencode, Copilot CLI, pi, Amp) in their own workspaces and branches, on this machine or paired devices. Spaces workflows: before you hand off work, start another agent, report on agents, or unblock one, call spaces_workflow with the workflow name and follow the steps it returns.
 
             \(index)
 
             Do not improvise these from the tool list alone: the workflows carry rules the individual tools do not (spawn an agent once, never grant hook trust, confirm pickup before reporting success).
             """
+        guard let identity = senderIdentity.instructionsParagraph else { return text }
+        return text + "\n\n" + identity
     }
 }

@@ -34,6 +34,14 @@ public struct CallerTerminalCheck: Sendable {
         return ProcessAncestry.isDescendant(callerProcessID, of: shellPID)
     }
 
+    /// Whether `processID` runs inside `sessionID` while that terminal is live. Unlike `permits`, an
+    /// ended or unknown terminal answers false: this is for a process that names its own terminal to
+    /// others (the MCP server's sender id), where an inherited ended session would send replies nowhere.
+    public func runsInside(sessionID: String, processID: Int32) -> Bool {
+        guard let shellPID = liveShellPID(sessionID) else { return false }
+        return ProcessAncestry.isDescendant(processID, of: shellPID)
+    }
+
     /// Throws `CallerOutsideTerminalError` when `permits` is false.
     public func require(sessionID: String, callerProcessID: Int32?) throws {
         guard permits(sessionID: sessionID, callerProcessID: callerProcessID) else { throw CallerOutsideTerminalError() }

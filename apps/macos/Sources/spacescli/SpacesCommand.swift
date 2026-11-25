@@ -32,7 +32,7 @@ public struct SpacesCommand: ParsableCommand {
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, the first line of the agent's brief, project/workspace context, and a spaces://terminal deep link. `agent brief write [markdown]` replaces the agent's brief, a markdown status page Spaces shows beside its terminal (markdown read from stdin when omitted; empty clears it); `agent brief read` prints it and `agent brief clear` removes it. `status` and `brief` default the session to SPACES_TERMINAL_TRACKING_ID.
               - `agent spawn --command <cmd>` starts a supported coding agent (\(CodingAgent.commandListText)) in a new terminal and blocks until the detected agent is ready for input: its foreground kind is identified and its TUI enables bracketed paste (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send text --submit` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID). Keystrokes go to a child through `terminal send`; agent status comes only from the agent's own signals, so sending input never moves it.
-              - `agent spawn`/`list`/`status`/`brief`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). A `--device` naming this machine is validated like a local watch (self-edges and subscription cycles are rejected); cross-device cycles to a remote device cannot be detected (the remote's own subscriptions are not queryable locally).
+              - `agent spawn`/`list`/`status`/`brief`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon and naming the device (`[spaces] <session> on <device-id> is done`). A `--device` naming this machine is validated like a local watch (self-edges and subscription cycles are rejected); cross-device cycles to a remote device cannot be detected (the remote's own subscriptions are not queryable locally).
             """, version: AppVersion.current,
         subcommands: [
             ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, DaemonCommand.self,
@@ -76,8 +76,7 @@ struct ProjectListCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             let projects = try SpacesDeviceClient.projects(context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             context.output.emitLines(projects.map(projectListRow))
             return
@@ -103,14 +102,17 @@ struct ProjectCreateCommand: ParsableCommand {
         guard (normalizedNonEmpty(dir) == nil) != (normalizedNonEmpty(gitURL) == nil) else {
             throw ValidationError("Provide exactly one of --dir or --git-url.")
         }
-        if device != nil, let dir = normalizedNonEmpty(dir), !isDaemonResolvableProjectDirectory(dir) {
+        // This machine's own id runs here (see `SpacesPairedDeviceSelection.target`), where the shell resolves the path.
+        if let device, device.trimmingCharacters(in: .whitespacesAndNewlines) != (try? SpacesDevicePairingClient.localPairedDeviceID()),
+            let dir = normalizedNonEmpty(dir), !isDaemonResolvableProjectDirectory(dir)
+        {
             throw ValidationError("--dir must be an absolute path or start with ~ when used with --device: the device resolves it, not this shell.")
         }
     }
 
     func run() throws {
         let context = CLIContext()
-        let record = try device.map { try SpacesPairedDeviceSelection.resolve($0) }
+        let record = try SpacesPairedDeviceSelection.target(device)
         let source: TerminalServiceProjectCreateSource
         if let dir = normalizedNonEmpty(dir) {
             source = .dir(record == nil ? localProjectDirectory(dir, currentDirectory: context.currentDirectoryPath()) : dir)
@@ -149,8 +151,7 @@ struct WorkspaceListCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             var workspaces = try SpacesDeviceClient.workspaces(context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             if let project { workspaces = workspaces.filter { $0.projectID == project } }
             context.output.emitLines(workspaces.map(workspaceListRow))
@@ -172,8 +173,7 @@ struct WorkspaceCreateCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             // The remote path runs the workspace's setup script in the background, so the response
             // returns before setup completes; the message reports the created workspace by name.
             let response = try SpacesDeviceClient.createWorkspace(
@@ -197,9 +197,8 @@ struct WorkspaceStartCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             let workspace = try requiredRemoteWorkspaceID(workspace)
-            let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try SpacesDeviceClient.launchWorkspace(
                 workspaceID: workspace, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             context.output.emit(response.message)
@@ -222,9 +221,8 @@ struct WorkspaceStopCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             let workspace = try requiredRemoteWorkspaceID(workspace)
-            let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try SpacesDeviceClient.stopWorkspace(
                 workspaceID: workspace, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             context.output.emit(response.message)
@@ -247,9 +245,8 @@ struct WorkspaceRestartCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             let workspace = try requiredRemoteWorkspaceID(workspace)
-            let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try SpacesDeviceClient.restartWorkspace(
                 workspaceID: workspace, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             context.output.emit(response.message)
@@ -344,8 +341,7 @@ struct AgentListCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             let rows = try SpacesDeviceClient.listAgentSessions(
                 workspaceID: workspace, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             if json {
@@ -381,8 +377,7 @@ struct AgentStatusCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             let sessionID = try resolvedAgentSessionID(session)
             guard
                 let row = try SpacesDeviceClient.listAgentSessions(
@@ -434,8 +429,7 @@ struct AgentBriefWriteCommand: ParsableCommand {
         let context = CLIContext()
         let sessionID = try resolvedAgentSessionID(session)
         let markdown = resolvedMarkdown(standardInput: .standardInput)
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             let response = try SpacesDeviceClient.writeAgentBrief(
                 sessionID: sessionID, markdown: markdown, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             context.output.emit(response.message)
@@ -465,8 +459,7 @@ struct AgentBriefReadCommand: ParsableCommand {
         let context = CLIContext()
         let sessionID = try resolvedAgentSessionID(session)
         let brief: String?
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             brief = try SpacesDeviceClient.readAgentBrief(
                 sessionID: sessionID, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp())
             ).brief
@@ -495,8 +488,7 @@ struct AgentBriefClearCommand: ParsableCommand {
     func run() throws {
         let context = CLIContext()
         let sessionID = try resolvedAgentSessionID(session)
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             try SpacesDeviceClient.clearAgentBrief(
                 sessionID: sessionID, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             context.output.emit(WorkspaceOrchestrator.agentBriefClearedMessage)
@@ -875,13 +867,10 @@ struct AgentSpawnCommand: ParsableCommand {
         let subscriberSessionID = (subscriber?.isEmpty == false) ? subscriber : nil
         let automationRunID = resolvedAutomationRunID()
         let result: AgentSpawnResult
-        if let device {
-            // Validate the required workspace before resolving the device so `--device` without
-            // `--workspace` fails with the actionable message rather than a device-lookup error.
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             guard let workspace = workspace?.trimmingCharacters(in: .whitespacesAndNewlines), !workspace.isEmpty else {
                 throw ValidationError("--workspace is required with --device: a remote spawn cannot infer the workspace from the current directory.")
             }
-            let record = try SpacesPairedDeviceSelection.resolve(device)
             // Automation-run attribution is intentionally not forwarded to a remote daemon: the run id names
             // a row in the local daemon's database only. `automationRunID` still stamps the local spawn below.
             result = try performRemoteAgentSpawn(
@@ -918,8 +907,7 @@ struct AgentKillCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             // The remote daemon's `killAgentSession` runs the same notify-then-stop flow as the local
             // `.agentKill`: a hook-signaled child's subscribers are told it exited before its row is
             // deleted, and a not-yet-signaled `.agent`-kind session is terminated — one call covers both.
@@ -945,11 +933,10 @@ struct AgentSubscribeCommand: ParsableCommand {
     func run() throws {
         let context = CLIContext()
         let subscriberSessionID = try resolvedSubscriberSessionID(subscriber)
-        if let device {
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             // The subscriber is always a local terminal: the watching daemon (this machine) owns it and
             // does the watching. The child's terminal session id is passed as-is; the local daemon
             // validates it against the remote device and records the cross-device edge.
-            let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try TerminalService.sendProfileCommand(
                 .agentSubscribe(
                     .init(
@@ -979,10 +966,9 @@ struct AgentUnsubscribeCommand: ParsableCommand {
     func run() throws {
         let context = CLIContext()
         let subscriberSessionID = try resolvedSubscriberSessionID(subscriber)
-        if let device {
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             // A cross-device edge keys on the child's terminal session id, so unsubscribe needs no remote
             // call and works even when the device is offline.
-            let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try TerminalService.sendProfileCommand(
                 .agentUnsubscribe(
                     .init(
@@ -1012,8 +998,9 @@ struct AgentSignalCommand: ParsableCommand {
     var agentSession: String?
     @Option(
         name: .long,
-        help: "The coding agent whose hook is signaling (\(CodingAgent.allCases.map(\.rawValue).joined(separator: ", "))), for agents whose hook payload needs agent-specific handling.")
-    var agent: String?
+        help:
+            "The coding agent whose hook is signaling (\(CodingAgent.allCases.map(\.rawValue).joined(separator: ", "))), for agents whose hook payload needs agent-specific handling."
+    ) var agent: String?
     @Argument(
         help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
     var type: AgentEventType
@@ -1342,8 +1329,7 @@ struct TerminalListCommand: ParsableCommand {
 
     func run() throws {
         let rows: [String]
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             let sessions = try SpacesDeviceClient.terminalSessions(context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
             rows = sessions.map { "\($0.id)\tstate=\($0.state.rawValue)\tcwd=\($0.workingDirectory)" }
         } else {
@@ -1427,7 +1413,7 @@ struct TerminalSendTextCommand: ParsableCommand {
     ) var submit = false
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
-    func run() throws { try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: submit, device: device) }
+    func run() throws { try runTerminalSend(.text(text), sessionID: sessionID, appendNewline: submit, device: device) }
 }
 
 struct TerminalSendBytesCommand: ParsableCommand {
@@ -1440,7 +1426,7 @@ struct TerminalSendBytesCommand: ParsableCommand {
 
     var bytes: [TerminalByteArgument] { [byte] + additionalBytes }
 
-    func run() throws { try sendTerminalInput(.bytes(Data(bytes.map(\.value))), sessionID: sessionID, appendNewline: false, device: device) }
+    func run() throws { try runTerminalSend(.bytes(Data(bytes.map(\.value))), sessionID: sessionID, appendNewline: false, device: device) }
 }
 
 struct TerminalByteArgument: ExpressibleByArgument, Equatable {
@@ -1452,23 +1438,10 @@ struct TerminalByteArgument: ExpressibleByArgument, Equatable {
     }
 }
 
-private func sendTerminalInput(_ input: TerminalProfileInput, sessionID: String, appendNewline: Bool, device: String?) throws {
-    if let device {
-        let record = try SpacesPairedDeviceSelection.resolve(device)
-        let text: String?
-        let bytes: Data?
-        switch input {
-        case .text(let value): (text, bytes) = (value, nil)
-        case .bytes(let value): (text, bytes) = (nil, value)
-        }
-        _ = try SpacesDeviceClient.sendTerminalInput(
-            sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline,
-            context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp()))
-        print("Sent input to terminal session \(sessionID) on \(record.name)")
-        return
-    }
-    _ = try TerminalService.sendProfileCommand(.terminalSend(.init(sessionID: sessionID, input: input, appendNewline: appendNewline)), timeout: 5)
-    print("Sent input to terminal session \(sessionID)")
+private func runTerminalSend(_ input: TerminalProfileInput, sessionID: String, appendNewline: Bool, device: String?) throws {
+    let record = try SpacesPairedDeviceSelection.target(device)
+    _ = try sendTerminalInput(input, sessionID: sessionID, appendNewline: appendNewline, device: record)
+    print(record.map { "Sent input to terminal session \(sessionID) on \($0.name)" } ?? "Sent input to terminal session \(sessionID)")
 }
 
 struct TerminalTailCommand: ParsableCommand {
@@ -1480,8 +1453,7 @@ struct TerminalTailCommand: ParsableCommand {
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
     func run() throws {
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
+        if let record = try SpacesPairedDeviceSelection.target(device) {
             print(
                 try SpacesDeviceClient.tailTerminalOutput(
                     sessionID: sessionID, lines: lines, context: DeviceRequestContext(device: record, clientApp: cliDeviceClientApp())))

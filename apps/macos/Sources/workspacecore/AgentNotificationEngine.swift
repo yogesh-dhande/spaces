@@ -1,8 +1,7 @@
 import Foundation
-import spacesdevicecore
 import spacesterminalcore
 
-/// Turns a watched child agent's lifecycle transition into a multi-line notification block delivered into the
+/// Turns a watched child agent's lifecycle transition into a one-line notification delivered into the
 /// subscribing terminal — immediately when that subscriber is idle, or queued and flushed the moment it
 /// next goes idle. Pure logic over the store plus an injected delivery closure, so the daemon wires it
 /// to the real terminal-send path and tests drive it with a recorder.
@@ -13,13 +12,6 @@ public struct AgentNotificationEngine {
     /// Delivers a rendered line into a terminal session. Throwing signals an undeliverable subscriber
     /// (a dead/absent session), which the engine treats as the subscriber having vanished.
     public typealias DeliverLine = (_ subscriberTerminalSessionID: String, _ line: String) throws -> Void
-
-    /// Resolves the coding-agent kind label (see `CodingAgent`) for a local watched agent, used for
-    /// the `(<kind>)` parenthetical. Every caller wires this to `WorkspaceOrchestrator.resolvedAgentKind`,
-    /// the same resolution `agent list` reports — the kind persisted on the agent row, which still names
-    /// the agent after its process is gone; a `nil` result renders as `coding agent`. Defaults to `nil` so
-    /// tests and non-daemon callers do not have to supply one.
-    public typealias ResolveAgentKind = (_ agent: AgentWindowRecord) -> String?
 
     /// The lifecycle transitions that produce a notification. `working`/`init` never do.
     public enum ChildTransition: Sendable {
@@ -39,24 +31,21 @@ public struct AgentNotificationEngine {
 
     private let store: SQLiteStore
     private let deliver: DeliverLine
-    private let resolveAgentKind: ResolveAgentKind
     private let logError: (String) -> Void
     private let now: () -> String
 
     public init(
-        store: SQLiteStore, deliver: @escaping DeliverLine, resolveAgentKind: @escaping ResolveAgentKind = { _ in nil },
-        logError: @escaping (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) },
+        store: SQLiteStore, deliver: @escaping DeliverLine, logError: @escaping (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) },
         now: @escaping () -> String = { TerminalSessionTimestamp.string(from: Date()) }
     ) {
         self.store = store
         self.deliver = deliver
-        self.resolveAgentKind = resolveAgentKind
         self.logError = logError
         self.now = now
     }
 
     /// A watched child agent transitioned to blocked/done/exited. For every subscriber of that agent,
-    /// render one notification block and deliver it now if the subscriber is idle, else coalesce it into that
+    /// render one notification line and deliver it now if the subscriber is idle, else coalesce it into that
     /// subscriber's pending queue. The local `exited` transition does NOT come through here: an exit is
     /// enqueued inside the finalization claim and delivered by `deliverClaimedExitNotices`, because the
     /// exit's queue rows must exist before any other termination path can see the row as finalized and
@@ -65,7 +54,7 @@ public struct AgentNotificationEngine {
     public func childDidTransition(agent: AgentWindowRecord, transition: ChildTransition) throws {
         let subscriptions = try store.agentSubscriptions(agentSessionID: agent.id)
         guard !subscriptions.isEmpty else { return }
-        let line = try renderLine(agent: agent, transition: transition)
+        let line = renderLine(agent: agent, transition: transition)
         for subscription in subscriptions {
             try deliverOrQueue(
                 subscriberTerminalSessionID: subscription.subscriberTerminalSessionID, agentSessionID: agent.id, transition: transition, line: line)
@@ -110,16 +99,14 @@ public struct AgentNotificationEngine {
     /// A watched coding-agent session on the paired device `deviceID` transitioned to blocked/done/exited,
     /// as observed by the remote watch service diffing successive `listAgentSessions` snapshots. Shares
     /// the exact idle-gating, queueing, and render logic with the local `childDidTransition` — the only
-    /// differences are that subscribers come from the cross-device edge table and the deep link is
-    /// device-qualified (`?device=<id>`). The watch edge keys on the child's terminal session id, which
-    /// also targets the deep link. For an `exited` transition the caller drops the edges after this
-    /// returns; the rendered pending line (no FK) survives that, matching the local exit path.
-    public func remoteChildDidTransition(deviceID: String, terminalSessionID: String, row: SpacesDeviceAgentSessionRow, transition: ChildTransition)
-        throws
-    {
+    /// differences are that subscribers come from the cross-device edge table and the line names the
+    /// device. The watch edge keys on the child's terminal session id, which is also the id the line
+    /// names. For an `exited` transition the caller drops the edges after this returns; the rendered
+    /// pending line (no FK) survives that, matching the local exit path.
+    public func remoteChildDidTransition(deviceID: String, terminalSessionID: String, transition: ChildTransition) throws {
         let subscribers = try store.agentRemoteSubscribers(deviceID: deviceID, agentSessionID: terminalSessionID)
         guard !subscribers.isEmpty else { return }
-        let line = renderRemoteLine(terminalSessionID: terminalSessionID, row: row, deviceID: deviceID, transition: transition)
+        let line = renderRemoteLine(terminalSessionID: terminalSessionID, deviceID: deviceID, transition: transition)
         for subscriberID in subscribers {
             try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: terminalSessionID, transition: transition, line: line)
         }
@@ -217,97 +204,26 @@ public struct AgentNotificationEngine {
         }
     }
 
-    /// The single injected block for a local watched agent. Gathers the enriched context — project name,
-    /// workspace directory path and branch, terminal session id, agent kind — from the store, then defers
-    /// to the shared formatter; the deep link targets the local child's terminal session (no `?device=`).
-    /// Reads the workspace and its project from the store, so it can throw. A workspace or project that no
-    /// longer exists (deleted out from under a still-running agent) falls back to the id string for that
-    /// field rather than failing delivery — a single clean path with no layered fallbacks. The `workspace`
-    /// field is the workspace's full directory path (`dir`) so an orchestrator can locate the worktree.
-    ///
-    /// The branch is masked through `project.kind.maskedBranch` the same way `agentSessionRows` masks it
-    /// for the remote agent-list path: the home project's record keeps whatever branch a pre-existing git
-    /// repository at the home path was on when it was adopted, and a locally watched agent running there
-    /// must not emit a `branch:` line for a git lifecycle the home row has no part of.
-    func renderLine(agent: AgentWindowRecord, transition: ChildTransition) throws -> String {
-        let workspace = try store.workspace(id: agent.workspaceID)
-        let project = try workspace.flatMap { try store.project(id: $0.projectID) }
-        let kind = resolveAgentKind(agent) ?? "coding agent"
-        // `?? workspace?.branch` would wrongly restore the raw branch when the project IS resolved and its
-        // kind legitimately masks it to nil (`maskedBranch` returning nil for a home project is not "no
-        // answer", it is the answer): only a missing project record falls back to the unmasked branch.
-        let branch: String?
-        if let project { branch = project.kind.maskedBranch(workspace?.branch) } else { branch = workspace?.branch }
-        return renderBlock(
-            label: agent.effectiveLabel ?? kind, kind: kind, transition: transition,
-            project: project?.name ?? workspace?.projectID ?? agent.workspaceID, workspace: workspace?.dir ?? agent.workspaceID, branch: branch,
-            sessionID: agent.terminalTrackingID ?? agent.id, briefSummary: AgentBriefSummary.summary(of: agent.brief), deviceID: nil)
+    /// The line for a local watched agent, naming the child by its terminal session id: the id every
+    /// orchestration tool takes, so the subscriber can act on the child without parsing anything else.
+    func renderLine(agent: AgentWindowRecord, transition: ChildTransition) -> String {
+        Self.line(sessionID: agent.terminalTrackingID ?? agent.id, deviceID: nil, transition: transition)
     }
 
-    /// The single injected block for a watched agent on a paired device. Reuses the shared format; the
-    /// deep link is device-qualified (`?device=<id>`) and targets the remote child's terminal session
-    /// (the watched key). Project/workspace/branch/label and the brief's headline all come straight off the
-    /// `listAgentSessions` row: the remote device already resolved them, so this path does no store lookups. The
-    /// kind is the row's `agent` field (the remote daemon's detected agent kind, a `TerminalDetectedAgentKind` raw
-    /// value, never the launch title), falling back to `coding agent` when no kind is detected yet.
-    func renderRemoteLine(terminalSessionID: String, row: SpacesDeviceAgentSessionRow, deviceID: String, transition: ChildTransition) -> String {
-        let kind = row.agent ?? "coding agent"
-        return renderBlock(
-            label: row.label ?? kind, kind: kind, transition: transition, project: row.projectName, workspace: row.workspaceDir, branch: row.branch,
-            sessionID: terminalSessionID, briefSummary: row.briefSummary, deviceID: deviceID)
+    /// The line for a watched agent on a paired device. `deviceID` is the paired-device record id this
+    /// machine knows the device by, the same id `--device` and the MCP `device` argument accept.
+    func renderRemoteLine(terminalSessionID: String, deviceID: String, transition: ChildTransition) -> String {
+        Self.line(sessionID: terminalSessionID, deviceID: deviceID, transition: transition)
     }
 
-    /// The single injected block shared by the local and cross-device paths — a pure formatter over
-    /// explicit fields, so both paths produce an identical shape. It is one multi-line string: a sentence
-    /// first line (`[spaces] <label> (<kind>) is <word>`) followed by two-space-indented `key: value`
-    /// continuation lines in the order project, workspace, branch, session, brief, link. The `branch` line
-    /// is omitted when the branch is empty/nil and the `brief` line when the agent has no brief; it carries
-    /// the brief's one-line headline (`AgentBriefSummary`), never the document. The rest are always
-    /// present so an orchestrating agent can parse fields rather than the deep link's URL. Multi-line YAML
-    /// is markedly more readable in agent transcripts than a packed single line; the deep link stays
-    /// clickable because Ghostty's URL matcher charset stops at end-of-line and excludes quotes, and the
-    /// indented continuation lines — like the `[spaces]` first line, which never starts with `#`, `/`, or
-    /// `!` — are safe from the slash/command syntax some agent TUIs apply to a leading character. The cost
-    /// is that a plain-shell subscriber echoes one junk line per continuation, which is acceptable since
-    /// subscribers are agent TUIs first. Every free-text field (label, kind, project, workspace, branch,
-    /// brief) passes through `shellSafeNotificationField` before interpolation: this block is submitted
-    /// with a trailing newline into the subscriber terminal, and a plain-shell subscriber executes each
-    /// submitted line, so a value originating from the watched agent must not be able to smuggle shell
-    /// syntax into that execution. `session` and the deep link are generated/constrained values, not
-    /// free text, so they render verbatim and both target the child's terminal session id.
-    func renderBlock(
-        label: String, kind: String, transition: ChildTransition, project: String, workspace: String, branch: String?, sessionID: String,
-        briefSummary: String?, deviceID: String?
-    ) -> String {
-        let deepLink = SpacesTerminalDeepLink(sessionID: sessionID, deviceID: deviceID).absoluteString
-        let safeLabel = Self.shellSafeNotificationField(label)
-        let safeKind = Self.shellSafeNotificationField(kind)
-        var lines = ["[spaces] \(safeLabel) (\(safeKind)) is \(transition.word)"]
-        lines.append("  project: \(Self.shellSafeNotificationField(project))")
-        lines.append("  workspace: \(Self.shellSafeNotificationField(workspace))")
-        if let branch, !branch.isEmpty { lines.append("  branch: \(Self.shellSafeNotificationField(branch))") }
-        lines.append("  session: \(sessionID)")
-        if let briefSummary, !briefSummary.isEmpty { lines.append("  brief: \(Self.shellSafeNotificationField(briefSummary))") }
-        lines.append("  link: \(deepLink)")
-        return lines.joined(separator: "\n")
-    }
-
-    /// Neutralizes a metadata value before it is interpolated into a notification line that may be
-    /// submitted (with Enter) into a plain-shell subscriber. A shell executes such a line, so any
-    /// value originating from a watched agent (brief/branch/label/project/workspace/kind) must not be
-    /// able to smuggle command substitution (`$(...)`, backticks), command separators (`;`, `|`, `&`),
-    /// or redirects (`<`, `>`) — each of these runs even inside an otherwise-failing command. Quotes
-    /// (`"`, `'`) and backslashes are stripped too: this is not about execution risk (the fields are
-    /// interpolated with no surrounding quoting of our own) but about a lone unmatched quote or a
-    /// trailing backslash leaving the subscriber shell in a `quote>`/`dquote>` continuation prompt,
-    /// which swallows every remaining line of the block — and any block submitted after it — as further
-    /// input to the stuck command. Control characters (including newlines) are dropped too so a value
-    /// cannot forge a new continuation line or inject terminal control sequences. The value is otherwise
-    /// preserved for readability in the agent-TUI subscribers that are the primary consumer; stripping
-    /// an apostrophe means a brief headline like "don't" renders as "dont", an accepted readability cost.
-    private static func shellSafeNotificationField(_ value: String) -> String {
-        let forbidden = Set("$`;|&<>()\"'\\".unicodeScalars)
-        let filtered = value.unicodeScalars.filter { scalar in !forbidden.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar) }
-        return String(String.UnicodeScalarView(filtered))
+    /// `[spaces] <session-id> is <state>`, or `[spaces] <session-id> on <device-id> is <state>` for a
+    /// child on a paired device. One line carrying only generated ids: everything else about the child
+    /// (label, kind, workspace, brief) is one `spaces_agent_status` call away, and leaving it out keeps
+    /// the notice cheap in the subscriber's context. Because neither id is free text, a plain-shell
+    /// subscriber that executes the submitted line runs nothing an agent chose, and the leading `[`
+    /// is not command syntax in any supported agent TUI (unlike `/`, `!`, or `#`).
+    static func line(sessionID: String, deviceID: String?, transition: ChildTransition) -> String {
+        guard let deviceID else { return "[spaces] \(sessionID) is \(transition.word)" }
+        return "[spaces] \(sessionID) on \(deviceID) is \(transition.word)"
     }
 }

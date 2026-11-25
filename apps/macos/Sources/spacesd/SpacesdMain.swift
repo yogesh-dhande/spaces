@@ -2942,13 +2942,7 @@ enum SpacesDaemonErrorClassification {
             deliver: { [weak self] sessionID, line in
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                 try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
-            },
-            // The `(<kind>)` parenthetical is the detected agent kind (see `CodingAgent`) the row
-            // carries — the same identity an orchestration row's `agent:` field reports, kept off the
-            // launch title so the label is not duplicated (`smoke-hello (smoke-hello)`). Resolved through
-            // the orchestrator so this path and the reconcilers' own engine name a kind identically,
-            // including at exit, when live foreground state no longer reports one.
-            resolveAgentKind: { agent in orchestrator.resolvedAgentKind(agent) }, logError: { writeStandardError($0) })
+            }, logError: { writeStandardError($0) })
     }
 
     /// Delivers a rendered notification line into a subscriber terminal and submits it with a single

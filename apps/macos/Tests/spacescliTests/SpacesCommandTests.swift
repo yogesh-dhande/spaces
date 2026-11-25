@@ -254,7 +254,7 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertThrowsError(try TerminalStopCommand.parse([]))
     }
 
-    func testRemoteWorkspaceLifecycleRequiresExplicitWorkspaceBeforeDeviceLookup() throws {
+    func testRemoteWorkspaceLifecycleRequiresExplicitWorkspaceAndAnUnknownDeviceFails() throws {
         XCTAssertThrowsError(try requiredRemoteWorkspaceID(nil)) { error in
             XCTAssertTrue("\(error)".contains("--workspace is required with --device"))
             XCTAssertTrue("\(error)".contains("Pass --workspace <id>"))
@@ -263,11 +263,11 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(try requiredRemoteWorkspaceID("  workspace-1  "), "workspace-1")
 
         let start = try WorkspaceStartCommand.parse(["--device", "missing-device"])
-        XCTAssertThrowsError(try start.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
+        XCTAssertThrowsError(try start.run()) { error in XCTAssertTrue("\(error)".contains("missing-device")) }
         let stop = try WorkspaceStopCommand.parse(["--device", "missing-device"])
-        XCTAssertThrowsError(try stop.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
+        XCTAssertThrowsError(try stop.run()) { error in XCTAssertTrue("\(error)".contains("missing-device")) }
         let restart = try WorkspaceRestartCommand.parse(["--device", "missing-device"])
-        XCTAssertThrowsError(try restart.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
+        XCTAssertThrowsError(try restart.run()) { error in XCTAssertTrue("\(error)".contains("missing-device")) }
     }
 
     func testAgentSignalParsesExplicitWorkspaceSessionAndEvent() throws {
@@ -775,12 +775,15 @@ final class SpacesCommandTests: XCTestCase {
     }
 
     /// Sends newline-delimited JSON-RPC requests through a real server and returns the parsed replies.
-    private func mcpReplies(to requests: [String]) throws -> [[String: Any]] {
+    private func mcpReplies(to requests: [String], senderIdentity: MCPSenderIdentity = SpacesCommandTests.outsideTerminalIdentity) throws -> [[String:
+        Any]]
+    {
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         inputPipe.fileHandleForWriting.write(Data((requests.joined(separator: "\n") + "\n").utf8))
         try inputPipe.fileHandleForWriting.close()
-        let server = SpacesMCPStdioServer(input: inputPipe.fileHandleForReading, output: outputPipe.fileHandleForWriting)
+        let server = SpacesMCPStdioServer(
+            input: inputPipe.fileHandleForReading, output: outputPipe.fileHandleForWriting, senderIdentity: senderIdentity)
         try server.run()
         try outputPipe.fileHandleForWriting.close()
         let text = String(decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
@@ -803,6 +806,40 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertLessThan(instructions.count, 4096)
         // The key words must survive any truncation, so they lead the string.
         XCTAssertLessThan(try XCTUnwrap(instructions.range(of: "spaces_workflow")).lowerBound.utf16Offset(in: instructions), 400)
+    }
+
+    private static var outsideTerminalIdentity: MCPSenderIdentity {
+        MCPSenderIdentity(environmentSessionID: nil, callerRunsInside: { _ in true }, localDeviceID: { "device-local" })
+    }
+
+    private func initializeInstructions(_ identity: MCPSenderIdentity) throws -> String {
+        let replies = try mcpReplies(to: [#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#], senderIdentity: identity)
+        let result = try XCTUnwrap(replies.first?["result"] as? [String: Any])
+        return try XCTUnwrap(result["instructions"] as? String)
+    }
+
+    func testMCPInstructionsGiveAnAgentInsideASpacesTerminalItsSessionAndDeviceID() throws {
+        let instructions = try initializeInstructions(
+            MCPSenderIdentity(environmentSessionID: "session-abc", callerRunsInside: { $0 == "session-abc" }, localDeviceID: { "device-local" }))
+
+        XCTAssertTrue(instructions.contains("Your Spaces id is session session-abc on device device-local."))
+        XCTAssertTrue(instructions.contains("`[from session-abc on device-local]: `"))
+        XCTAssertTrue(instructions.contains("spaces_workflow"))
+        XCTAssertLessThan(instructions.count, 4096)
+    }
+
+    func testMCPInstructionsCarryNoIDWithoutAnIdentifiedCallerInsideItsTerminalAndAKnownDevice() throws {
+        let outside = try initializeInstructions(Self.outsideTerminalIdentity)
+        let notInsideNamedTerminal = try initializeInstructions(
+            MCPSenderIdentity(environmentSessionID: "session-abc", callerRunsInside: { _ in false }, localDeviceID: { "device-local" }))
+        let unknownDevice = try initializeInstructions(
+            MCPSenderIdentity(environmentSessionID: "session-abc", callerRunsInside: { _ in true }, localDeviceID: { nil }))
+
+        for instructions in [outside, notInsideNamedTerminal, unknownDevice] {
+            XCTAssertFalse(instructions.contains("Your Spaces id"))
+            XCTAssertFalse(instructions.contains("session-abc"))
+            XCTAssertTrue(instructions.contains("spaces_workflow"))
+        }
     }
 
     func testMCPWorkflowToolOffersEveryWorkflowAndReturnsItsSteps() throws {

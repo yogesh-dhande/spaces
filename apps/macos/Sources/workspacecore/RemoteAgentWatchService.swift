@@ -470,7 +470,7 @@ import spacesdevicecore
                     do {
                         if let childTransition = transition.kind.childTransition {
                             try engine.remoteChildDidTransition(
-                                deviceID: deviceID, terminalSessionID: transition.terminalSessionID, row: transition.row, transition: childTransition)
+                                deviceID: deviceID, terminalSessionID: transition.terminalSessionID, transition: childTransition)
                         } else {
                             // resumedWorking: nothing to deliver — withdraw the child's held blocked line.
                             try engine.childDidResumeWorking(agentSessionID: transition.terminalSessionID)

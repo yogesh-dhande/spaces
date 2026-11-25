@@ -138,18 +138,19 @@ Vary the shape of the work, not just the provider. Each of these exercises a dis
 - **A prompt that blocks on permission**: run the child *without* a yolo flag so it genuinely asks. Blocked → approve → working is the only path that proves the post-approval tool-use signal, since the approval itself fires no hook.
 - **Three teardown paths, three different rows**: the child exiting on its own, `spaces agent kill <session>`, and the pane closed underneath it. `kill` must refuse a plain shell or process terminal with "no agent session".
 - **Fan-out**: one orchestrator, one child per provider, all subscribed; then answer them out of order.
-- **Orchestrator busy while a child transitions**: the block must be held and land at the subscriber's next idle, and a held event must also ride out on the next `spaces_*` MCP tool result as `pendingAgentEvents`, delivered exactly once by whichever path reaches it first.
+- **Orchestrator busy while a child transitions**: the line must be held and land at the subscriber's next idle, and a held event must also ride out on the next `spaces_*` MCP tool result as `pendingAgentEvents`, delivered exactly once by whichever path reaches it first.
 - **Blocked-then-resumed while the subscriber is busy**: the held blocked line must be withdrawn, not delivered late. A held `done`/`exited` is a terminal fact and must still arrive.
 - **Rejections must fail loudly**: subscribing to a terminal whose agent has never signaled, subscribing to itself, and a two-terminal cycle.
 - **Ad-hoc rows**: an agent started by hand in a plain terminal, established by its first signal, must stay in Coding Agents for the life of that session, and a later `init` in the same terminal must reset an exited row to idle.
-- **Injected block shape**: `[spaces] <label> (<kind>) is <blocked|done|exited>` followed by indented `project`/`workspace`/`branch`/`session`/`note`/`link` lines, with the workspace as a full path and no imperative wording.
-- **Cross-device**, when the remote is configured (source `scripts/spaces-e2e-env.sh`): remote spawn with `--workspace`, cross-device subscribe, delivery of the child's transitions onto the local orchestrator, offline unsubscribe, and the device-qualified deep link.
+- **Injected line shape**: exactly `[spaces] <session-id> is <blocked|done|exited>` on one line, `[spaces] <session-id> on <device-id> is <state>` for a remote child, with no imperative wording.
+- **Sender id**: the MCP `initialize` instructions of a server running in an agent's terminal state `Your Spaces id is session <S> on device <D>` and tell it to start agent-to-agent messages with `[from <S> on <D>]: `; outside a Spaces terminal the instructions carry no id. Text sent with `spaces_terminal_send` arrives exactly as the agent wrote it, and `device <D>` naming this machine runs the send locally.
+- **Cross-device**, when the remote is configured (source `scripts/spaces-e2e-env.sh`): remote spawn with `--workspace`, cross-device subscribe, delivery of the child's transitions onto the local orchestrator, offline unsubscribe, and the device id in the delivered line.
 
-The orchestrator must itself be a coding agent. A plain shell subscriber executes the injected block and reports a shell syntax error; that is injection working, not a defect.
+The orchestrator must itself be a coding agent. A plain shell subscriber executes the injected line and reports `command not found`; that is injection working, not a defect.
 
 ### 5.4 What to measure here
 
-Report these in the measurements table alongside the resource numbers: spawn → detection per provider (cold and warm); signal → visible in `spaces agent list --json`; child transition → block submitted in an idle subscriber, and the held-then-released variant; the same transition → delivery number over a cross-device watch next to its local counterpart; and daemon CPU-seconds and RSS per additional live agent and watch edge, scaled as a slope per §2 rather than a single pair.
+Report these in the measurements table alongside the resource numbers: spawn → detection per provider (cold and warm); signal → visible in `spaces agent list --json`; child transition → line submitted in an idle subscriber, and the held-then-released variant; the same transition → delivery number over a cross-device watch next to its local counterpart; and daemon CPU-seconds and RSS per additional live agent and watch edge, scaled as a slope per §2 rather than a single pair.
 
 ## 6. Leak checks
 

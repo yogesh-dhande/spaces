@@ -2011,11 +2011,11 @@ extension OrchestratorTests {
         XCTAssertTrue(
             try store.claimAgentSessionExitEvent(
                 agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1",
-                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] Codex (codex) is exited"))
+                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] child-session is exited"))
         XCTAssertFalse(
             try otherConnection.claimAgentSessionExitEvent(
                 agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1",
-                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] Codex (codex) is exited"),
+                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] child-session is exited"),
             "a second pass observing the same exit claims nothing, on any connection")
 
         // A fresh agent inits in the same terminal, reusing the row: its exit is a new fact to claim.
@@ -2025,7 +2025,7 @@ extension OrchestratorTests {
         XCTAssertTrue(
             try otherConnection.claimAgentSessionExitEvent(
                 agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t2",
-                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] Codex (codex) is exited"),
+                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] child-session is exited"),
             "the reincarnated agent's exit is claimable again")
 
         // A row that is gone (stopped or restarted out from under the pass) has no exit left to claim.
@@ -2034,15 +2034,14 @@ extension OrchestratorTests {
         XCTAssertFalse(
             try store.claimAgentSessionExitEvent(
                 agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t3",
-                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] Codex (codex) is exited"))
+                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] child-session is exited"))
     }
 
     /// The issue's whole scenario: a coding agent that emits no session-end hook (codex, opencode) quits in
     /// its own shell terminal, so the foreground reconciler is what finalizes it. Its subscriber must be
-    /// told exactly once, and the injected block must name the child's coding agent — the kind is detected
-    /// from live foreground state, which the exit clears, so a row that does not carry the detected kind
-    /// renders the anonymous "coding agent" exactly when the notice is sent.
-    func testHooklessAgentExitNotifiesOnceAndNamesTheDetectedAgentKind() throws {
+    /// told exactly once, and listings must still name the child's coding agent: the kind is detected from
+    /// live foreground state, which the exit clears, so only the kind persisted on the row survives.
+    func testHooklessAgentExitNotifiesOnceAndKeepsTheDetectedAgentKindListed() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -2091,9 +2090,8 @@ extension OrchestratorTests {
 
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
-            XCTAssertEqual(recorder.delivered.count, 1, "the hookless exit notifies the subscriber exactly once")
-            let line = try XCTUnwrap(recorder.delivered.first?.line)
-            XCTAssertTrue(line.contains("(codex) is exited"), "the block must name the child's coding agent, got: \(line)")
+            XCTAssertEqual(
+                recorder.delivered.map(\.line), ["[spaces] \(sessionID) is exited"], "the hookless exit notifies the subscriber exactly once")
             XCTAssertEqual(
                 try orchestrator.agentSessionRows(sessionID: sessionID).first?.agent, "codex",
                 "the exited row still reports its coding agent to orchestration listings")
@@ -2128,7 +2126,7 @@ extension OrchestratorTests {
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
 
-        let claimedNotice = "[spaces] Codex (codex) is exited"
+        let claimedNotice = "[spaces] child-session is exited"
         XCTAssertTrue(
             try store.claimAgentSessionExitEvent(
                 agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1",
@@ -2150,9 +2148,9 @@ extension OrchestratorTests {
     /// before the agent command is running and therefore before foreground detection can classify it — so
     /// the kind sampled at registration is nil. Nothing else refreshes it: the foreground reconciler skips
     /// a session with a configured owner, and a repeated `working` signal is a deliberate no-op. Detection
-    /// arriving later must still be persisted, or the child's exit block names an anonymous "coding agent"
-    /// for an agent live listings had identified all along.
-    func testConfiguredAgentKindDetectedAfterRegistrationNamesTheAgentInItsExitBlock() throws {
+    /// arriving later must still be persisted, or listings stop naming the agent once it exits, and the
+    /// sweep that later finalizes the row still announces the exit.
+    func testConfiguredAgentKindDetectedAfterRegistrationIsPersistedAndItsExitAnnounced() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -2209,8 +2207,7 @@ extension OrchestratorTests {
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
             XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-subscriber"])
-            let line = try XCTUnwrap(recorder.delivered.first?.line)
-            XCTAssertTrue(line.contains("(codex) is exited"), "the exit block must name the agent detection identified, got: \(line)")
+            XCTAssertEqual(recorder.delivered.map(\.line), ["[spaces] \(sessionID) is exited"])
         }
     }
 
@@ -2277,7 +2274,7 @@ extension OrchestratorTests {
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
 
-        let notice = "[spaces] Codex (codex) is exited"
+        let notice = "[spaces] child-session is exited"
         XCTAssertTrue(
             try store.claimAgentSessionExitEvent(
                 agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1",
@@ -2298,43 +2295,6 @@ extension OrchestratorTests {
         XCTAssertNil(try store.claimPendingAgentNotification(id: heldCandidate.id), "a row another drain already consumed is never handed out again")
         try claimantEngine.deliverClaimedExitNotices(agentSessionID: child.id)
         XCTAssertEqual(recorder.delivered.count, 1, "one queued exit notice is injected exactly once across concurrent drains")
-    }
-
-    /// Overlapping reconcile passes each hold their own pre-exit snapshot of the agent row, and one pass
-    /// can persist the detected kind while another still holds a copy taken before it. If that older copy
-    /// wins the exit claim, the block it renders is the only one anyone receives — and nothing downstream
-    /// can repair it, because live foreground state is cleared by the very exit being announced. So the
-    /// notice must be rendered from the row as the database holds it, or a child whose agent Spaces
-    /// identified is announced as an anonymous "coding agent".
-    func testExitClaimedFromAStaleSnapshotStillNamesThePersistedAgentKind() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-
-        let recorder = AgentNotificationSubmitterRecorder()
-        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
-        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
-
-        // The snapshot a reconcile pass read before classification landed.
-        let stale = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
-        XCTAssertNil(stale.detectedAgentKind, "the snapshot predates classification")
-        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: stale.id, createdAt: "t")
-
-        // Another pass classifies the session and persists the kind. There is no live session behind this
-        // row, so live foreground state reports nothing — the row is the only place the kind now exists.
-        try store.setAgentSessionDetectedForeground(id: stale.id, kind: "codex", launchCommand: nil)
-        XCTAssertNil(orchestrator.resolvedAgentKind(stale), "the stale snapshot alone cannot name the agent")
-
-        try orchestrator.finalizeAgentRow(stale, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
-
-        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
-        let line = try XCTUnwrap(recorder.delivered.first?.line)
-        XCTAssertTrue(line.contains("(codex) is exited"), "the exit block must name the kind the row carries, got: \(line)")
     }
 
     /// A hook `init` carries no label, and foreground detection cannot classify every command, so a row
@@ -2505,18 +2465,12 @@ extension OrchestratorTests {
     }
 
     /// A rename lives in its own column that no lifecycle write touches, so the row keeps it. The record a
-    /// status update hands back has to keep it too: the daemon renders the watcher's notice straight off
-    /// that returned record, so one rebuilt without the rename announces the agent under the label the user
-    /// replaced.
-    func testStatusUpdateAfterARenameKeepsTheRenameOnTheReturnedRecordAndItsNotice() throws {
-        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
-        let recorder = AgentNotificationSubmitterRecorder()
-        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
-        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+    /// status update hands back has to keep it too, since the signal path reads on from that record.
+    func testStatusUpdateAfterARenameKeepsTheRenameOnTheReturnedRecord() throws {
+        let (_, orchestrator, workspace) = try makeAgentRenameFixture()
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: "agent-session", status: .spinning)
         try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: child.id, title: "Reviewer")
-        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
 
         // The signal path's own call: it reports the label the agent still calls itself, which is exactly
         // what must not win over the rename.
@@ -2525,10 +2479,6 @@ extension OrchestratorTests {
 
         XCTAssertEqual(updated.userLabel, "Reviewer")
         XCTAssertEqual(updated.effectiveLabel, "Reviewer")
-        try orchestrator.makeAgentNotificationEngine().childDidTransition(agent: updated, transition: .blocked)
-        let line = try XCTUnwrap(recorder.delivered.first?.line)
-        XCTAssertTrue(line.contains("Reviewer"), "the notice must name the row's visible name, got: \(line)")
-        XCTAssertFalse(line.contains("Claude"), "the notice must not name the label the rename replaced, got: \(line)")
     }
 
     /// The exit disposition rebuilds the row from the caller's snapshot too, and its record is what the

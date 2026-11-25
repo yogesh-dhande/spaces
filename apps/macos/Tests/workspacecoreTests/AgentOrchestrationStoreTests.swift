@@ -633,8 +633,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(row.label, "Reviewer", "label: keeps the launch title")
     }
 
-    /// Before any foreground kind is detected, `agent:` is nil (honest — `renderRemoteLine` falls back to
-    /// "coding agent"), while `label:` still carries the launch title.
+    /// Before any foreground kind is detected, `agent:` is nil, while `label:` still carries the launch title.
     func testAgentSessionRowLeavesAgentNilWhenNoKindDetected() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
