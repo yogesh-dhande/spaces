@@ -687,7 +687,7 @@ final class SpacesCommandTests: XCTestCase {
                 "spaces_project_list", "spaces_project_create", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start",
                 "spaces_workspace_restart", "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_agent_list",
                 "spaces_agent_status", "spaces_agent_brief_write", "spaces_agent_brief_read", "spaces_agent_brief_clear", "spaces_agent_spawn",
-                "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe", "spaces_device_list",
+                "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe", "spaces_device_list", "spaces_workflow",
             ])
         // `agent signal` is CLI-only forever: an orchestrating agent may read peers' status but must not forge it.
         XCTAssertFalse(names.contains("spaces_agent_signal"))
@@ -772,6 +772,91 @@ final class SpacesCommandTests: XCTestCase {
             "spaces_agent_spawn", "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe",
         ]
         XCTAssertTrue(agentTools.allSatisfy(names.contains), "expected all agent tools, got \(names.sorted())")
+    }
+
+    /// Sends newline-delimited JSON-RPC requests through a real server and returns the parsed replies.
+    private func mcpReplies(to requests: [String]) throws -> [[String: Any]] {
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        inputPipe.fileHandleForWriting.write(Data((requests.joined(separator: "\n") + "\n").utf8))
+        try inputPipe.fileHandleForWriting.close()
+        let server = SpacesMCPStdioServer(input: inputPipe.fileHandleForReading, output: outputPipe.fileHandleForWriting)
+        try server.run()
+        try outputPipe.fileHandleForWriting.close()
+        let text = String(decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return try text.split(separator: "\n").map { try XCTUnwrap(try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+    }
+
+    private func workflowCall(_ name: String, id: Int) -> String {
+        #"{"jsonrpc":"2.0","id":\#(id),"method":"tools/call","params":{"name":"spaces_workflow","arguments":{"name":"\#(name)"}}}"#
+    }
+
+    func testMCPInitializeInstructionsIndexEveryWorkflowUnderClaudeCodeTruncationLimit() throws {
+        let replies = try mcpReplies(to: [#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#])
+        let result = try XCTUnwrap(replies.first?["result"] as? [String: Any])
+        let instructions = try XCTUnwrap(result["instructions"] as? String)
+        for workflow in ["handoff", "dispatch", "standup", "unblock"] {
+            XCTAssertTrue(instructions.contains(workflow), "instructions should name \(workflow)")
+        }
+        XCTAssertTrue(instructions.contains("spaces_workflow"), "instructions should say where the full steps come from")
+        // Claude Code truncates server instructions past 4096 characters.
+        XCTAssertLessThan(instructions.count, 4096)
+        // The key words must survive any truncation, so they lead the string.
+        XCTAssertLessThan(try XCTUnwrap(instructions.range(of: "spaces_workflow")).lowerBound.utf16Offset(in: instructions), 400)
+    }
+
+    func testMCPWorkflowToolOffersEveryWorkflowAndReturnsItsSteps() throws {
+        let tools = SpacesMCPStdioServer.toolDefinitions()
+        let tool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_workflow" })
+        let schema = try XCTUnwrap(tool["inputSchema"] as? [String: Any])
+        XCTAssertEqual(schema["required"] as? [String], ["name"])
+        let nameSchema = try XCTUnwrap((schema["properties"] as? [String: Any])?["name"] as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(nameSchema["enum"] as? [String])), ["handoff", "dispatch", "standup", "unblock"])
+        let description = try XCTUnwrap(tool["description"] as? String)
+        for workflow in ["handoff", "dispatch", "standup", "unblock"] { XCTAssertTrue(description.contains(workflow)) }
+
+        // Each workflow returns its own text as plain markdown (not a JSON envelope), and the steps
+        // reference the tools that carry out that workflow.
+        let expectedTool = [
+            "handoff": "spaces_agent_spawn", "dispatch": "spaces_workspace_create", "standup": "spaces_agent_list", "unblock": "spaces_terminal_send",
+        ]
+        let names = expectedTool.keys.sorted()
+        let replies = try mcpReplies(to: names.enumerated().map { workflowCall($0.element, id: $0.offset + 1) })
+        XCTAssertEqual(replies.count, names.count)
+        for (index, name) in names.enumerated() {
+            let result = try XCTUnwrap(replies[index]["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, false)
+            let text = try XCTUnwrap(((result["content"] as? [[String: Any]])?.first)?["text"] as? String)
+            XCTAssertTrue(text.hasPrefix("# \(name.capitalized)"), "\(name) returned the wrong workflow")
+            XCTAssertTrue(text.contains(try XCTUnwrap(expectedTool[name])), "\(name) should reference \(expectedTool[name] ?? "")")
+        }
+    }
+
+    func testMCPWorkflowToolRejectsUnknownAndMissingNames() throws {
+        let replies = try mcpReplies(to: [
+            workflowCall("improvise", id: 1), #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"spaces_workflow","arguments":{}}}"#,
+        ])
+        XCTAssertEqual(replies.count, 2)
+        for reply in replies {
+            let result = try XCTUnwrap(reply["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true)
+        }
+        let text = try XCTUnwrap(((replies[0]["result"] as? [String: Any])?["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertTrue(text.contains("handoff") && text.contains("unblock"), "the error should list the valid workflows")
+    }
+
+    func testMCPWorkflowStepsOnlyNameToolsTheServerExposes() throws {
+        let toolNames = Set(SpacesMCPStdioServer.toolDefinitions().compactMap { $0["name"] as? String })
+        let pattern = try NSRegularExpression(pattern: "spaces_[a-z_]+")
+        for workflow in MCPWorkflow.allCases {
+            let text = workflow.steps
+            let mentioned = pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+                Range($0.range, in: text).map { String(text[$0]) }
+            }
+            XCTAssertFalse(mentioned.isEmpty, "\(workflow) should reference tools")
+            for name in mentioned { XCTAssertTrue(toolNames.contains(name), "\(workflow) references unknown tool \(name)") }
+            XCTAssertFalse(text.contains("\u{2014}"), "\(workflow) must not contain an em dash")
+        }
     }
 
     private func terminalInputPayload(from arguments: [String: Any]) throws -> TerminalProfileInput {

@@ -425,3 +425,21 @@ struct AgentUnsubscribeArguments: Decodable {
         device = try container.mcpOptionalString(forKey: .device)
     }
 }
+
+// MARK: - spaces_workflow
+
+struct WorkflowArguments: Decodable {
+    let workflow: MCPWorkflow
+
+    private enum CodingKeys: String, CodingKey { case name }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let name = try container.mcpRequiredString(forKey: .name, field: "name")
+        guard let workflow = MCPWorkflow(rawValue: name) else {
+            throw MCPError.invalidArguments(
+                "Unknown workflow '\(name)'. Choose one of: \(MCPWorkflow.allCases.map(\.rawValue).joined(separator: ", ")).")
+        }
+        self.workflow = workflow
+    }
+}

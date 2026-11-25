@@ -192,7 +192,7 @@ export const docsNavGroups: DocsNavGroup[] = [
         href: "/docs/mcp",
         title: "MCP tools",
         summary:
-          "Connect Claude Code, Codex, opencode, GitHub Copilot CLI, pi, or Amp to Spaces and see the tools they get.",
+          "Connect Claude Code, Codex, opencode, GitHub Copilot CLI, pi, or Amp to Spaces, with a setup prompt your agent can run, and see the tools and workflows they get.",
       },
       {
         href: "/docs/spaces-yaml",

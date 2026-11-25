@@ -1035,6 +1035,13 @@ Each daemon indexes the stores of the coding agents under its own home directory
 - `agent signal` is local only and never an MCP tool (spec.md gives the rule). `device list` reads the client database only.
 - The profile command is a one-key tagged union validated at wire decode, so `runProfileCommand` does only daemon-side checks. `TerminalProfileInput` makes text-xor-bytes structural.
 
+#### MCP workflows
+
+- `MCPWorkflow` (`spacescli/MCPWorkflow.swift`) names the four workflows and the one-line purpose of each; their full steps are Swift raw-string literals in `MCPWorkflowSteps.swift`. They are literals, not SwiftPM resources, because the `spaces` CLI also ships on Linux as a single binary with no resource bundle.
+- Two surfaces serve them: the `initialize` result's `instructions` (an index built from the purposes, kept short because Claude Code truncates server instructions past 4096 characters) and the `spaces_workflow` tool, which returns one workflow's steps as plain markdown (`MCPToolResponse.workflow`). That response skips the pending-agent-event drain, since the drain consumes events a text result has nowhere to carry.
+- Tools plus instructions, not MCP prompts or the MCP Skills extension (SEP-2640), because every supported agent reads server instructions and calls tools, while prompts surface in Claude Code only and no coding-agent client supports the Skills extension yet.
+- A unit test checks every `spaces_*` name in the steps against `toolDefinitions()`, so a renamed or removed tool fails the build instead of leaving a workflow pointing at nothing.
+
 #### Workspace lifecycle and run state
 
 - Local lifecycle requests carry the caller's directory plus an optional id (`TerminalServiceWorkspaceLifecyclePayload`); the daemon resolves them against its authoritative workspace set. Device API lifecycle calls require an explicit id.

@@ -28,6 +28,10 @@ export default function InstallationDocsPage() {
       </Section>
 
       <Section id="install" title="Install">
+        <Prose>
+          To have your coding agent install Spaces and connect to it for you, use the{" "}
+          <DocLink href="/docs/mcp#setup">setup prompt</DocLink>. To install by hand:
+        </Prose>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>
             1. Download the DMG from the{" "}
