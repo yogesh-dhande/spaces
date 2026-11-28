@@ -1158,7 +1158,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // When `onOpenLink` is set it fully replaces the legacy local-only opener path, so the
         // per-pane coordinator can route web/loopback/remote-file clicks. The legacy
         // `debugOpenURLHandler` seam must not fire.
-        mirrorView.onOpenLink = { link, _ in routedLinks.append(link) }
+        mirrorView.onOpenLink = { candidates, _ in routedLinks.append(contentsOf: candidates) }
         mirrorView.debugOpenURLHandler = { _ in
             legacyOpens += 1
             return true

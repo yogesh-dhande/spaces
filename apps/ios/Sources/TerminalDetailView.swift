@@ -170,7 +170,7 @@ struct TerminalDetailView: View {
                                 model.sendMouseButton(button: button, pressed: pressed, at: pointerPosition)
                             }, onSendMouseMotion: { pointerPosition in model.sendMouseMotion(at: pointerPosition) },
                             clientSelection: model.clientSelection, selectionActions: selectionActions, selectionAccentColor: UIColor(Theme.accent),
-                            onOpenLink: { link, kind in openTerminalLink(link, kind: kind) }, onOpenComposer: { isShowingComposer = true },
+                            onOpenLink: { links, kind in openTerminalLink(links, kind: kind) }, onOpenComposer: { isShowingComposer = true },
                             onOpenSavedPrompts: { isShowingSavedPrompts = true },
                             // A clipboard image pasted at the terminal lands in the composer pre-attached
                             // rather than in the session: sending an image stays a deliberate composer action.
@@ -428,9 +428,9 @@ struct TerminalDetailView: View {
         return true
     }
 
-    private func openTerminalLink(_ link: String, kind: GhosttyMobileActionEvent.OpenURLKind) {
-        writeE2EEventIfNeeded(kind: "open_link", detail: link)
-        Task { await model.openTappedTerminalLink(link, kind: kind) }
+    private func openTerminalLink(_ links: [String], kind: GhosttyMobileActionEvent.OpenURLKind) {
+        writeE2EEventIfNeeded(kind: "open_link", detail: links.first ?? "")
+        Task { await model.openTappedTerminalLink(links, kind: kind) }
     }
 
     private var topOverlay: some View {
@@ -761,7 +761,7 @@ struct TerminalDetailView: View {
                     // wider than the phone's viewport, so a tap on a rendered link there can never open
                     // one. The link-banner regression coverage (#650) reaches the banners through this.
                     if let link = request.link?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
-                        await model.openTerminalLink(link)
+                        await model.openTerminalLink([link])
                     } else if let key = request.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
                         await waitForE2EInputReadiness()
                         await model.sendKey(key)

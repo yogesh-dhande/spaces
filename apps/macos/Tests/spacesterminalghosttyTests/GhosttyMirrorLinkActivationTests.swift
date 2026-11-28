@@ -143,7 +143,39 @@ import spacesterminalcore
         XCTAssertNil(view.hoveredLinkDisplayString)
     }
 
+    /// A path the program wrapped itself, with no soft-wrap flag on either row: a click on either row
+    /// offers the rejoined path first, then the text Ghostty matched on that row.
+    func testClickOnEitherRowOfAHardWrappedPathOffersTheJoinedPathFirst() throws {
+        let wrapped = Self.hardWrappedPath
+        try assertOpenedLinks(
+            [wrapped.joined, wrapped.firstRow], snapshot: wrapped.snapshot, modifierFlags: [.command], clickedCell: (column: 5, row: 0))
+        try assertOpenedLinks(
+            [wrapped.joined, wrapped.secondRow], snapshot: wrapped.snapshot, modifierFlags: [.command], clickedCell: (column: 5, row: 1))
+    }
+
+    /// A hyperlink carries its whole target, so a wrapped one is never rejoined from the text.
+    func testClickOnAnOSC8LinkOffersASingleCandidate() throws {
+        try assertOpenedLinks([Self.osc8Target], snapshot: Self.osc8Snapshot(mouseReportingActive: false), modifierFlags: [.command])
+    }
+
     // MARK: - Harness
+
+    private static let hardWrappedPath: (joined: String, firstRow: String, secondRow: String, snapshot: GhosttyTerminalSnapshot) = {
+        let columns = 40
+        let joined = "/Users/dev/projects/spaces/apps/macos/Sources/File.swift"
+        let firstRow = String(joined.prefix(columns))
+        let secondRow = String(joined.dropFirst(columns))
+        let rows = [firstRow, "  " + secondRow]
+        let cells = (0..<(columns * rows.count)).map { index -> GhosttyTerminalSnapshot.Cell in
+            let scalars = Array(rows[index / columns].unicodeScalars)
+            let scalar = index % columns < scalars.count ? scalars[index % columns].value : 0x20
+            return GhosttyTerminalSnapshot.Cell(codepoint: scalar, foregroundRGB: 0xFF_FFFF, backgroundRGB: 0, flags: 0)
+        }
+        let snapshot = GhosttyTerminalSnapshot(
+            columns: columns, rows: rows.count, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFF_FFFF,
+            defaultBackgroundRGB: 0, cells: cells)
+        return (joined, firstRow, secondRow, snapshot)
+    }()
 
     private static let osc8Target = "https://example.com/docs"
 
@@ -168,11 +200,11 @@ import spacesterminalcore
         return view
     }
 
-    private func click(_ view: GhosttyMirrorTerminalView, modifierFlags: NSEvent.ModifierFlags) {
+    private func click(_ view: GhosttyMirrorTerminalView, modifierFlags: NSEvent.ModifierFlags, at point: NSPoint? = nil) {
         let windowNumber = window?.windowNumber ?? 0
-        view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: windowNumber, modifierFlags: modifierFlags))
-        view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: windowNumber, modifierFlags: modifierFlags))
-        view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: windowNumber, modifierFlags: modifierFlags))
+        view.mouseMoved(with: mouseEvent(type: .mouseMoved, windowNumber: windowNumber, modifierFlags: modifierFlags, at: point))
+        view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: windowNumber, modifierFlags: modifierFlags, at: point))
+        view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: windowNumber, modifierFlags: modifierFlags, at: point))
     }
 
     /// Link hover and link opens reach the view as Ghostty actions, which `GhosttyMirrorAppService`
@@ -210,24 +242,27 @@ import spacesterminalcore
     }
 
     private func assertOpenedLinks(
-        _ expected: [String], snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags, _ message: String = "",
-        file: StaticString = #filePath, line: UInt = #line
+        _ expected: [String], snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags, clickedCell: (column: Int, row: Int)? = nil,
+        _ message: String = "", file: StaticString = #filePath, line: UInt = #line
     ) throws {
-        let opened = try openedLinks(expecting: expected.count, snapshot: snapshot, modifierFlags: modifierFlags)
+        let opened = try openedLinks(expecting: expected.count, snapshot: snapshot, modifierFlags: modifierFlags, clickedCell: clickedCell)
         XCTAssertEqual(opened, expected, message, file: file, line: line)
     }
 
     /// The links a click opened. A click expected to open `count` links is read once that many have
     /// arrived; one expected to open none is read after `settleForAbsence`.
-    private func openedLinks(expecting count: Int, snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags) throws -> [String] {
+    private func openedLinks(
+        expecting count: Int, snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags, clickedCell: (column: Int, row: Int)? = nil
+    ) throws -> [String] {
         let view = makeAttachedView(sessionID: "link-\(snapshot.columns)x\(snapshot.rows)-\(modifierFlags.rawValue)")
         defer { view.removeFromSuperview() }
         view.update(snapshot: snapshot, renderStateKey: "link|\(snapshot.columns)x\(snapshot.rows)|\(modifierFlags.rawValue)")
         _ = try waitForSnapshot(view) { $0.columns == snapshot.columns && $0.rows == snapshot.rows }
 
         var opened: [String] = []
-        view.onOpenLink = { link, _ in opened.append(link) }
-        click(view, modifierFlags: modifierFlags)
+        view.onOpenLink = { candidates, _ in opened.append(contentsOf: candidates) }
+        let point = try clickedCell.map { try XCTUnwrap(view.windowPointForTesting(column: $0.column, row: $0.row)) }
+        click(view, modifierFlags: modifierFlags, at: point)
         if count > 0 { waitUntil("the click to open \(count) link(s)") { opened.count >= count } } else { settleForAbsence() }
         return opened
     }
@@ -285,11 +320,11 @@ import spacesterminalcore
         return try GhosttyRenderUpdateApplier.apply(decoded, to: baseline).snapshot
     }
 
-    /// The click lands a few characters into the URL on the top row of a 640x400 pane.
-    private func mouseEvent(type: NSEvent.EventType, windowNumber: Int, modifierFlags: NSEvent.ModifierFlags) -> NSEvent {
+    /// Without a `point` the click lands a few characters into the URL on the top row of a 640x400 pane.
+    private func mouseEvent(type: NSEvent.EventType, windowNumber: Int, modifierFlags: NSEvent.ModifierFlags, at point: NSPoint? = nil) -> NSEvent {
         try! XCTUnwrap(
             NSEvent.mouseEvent(
-                with: type, location: NSPoint(x: 20, y: 392), modifierFlags: modifierFlags, timestamp: 0, windowNumber: windowNumber, context: nil,
+                with: type, location: point ?? NSPoint(x: 20, y: 392), modifierFlags: modifierFlags, timestamp: 0, windowNumber: windowNumber, context: nil,
                 eventNumber: 1, clickCount: 1, pressure: 1))
     }
 

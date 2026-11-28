@@ -348,7 +348,7 @@ import workspacecore
                             return try await stateModel.fetchTranscript(
                                 maxBytes: maxBytes, fromByteOffset: fromByteOffset, fileIdentity: fileIdentity)
                         }, agentSignalHandler: agentSignalHandler,
-                        linkOpenHandler: { [linkOpenBox] rawLink, kind in linkOpenBox.open(rawLink, kind: kind) },
+                        linkOpenHandler: { [linkOpenBox] candidates, kind in linkOpenBox.open(candidates, kind: kind) },
                         // A keystroke that cannot reach the device is the pane's earliest evidence its link
                         // is gone; the state model owns that verdict, so the raw failure goes there rather
                         // than being classified or acted on at the render host. `reportFailedInputSend` is
@@ -786,7 +786,7 @@ import workspacecore
         terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
         stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
         agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
-        linkOpenHandler: (@MainActor (String, GhosttyActionEvent.OpenURLKind) -> Void)? = nil,
+        linkOpenHandler: (@MainActor ([String], GhosttyActionEvent.OpenURLKind) -> Void)? = nil,
         inputFailureHandler: RemoteGhosttyInputFailureHandler? = nil, linkFileLocation: SpacesUntrustedTerminalLink.FileLocation = .anotherDevice
     ) -> any TerminalGhosttySessionHosting {
         RemoteGhosttySessionHost(

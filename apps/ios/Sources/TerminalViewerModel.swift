@@ -2849,7 +2849,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     func openConfirmedLink(_ confirmation: TerminalLinkConfirmation) async {
         pendingLinkConfirmation = nil
         switch confirmation.destination {
-        case .routedLink(let link): await openTerminalLink(link)
+        case .routedLink(let links): await openTerminalLink(links)
         case .systemURL(let url): openSystemURL(url)
         }
     }
@@ -2862,13 +2862,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// policy the Mac applies. The phone never holds the session's files, so a file target is checked for
     /// shape here and the session's daemon resolver checks the file itself before anything is fetched.
     /// Text the terminal detected as a link skips the policy, as on the Mac.
-    func openTappedTerminalLink(_ tappedLink: String, kind: GhosttyMobileActionEvent.OpenURLKind) async {
+    ///
+    /// `tappedLinks` are candidates in preference order: more than one means the tap landed on a path
+    /// the program wrapped itself, whose rejoined form comes first (see `TerminalHardWrappedLink`). The
+    /// confirmation shows the first; opening resolves them in order and takes the first the session's
+    /// host finds.
+    func openTappedTerminalLink(_ tappedLinks: [String], kind: GhosttyMobileActionEvent.OpenURLKind) async {
         pendingLinkConfirmation = nil
         blockedLink = nil
         // A tap supersedes a link still loading from an earlier Open Link, so the late result cannot present over this tap's dialog.
         cancelAndClearLinkPreviewState()
-        let link = tappedLink.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !link.isEmpty else { return }
+        let links = tappedLinks.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard let link = links.first else { return }
         let untrusted = SpacesUntrustedTerminalLink(link)
         let displayString = untrusted.displayString(fileLocation: .anotherDevice)
         var rawLink = link
@@ -2897,17 +2902,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let title: String
         switch route {
         case .spacesTerminal, .loopbackURL:
-            await openTerminalLink(rawLink)
+            await openTerminalLink([rawLink])
             return
         case .webURL(let url): title = TerminalLinkConfirmation.title(for: url, displayString: displayString)
         case .fileLink(let raw): title = TerminalLinkConfirmation.title(forFileLink: raw, displayString: displayString)
         }
-        pendingLinkConfirmation = TerminalLinkConfirmation(title: title, displayString: displayString, destination: .routedLink(rawLink))
+        pendingLinkConfirmation = TerminalLinkConfirmation(
+            title: title, displayString: displayString, destination: .routedLink([rawLink] + links.dropFirst()))
     }
 
-    func openTerminalLink(_ link: String) async {
-        let normalizedLink = link.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedLink.isEmpty else { return }
+    /// Opens the first of `links` the session's host resolves; the rest are tried only when a resolve is
+    /// refused (see `resolveTerminalLink(candidates:commandChannel:)`).
+    func openTerminalLink(_ links: [String]) async {
+        let candidates = links.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard let normalizedLink = candidates.first else { return }
         // Route on the raw link text before touching the daemon: an unrecognized scheme (e.g.
         // `mailto:`) needs no round trip at all, and a loopback host (e.g. `http://localhost:3000`)
         // only makes sense on the session's host Mac, so both short-circuit without a resolve call or
@@ -2943,8 +2951,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         do {
             let previewCommandChannel = bridgeClient.makeCommandChannel()
             defer { Task { await previewCommandChannel.close() } }
-            let metadata = try await bridgeClient.resolveTerminalLink(
-                sessionID: session.id, link: normalizedLink, commandChannel: previewCommandChannel)
+            let metadata = try await resolveTerminalLink(
+                candidates: candidates, commandChannel: previewCommandChannel, requestGeneration: requestGeneration)
             try Task.checkCancellation()
             try ensureCurrentLinkPreviewRequest(requestGeneration)
             try await handleResolvedTerminalLink(metadata, commandChannel: previewCommandChannel, requestGeneration: requestGeneration)
@@ -2956,6 +2964,38 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             guard linkPreview == nil else { return }
             linkPreviewErrorMessage = error.localizedDescription
         }
+    }
+
+    /// Resolves each candidate in order and returns the first the host accepts, so a rejoined wrapped path
+    /// that is not a file there falls through to the link as matched. Only a refusal moves on: a transport
+    /// failure, a timeout, or an authentication failure would fail the next candidate the same way, so it
+    /// ends the attempt. When every candidate is refused, the first candidate's refusal is thrown. A
+    /// tap or Open Link that supersedes this one stops the remaining resolves.
+    private func resolveTerminalLink(candidates: [String], commandChannel: SpacesDeviceAPICommandChannel, requestGeneration: UInt64) async throws
+        -> SpacesDeviceTerminalLinkMetadata
+    {
+        var firstRefusal: Error?
+        for link in candidates {
+            try Task.checkCancellation()
+            try ensureCurrentLinkPreviewRequest(requestGeneration)
+            do {
+                return try await bridgeClient.resolveTerminalLink(sessionID: session.id, link: link, commandChannel: commandChannel)
+            } catch {
+                guard Self.isHostRefusal(error) else { throw error }
+                firstRefusal = firstRefusal ?? error
+            }
+        }
+        throw firstRefusal ?? SpacesDeviceAPIClientError.requestFailed("The link couldn't be resolved.")
+    }
+
+    /// A transport problem the client reports as `.requestFailed` (a timeout message) cannot be told from a
+    /// host refusal here, so it costs one more failed resolve before the first error shows. Accepted: it is
+    /// rare and ends after the last candidate.
+    private static func isHostRefusal(_ error: Error) -> Bool {
+        guard SpacesDeviceAPIAuthentication.recoveryMessage(for: error) == nil, case SpacesDeviceAPIClientError.requestFailed = error else {
+            return false
+        }
+        return true
     }
 
     // MARK: - Client selection

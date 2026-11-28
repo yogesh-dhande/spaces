@@ -9,8 +9,8 @@ import spacesdevicecore
 struct TerminalLinkConfirmation: Equatable {
     /// What Open Link does.
     enum Destination: Equatable {
-        /// Route the link string through the model's link-open path (web preview, file fetch).
-        case routedLink(String)
+        /// Route the link candidates, best first, through the model's link-open path (web preview, file fetch).
+        case routedLink([String])
         /// Hand the URL to the system, which picks the app registered for it (a mail client, a custom scheme).
         case systemURL(URL)
     }

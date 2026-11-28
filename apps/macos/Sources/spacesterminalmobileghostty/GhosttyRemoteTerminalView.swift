@@ -102,7 +102,10 @@ import Foundation
         /// a click at the tapped cell. Answers whether the click was actually sent, because the rest of
         /// the gate is client state the host view cannot see (see `handleTapToActivateInput`).
         public let onSendMouseClick: (@MainActor (UInt8, TerminalScrollPointerPosition) -> Bool)?
-        public let onOpenLink: @MainActor (String, GhosttyMobileActionEvent.OpenURLKind) -> Void
+        /// Opens a tapped link. The links are candidates in preference order (a path the program wrapped
+        /// itself carries its rejoined form first; see `TerminalHardWrappedLink`), and the first that
+        /// opens wins.
+        public let onOpenLink: @MainActor ([String], GhosttyMobileActionEvent.OpenURLKind) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
         public let onOpenSavedPrompts: (@MainActor () -> Void)?
         public let onPasteClipboardImage: (@MainActor () -> Bool)?
@@ -142,7 +145,7 @@ import Foundation
             onSendMouseButton: (@MainActor (UInt8, Bool, TerminalScrollPointerPosition) -> Bool)? = nil,
             onSendMouseMotion: (@MainActor (TerminalScrollPointerPosition) -> Bool)? = nil, clientSelection: TerminalAbsoluteSelection? = nil,
             selectionActions: GhosttyRemoteTerminalSelectionActions? = nil, selectionAccentColor: UIColor = .systemTeal,
-            onOpenLink: @escaping @MainActor (String, GhosttyMobileActionEvent.OpenURLKind) -> Void = { _, _ in },
+            onOpenLink: @escaping @MainActor ([String], GhosttyMobileActionEvent.OpenURLKind) -> Void = { _, _ in },
             onOpenComposer: (@MainActor () -> Void)? = nil, onOpenSavedPrompts: (@MainActor () -> Void)? = nil,
             onPasteClipboardImage: (@MainActor () -> Bool)? = nil
         ) {
@@ -222,7 +225,7 @@ import Foundation
             }
             hostView.selectionActions = selectionActions
             hostView.setSelectionAccentColor(selectionAccentColor)
-            hostView.onOpenLink = { link, kind in _ = Task { @MainActor in onOpenLink(link, kind) } }
+            hostView.onOpenLink = { candidates, kind in _ = Task { @MainActor in onOpenLink(candidates, kind) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
             hostView.onOpenSavedPrompts = onOpenSavedPrompts.map { callback in { _ = Task { @MainActor in callback() } } }
             // Synchronous, unlike the Task-hopping callbacks around it: the paste routes need the
@@ -417,6 +420,9 @@ import Foundation
         private var clipboardHasImageReader: () -> Bool = { UIPasteboard.general.hasImages }
         private var suppressesSoftwareKeyboard = false
         private var tapLinkProbeDepth = 0
+        /// The tapped cell and the frame it indexes while a tap's link probe runs, so the link Ghostty
+        /// matches there can be rejoined with the rows a hard-wrapped path continues on. Nil outside a probe.
+        private var tapLinkProbeClick: (column: Int, row: Int, snapshot: GhosttyTerminalSnapshot)?
         private var openedLinkDuringTapProbe = false
         private var surfaceViewportSizeOverrideForTesting: (columns: Int, rows: Int)?
         var userInterfaceIdiomOverrideForTesting: UIUserInterfaceIdiom?
@@ -463,7 +469,7 @@ import Foundation
         /// it was sent. See `forwardMouseClick(at:)` for the half of the gate that lives here and the half
         /// the app layer owns.
         public var onSendMouseClick: ((UInt8, TerminalScrollPointerPosition) -> Bool)?
-        public var onOpenLink: ((String, GhosttyMobileActionEvent.OpenURLKind) -> Void)?
+        public var onOpenLink: (([String], GhosttyMobileActionEvent.OpenURLKind) -> Void)?
         public var onOpenComposer: (() -> Void)?
         public var onOpenSavedPrompts: (() -> Void)?
         /// Handles a paste whose clipboard declares an image. The app layer reads and validates the image
@@ -1413,7 +1419,8 @@ import Foundation
             switch event {
             case .openURL(let kind, let value):
                 if tapLinkProbeDepth > 0 { openedLinkDuringTapProbe = true }
-                onOpenLink?(value, kind)
+                let candidates = TerminalHardWrappedLink.openCandidates(for: value, isHyperlink: kind == .osc8, click: tapLinkProbeClick)
+                onOpenLink?(candidates, kind)
             case .mouseOverLink: return
             }
         }
@@ -1443,7 +1450,13 @@ import Foundation
             let mods = linkActivationMouseModifiers()
             tapLinkProbeDepth += 1
             openedLinkDuringTapProbe = false
-            defer { tapLinkProbeDepth -= 1 }
+            tapLinkProbeClick = tappedVisibleCell(for: location).flatMap { cell in
+                currentRenderedSnapshot.map { (cell.column, cell.row, $0) }
+            }
+            defer {
+                tapLinkProbeDepth -= 1
+                tapLinkProbeClick = nil
+            }
             ghostty_surface_mouse_pos(surface, position.x, position.y, mods)
             _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
             _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
@@ -1854,14 +1867,21 @@ import Foundation
         /// rebased through the crop the last render used, exactly as a scroll's pointer is, so the
         /// software keyboard cannot shift which row the daemon expands it to.
         func tappedCellPointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {
+            guard let cell = tappedVisibleCell(for: location) else { return nil }
+            let center = TerminalPointerGrid.center(column: cell.column, row: cell.row, columns: cell.columns, rows: cell.rows)
+            let visible = TerminalScrollPointerPosition(x: center.x, y: center.y)
+            guard let renderedCrop else { return visible }
+            return renderedCrop.gridPosition(forVisible: visible)
+        }
+
+        /// The cell under `location` in the visible grid, and that grid's size. Not clamped: a point past
+        /// an edge names a cell outside the grid.
+        private func tappedVisibleCell(for location: CGPoint) -> (column: Int, row: Int, columns: Int, rows: Int)? {
             guard let geometry = selectionGridGeometry() else { return nil }
             let visibleGrid = renderedCrop.map { (columns: $0.window.columns, rows: $0.window.rows) } ?? renderedViewportSize()
             let column = Int(((location.x - geometry.originX) / geometry.cellWidth).rounded(.down))
             let row = Int(((location.y - geometry.originY) / geometry.cellHeight).rounded(.down))
-            let center = TerminalPointerGrid.center(column: column, row: row, columns: visibleGrid.columns, rows: visibleGrid.rows)
-            let visible = TerminalScrollPointerPosition(x: center.x, y: center.y)
-            guard let renderedCrop else { return visible }
-            return renderedCrop.gridPosition(forVisible: visible)
+            return (column, row, visibleGrid.columns, visibleGrid.rows)
         }
 
         @discardableResult private func sendScroll(

@@ -315,7 +315,7 @@
             terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
             stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
             agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
-            linkOpenHandler: (@MainActor (String, GhosttyActionEvent.OpenURLKind) -> Void)? = nil,
+            linkOpenHandler: (@MainActor ([String], GhosttyActionEvent.OpenURLKind) -> Void)? = nil,
             inputFailureHandler: RemoteGhosttyInputFailureHandler? = nil, linkFileLocation: SpacesUntrustedTerminalLink.FileLocation = .anotherDevice
         ) {
             self.launchConfiguration = launchConfiguration
