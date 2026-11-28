@@ -103,6 +103,7 @@ import spacesterminalui
         private var gatesByLinkID: [String: [DispatchSemaphore]] = [:]
         private var gateEntryByLinkID: [String: AsyncStream<Void>.Continuation] = [:]
         private var resolveCounts = 0
+        private var resolvedLinks: [String] = []
         private var chunkCounts: [String: Int] = [:]
 
         func setResolve(_ response: TerminalServiceResponse, forLink link: String) { lock.withLock { resolveByLink[link] = response } }
@@ -120,6 +121,8 @@ import spacesterminalui
             }
             return entered
         }
+        /// The links the coordinator asked the session's host to resolve, in order.
+        var resolveRequests: [String] { lock.withLock { resolvedLinks } }
         func chunkCount(forLinkID linkID: String) -> Int { lock.withLock { chunkCounts[linkID] ?? 0 } }
         func resetChunkCount(forLinkID linkID: String) { lock.withLock { chunkCounts[linkID] = 0 } }
 
@@ -129,6 +132,7 @@ import spacesterminalui
                 let link = payload.terminalLink ?? ""
                 let shouldThrow: Bool = lock.withLock {
                     resolveCounts += 1
+                    resolvedLinks.append(link)
                     return throwingLinks.contains(link)
                 }
                 if shouldThrow { throw NSError(domain: "FakeLinkSender", code: 1, userInfo: [NSLocalizedDescriptionKey: "resolve exploded"]) }
@@ -222,7 +226,7 @@ import spacesterminalui
         let recorder = OpenRecorder()
         let coordinator = makeCoordinator(isLocalDevice: false, banner: banner, recorder: recorder)
 
-        coordinator.openLink("https://example.com/report")
+        coordinator.openLink(["https://example.com/report"])
 
         #expect(recorder.opens.count == 1)
         #expect(recorder.opens.first?.category == .webURL)
@@ -237,7 +241,7 @@ import spacesterminalui
         let sender = FakeLinkSender()
         let coordinator = makeCoordinator(isLocalDevice: true, sender: sender, banner: banner, recorder: recorder)
 
-        coordinator.openLink("http://localhost:3000/app")
+        coordinator.openLink(["http://localhost:3000/app"])
 
         #expect(recorder.opens.first?.category == .webURL)
         #expect(recorder.opens.first?.url.absoluteString == "http://localhost:3000/app")
@@ -249,7 +253,7 @@ import spacesterminalui
         let recorder = OpenRecorder()
         let coordinator = makeCoordinator(isLocalDevice: false, banner: banner, recorder: recorder)
 
-        coordinator.openLink("http://127.0.0.1:8080/")
+        coordinator.openLink(["http://127.0.0.1:8080/"])
 
         #expect(recorder.opens.isEmpty)
         #expect(banner.noticeMessages == [TerminalLinkOpenCoordinator.loopbackRemoteNotice])
@@ -261,7 +265,7 @@ import spacesterminalui
         var routed: [SpacesTerminalDeepLink] = []
         let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, onSpacesTerminalLink: { routed.append($0) })
 
-        coordinator.openLink("spaces://terminal/session-1?device=device-9")
+        coordinator.openLink(["spaces://terminal/session-1?device=device-9"])
 
         #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-1", deviceID: "device-9")])
         #expect(recorder.opens.isEmpty)
@@ -277,7 +281,7 @@ import spacesterminalui
             isLocalDevice: false, banner: banner, recorder: recorder, deviceID: "pane-device", onSpacesTerminalLink: { routed.append($0) })
 
         // A remote daemon prints same-device links unqualified because it can't know its own paired id.
-        coordinator.openLink("spaces://terminal/session-7")
+        coordinator.openLink(["spaces://terminal/session-7"])
 
         #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: "pane-device")])
     }
@@ -289,7 +293,7 @@ import spacesterminalui
         let coordinator = makeCoordinator(
             isLocalDevice: false, banner: banner, recorder: recorder, deviceID: "pane-device", onSpacesTerminalLink: { routed.append($0) })
 
-        coordinator.openLink("spaces://terminal/session-7?device=other-device")
+        coordinator.openLink(["spaces://terminal/session-7?device=other-device"])
 
         #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: "other-device")])
     }
@@ -301,7 +305,7 @@ import spacesterminalui
         let coordinator = makeCoordinator(
             isLocalDevice: true, banner: banner, recorder: recorder, deviceID: "local", onSpacesTerminalLink: { routed.append($0) })
 
-        coordinator.openLink("spaces://terminal/session-7")
+        coordinator.openLink(["spaces://terminal/session-7"])
 
         #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: nil)])
     }
@@ -314,7 +318,7 @@ import spacesterminalui
         let presenter = RecordingUntrustedLinkPresenter()
         let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
 
-        coordinator.openLink("https://example.com/docs", kind: .osc8)
+        coordinator.openLink(["https://example.com/docs"], kind: .osc8)
 
         #expect(recorder.opens.map(\.category) == [.webURL])
         #expect(recorder.opens.first?.url.absoluteString == "https://example.com/docs")
@@ -326,7 +330,7 @@ import spacesterminalui
         let recorder = OpenRecorder()
         let coordinator = makeCoordinator(isLocalDevice: false, banner: banner, recorder: recorder)
 
-        coordinator.openLink("http://localhost:3000/", kind: .osc8)
+        coordinator.openLink(["http://localhost:3000/"], kind: .osc8)
 
         #expect(recorder.opens.isEmpty)
         #expect(banner.noticeMessages == [TerminalLinkOpenCoordinator.loopbackRemoteNotice])
@@ -338,7 +342,7 @@ import spacesterminalui
         var routed: [SpacesTerminalDeepLink] = []
         let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, onSpacesTerminalLink: { routed.append($0) })
 
-        coordinator.openLink("spaces://terminal/session-1", kind: .osc8)
+        coordinator.openLink(["spaces://terminal/session-1"], kind: .osc8)
 
         #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-1", deviceID: nil)])
         #expect(recorder.opens.isEmpty)
@@ -349,7 +353,7 @@ import spacesterminalui
         let recorder = OpenRecorder()
         let coordinator = makeCoordinator(isLocalDevice: false, banner: banner, recorder: recorder)
 
-        coordinator.openLink("mailto:person@example.com", kind: .osc8)
+        coordinator.openLink(["mailto:person@example.com"], kind: .osc8)
 
         #expect(recorder.opens.map(\.category) == [.systemURL])
         #expect(recorder.opens.first?.url.absoluteString == "mailto:person@example.com")
@@ -361,7 +365,7 @@ import spacesterminalui
         let presenter = RecordingUntrustedLinkPresenter()
         let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
 
-        coordinator.openLink("slack://open?team=T1", kind: .osc8)
+        coordinator.openLink(["slack://open?team=T1"], kind: .osc8)
 
         #expect(presenter.confirmations.map(\.url.absoluteString) == ["slack://open?team=T1"])
         #expect(recorder.opens.isEmpty, "nothing opens before the user confirms")
@@ -379,7 +383,7 @@ import spacesterminalui
         let coordinator = makeCoordinator(
             isLocalDevice: true, workingDirectory: "/tmp", banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
 
-        coordinator.openLink("/etc/hosts", kind: .osc8)
+        coordinator.openLink(["/etc/hosts"], kind: .osc8)
 
         #expect(presenter.blocks.map(\.reason) == [.malformedURL])
         #expect(recorder.opens.isEmpty)
@@ -391,7 +395,7 @@ import spacesterminalui
         let presenter = RecordingUntrustedLinkPresenter()
         let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
 
-        coordinator.openLink("https://example.com/\u{202E}evil", kind: .osc8)
+        coordinator.openLink(["https://example.com/\u{202E}evil"], kind: .osc8)
 
         #expect(presenter.blocks.map(\.reason) == [.unsafeCharacters])
         #expect(presenter.blocks.first?.displayString.contains("\\u{202E}") == true)
@@ -412,12 +416,12 @@ import spacesterminalui
         let presenter = RecordingUntrustedLinkPresenter()
         let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
 
-        coordinator.openLink(notes.absoluteString, kind: .osc8)
+        coordinator.openLink([notes.absoluteString], kind: .osc8)
         #expect(recorder.opens.map(\.category) == [.text])
         #expect(recorder.opens.first?.url.lastPathComponent == "notes.txt")
 
-        coordinator.openLink(script.absoluteString, kind: .osc8)
-        coordinator.openLink(directory.appendingPathComponent("missing.txt").absoluteString, kind: .osc8)
+        coordinator.openLink([script.absoluteString], kind: .osc8)
+        coordinator.openLink([directory.appendingPathComponent("missing.txt").absoluteString], kind: .osc8)
         #expect(presenter.blocks.map(\.reason) == [.unsafeFile, .inaccessibleFile])
         #expect(recorder.opens.count == 1)
     }
@@ -430,12 +434,12 @@ import spacesterminalui
         let presenter = RecordingUntrustedLinkPresenter()
         let coordinator = makeCoordinator(isLocalDevice: false, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
 
-        coordinator.openLink("file:///no/such/path/on/this/mac.png", kind: .osc8)
+        coordinator.openLink(["file:///no/such/path/on/this/mac.png"], kind: .osc8)
         #expect(banner.progressMessages == ["Resolving link…"])
         await coordinator.drainActiveWorkForTesting()
         #expect(presenter.blocks.isEmpty)
 
-        coordinator.openLink("file:///tmp/report.png?x=1", kind: .osc8)
+        coordinator.openLink(["file:///tmp/report.png?x=1"], kind: .osc8)
         #expect(presenter.blocks.map(\.reason) == [.malformedURL])
     }
 
@@ -450,7 +454,7 @@ import spacesterminalui
         let presenter = RecordingUntrustedLinkPresenter()
         let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, untrustedLinkPresenter: presenter)
 
-        coordinator.openLink(file.path, kind: .unknown)
+        coordinator.openLink([file.path], kind: .unknown)
 
         #expect(recorder.opens.count == 1)
         #expect(presenter.blocks.isEmpty && presenter.confirmations.isEmpty)
@@ -468,7 +472,7 @@ import spacesterminalui
         let recorder = OpenRecorder()
         let coordinator = makeCoordinator(isLocalDevice: true, workingDirectory: workingDirectory.path, banner: banner, recorder: recorder)
 
-        coordinator.openLink("nested/notes.txt")
+        coordinator.openLink(["nested/notes.txt"])
 
         #expect(recorder.opens.count == 1)
         #expect(recorder.opens.first?.url.standardizedFileURL == file.standardizedFileURL)
@@ -483,13 +487,124 @@ import spacesterminalui
         let recorder = OpenRecorder()
         let coordinator = makeCoordinator(isLocalDevice: true, workingDirectory: workingDirectory.path, banner: banner, recorder: recorder)
 
-        coordinator.openLink("nested/missing.txt")
+        coordinator.openLink(["nested/missing.txt"])
 
         #expect(recorder.opens.isEmpty)
         #expect(banner.errorMessages.count == 1)
     }
 
+    @Test func hardWrappedPathOpensTheJoinedCandidateWhenItExists() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let joined = directory.appendingPathComponent("File.swift")
+        try "x".write(to: joined, atomically: true, encoding: .utf8)
+        let recorder = OpenRecorder()
+        let banner = RecordingBanner()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder)
+
+        coordinator.openLink([joined.path, directory.path + "/Fi"], kind: .unknown)
+
+        #expect(recorder.opens.map(\.url.path) == [joined.standardizedFileURL.path])
+        #expect(banner.errorMessages.isEmpty)
+    }
+
+    @Test func hardWrappedPathFallsBackToTheMatchedCandidateWhenTheJoinedOneIsMissing() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let matched = directory.appendingPathComponent("Fi")
+        try "x".write(to: matched, atomically: true, encoding: .utf8)
+        let recorder = OpenRecorder()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: RecordingBanner(), recorder: recorder)
+
+        coordinator.openLink([directory.path + "/File.swift", matched.path], kind: .unknown)
+
+        #expect(recorder.opens.map(\.url.path) == [matched.standardizedFileURL.path])
+    }
+
+    @Test func hardWrappedPathWithNoExistingCandidateReportsTheFirstCandidateMissing() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recorder = OpenRecorder()
+        let banner = RecordingBanner()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder)
+
+        coordinator.openLink([directory.path + "/File.swift", directory.path + "/Fi"], kind: .unknown)
+
+        #expect(recorder.opens.isEmpty)
+        #expect(banner.errorMessages == ["File not found: File.swift"])
+    }
+
+    @Test func localPathWithALineSuffixOpensTheFileWithoutIt() throws {
+        let directory = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("foo.swift")
+        try "x".write(to: file, atomically: true, encoding: .utf8)
+        let recorder = OpenRecorder()
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: RecordingBanner(), recorder: recorder)
+
+        coordinator.openLink([file.path + ":12", file.path], kind: .unknown)
+
+        #expect(recorder.opens.map(\.url.path) == [file.standardizedFileURL.path])
+    }
+
     // MARK: - Remote fetch
+
+    @Test func remoteHardWrappedPathResolvesCandidatesInOrderAndStopsAtTheFirstSuccess() async {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let sender = FakeLinkSender()
+        let payload = Data("body".utf8)
+        let linkID = "link-\(UUID().uuidString)"
+        sender.setResolve(TerminalServiceResponse(ok: false, message: "not a file"), forLink: "/a/File.swift")
+        sender.setResolve(
+            TerminalServiceResponse(
+                ok: true, message: "",
+                terminalLinkMetadata: metadata(
+                    id: linkID, displayName: "Fi.txt", contentType: "text/plain", artifactKind: "text", byteCount: Int64(payload.count))),
+            forLink: "/a/Fi")
+        sender.setChunk(
+            TerminalServiceTerminalLinkChunk(
+                linkID: linkID, offset: 0, byteCount: payload.count, isFinal: true, base64Data: payload.base64EncodedString()), forLinkID: linkID)
+        let coordinator = makeCoordinator(isLocalDevice: false, sender: sender, banner: banner, recorder: recorder)
+
+        coordinator.openLink(["/a/File.swift", "/a/Fi", "/a/never-asked"], kind: .unknown)
+        await coordinator.drainActiveWorkForTesting()
+
+        #expect(sender.resolveRequests == ["/a/File.swift", "/a/Fi"])
+        #expect(recorder.opens.count == 1)
+        #expect(banner.errorMessages.isEmpty)
+    }
+
+    @Test func remoteHardWrappedPathStopsAtATransportFailure() async {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let sender = FakeLinkSender()
+        sender.setResolveThrows(forLink: "/a/File.swift")
+        let coordinator = makeCoordinator(isLocalDevice: false, sender: sender, banner: banner, recorder: recorder)
+
+        coordinator.openLink(["/a/File.swift", "/a/Fi"], kind: .unknown)
+        await coordinator.drainActiveWorkForTesting()
+
+        #expect(sender.resolveRequests == ["/a/File.swift"])
+        #expect(banner.errorMessages == ["resolve exploded"])
+        #expect(recorder.opens.isEmpty)
+    }
+
+    @Test func remoteHardWrappedPathShowsTheFirstFailureWhenNoCandidateResolves() async {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let sender = FakeLinkSender()
+        sender.setResolve(TerminalServiceResponse(ok: false, message: "joined is missing"), forLink: "/a/File.swift")
+        sender.setResolve(TerminalServiceResponse(ok: false, message: "matched is missing"), forLink: "/a/Fi")
+        let coordinator = makeCoordinator(isLocalDevice: false, sender: sender, banner: banner, recorder: recorder)
+
+        coordinator.openLink(["/a/File.swift", "/a/Fi"], kind: .unknown)
+        await coordinator.drainActiveWorkForTesting()
+
+        #expect(sender.resolveRequests == ["/a/File.swift", "/a/Fi"])
+        #expect(banner.errorMessages == ["joined is missing"])
+        #expect(recorder.opens.isEmpty)
+    }
 
     @Test func remoteFileLinkResolveFailureShowsError() async {
         let banner = RecordingBanner()
@@ -498,7 +613,7 @@ import spacesterminalui
         sender.setResolve(TerminalServiceResponse(ok: false, message: "link expired"), forLink: "artifact.png")
         let coordinator = makeCoordinator(isLocalDevice: false, sender: sender, banner: banner, recorder: recorder)
 
-        coordinator.openLink("artifact.png")
+        coordinator.openLink(["artifact.png"])
         await coordinator.drainActiveWorkForTesting()
 
         #expect(banner.errorMessages == ["link expired"])
@@ -525,7 +640,7 @@ import spacesterminalui
         let coordinator = makeCoordinator(
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
-        coordinator.openLink("report.txt")
+        coordinator.openLink(["report.txt"])
         await coordinator.drainActiveWorkForTesting()
 
         #expect(banner.errorMessages.isEmpty)
@@ -556,13 +671,13 @@ import spacesterminalui
         let coordinator = makeCoordinator(
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
-        coordinator.openLink("data.txt")
+        coordinator.openLink(["data.txt"])
         await coordinator.drainActiveWorkForTesting()
         #expect(recorder.opens.count == 1)
         #expect(sender.chunkCount(forLinkID: linkID) >= 1)
 
         sender.resetChunkCount(forLinkID: linkID)
-        coordinator.openLink("data.txt")
+        coordinator.openLink(["data.txt"])
         await coordinator.drainActiveWorkForTesting()
 
         #expect(recorder.opens.count == 2)
@@ -596,7 +711,7 @@ import spacesterminalui
         let coordinator = makeCoordinator(
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
-        coordinator.openLink("data.txt")
+        coordinator.openLink(["data.txt"])
         // The gated read announces itself as it enters the hold. There is nothing for
         // `drainActiveWorkForTesting` to await here (the first fetch is meant to still be inside
         // that read), so this awaits the read's own signal for proof the fetch got there.
@@ -611,7 +726,7 @@ import spacesterminalui
         // *after* the current fetch populated the cache, or a stale completion that clobbered the
         // cache before checking its generation would be silently repaired by the second's write.
         // (An ordering wait, not a drain: draining here would also await the parked first fetch.)
-        coordinator.openLink("data.txt")
+        coordinator.openLink(["data.txt"])
         await awaitEvent(recorder.opened, "the replacement fetch to open its artifact")
         #expect(recorder.opens.count == 1)
 
@@ -670,7 +785,7 @@ import spacesterminalui
         let coordinator = makeCoordinator(
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
-        coordinator.openLink("first.txt")
+        coordinator.openLink(["first.txt"])
         // Wait until the first fetch has entered its (blocked) chunk read. The read announces itself
         // on the way in, so this awaits that signal rather than draining: the fetch is deliberately
         // left outstanding.
@@ -684,7 +799,7 @@ import spacesterminalui
         // implementation that serialized the new fetch behind the old I/O would never reach this
         // open instead of being rescued by the release below. (An ordering wait, not a drain:
         // draining here would also await the parked first fetch.)
-        coordinator.openLink("second.txt")
+        coordinator.openLink(["second.txt"])
         await awaitEvent(recorder.opened, "the replacement fetch to open its artifact")
         #expect(recorder.opens.count == 1)
 

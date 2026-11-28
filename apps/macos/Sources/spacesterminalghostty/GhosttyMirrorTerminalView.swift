@@ -175,7 +175,15 @@
         /// coordinator can route web/loopback/remote-file links (fetch-over-Device-API, loopback notice).
         /// Left nil in contexts with no coordinator (tests, non-device hosts), where the legacy opener
         /// and its `debugOpenURLHandler` test seam still apply.
-        var onOpenLink: (@MainActor (String, GhosttyActionEvent.OpenURLKind) -> Void)?
+        ///
+        /// The links are candidates in preference order: the first that opens wins. A path the program
+        /// wrapped itself carries the rejoined path ahead of the text Ghostty matched (see
+        /// `TerminalHardWrappedLink`); every other link is a single candidate.
+        var onOpenLink: (@MainActor ([String], GhosttyActionEvent.OpenURLKind) -> Void)?
+        /// The cell under the last left-button release and the frame it was resolved against. Ghostty
+        /// raises `.openURL` asynchronously after the release, by which point the pointer and the frame
+        /// may have moved on, so the click's own cell is what finds the rows a wrapped path continues on.
+        private var lastLinkClick: (column: Int, row: Int, snapshot: GhosttyTerminalSnapshot)?
         /// Called whenever this pane goes on or off screen (see `isDisplayed`). `RemoteGhosttySessionHost`
         /// uses it to stop paying for screen updates nobody can see; nothing else observes it.
         var onDisplayStateChanged: (@MainActor (Bool) -> Void)?
@@ -444,6 +452,7 @@
         override func mouseUp(with event: NSEvent) {
             if suppressesFocusOnlyMouseRelease(for: event) { return }
             sendMousePosition(event)
+            lastLinkClick = gridCell(at: event.locationInWindow).flatMap { cell in shownSnapshot.map { (cell.column, cell.row, $0) } }
             _ = sendMouseButton(state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT, event: event)
             selectionGestureReleased(event)
         }
@@ -705,7 +714,14 @@
         func applyActionEvent(_ event: GhosttyActionEvent) {
             switch event {
             case .openURL(let kind, let value):
-                if let onOpenLink { onOpenLink(value, kind) } else { _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler) }
+                let candidates = TerminalHardWrappedLink.openCandidates(for: value, isHyperlink: kind == .osc8, click: lastLinkClick)
+                // Spent: the click holds a whole snapshot, which a pane has no reason to keep alive.
+                lastLinkClick = nil
+                if let onOpenLink {
+                    onOpenLink(candidates, kind)
+                } else {
+                    _ = GhosttyTerminalLinkOpener.open(candidates[0], openURL: debugOpenURLHandler)
+                }
             case .mouseOverLink(let value): hoveredLink = value
             case .startSearch(let needle): showSearchOverlay(query: needle, submitSeededQuery: needle != nil)
             case .endSearch: hideSearchOverlay()

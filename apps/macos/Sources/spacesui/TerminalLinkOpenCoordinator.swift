@@ -16,7 +16,7 @@
     /// (retained by the long-lived host/view) never keeps a torn-down coordinator alive.
     @MainActor final class TerminalLinkOpenHandlerBox {
         weak var coordinator: TerminalLinkOpenCoordinator?
-        func open(_ rawLink: String, kind: GhosttyActionEvent.OpenURLKind) { coordinator?.openLink(rawLink, kind: kind) }
+        func open(_ candidates: [String], kind: GhosttyActionEvent.OpenURLKind) { coordinator?.openLink(candidates, kind: kind) }
     }
 
     /// Per-pane router for terminal link clicks on macOS. One instance per terminal pane, owned by the
@@ -112,9 +112,15 @@
 
         // MARK: - Routing
 
-        func openLink(_ clickedLink: String, kind: GhosttyActionEvent.OpenURLKind = .unknown) {
+        /// `clickedLinks` are candidates in preference order. More than one means the click landed on a
+        /// path the program wrapped itself, whose rejoined form comes first (see `TerminalHardWrappedLink`);
+        /// the candidates are all file links, because `TerminalHardWrappedLink` rejects a join that is
+        /// URL-shaped and strips a `:line` suffix only from a link that is not. The first that exists is
+        /// opened.
+        func openLink(_ clickedLinks: [String], kind: GhosttyActionEvent.OpenURLKind = .unknown) {
             // Every click supersedes any in-flight fetch and clears its banner before routing anew.
             cancelActiveOpen()
+            guard let clickedLink = clickedLinks.first else { return }
             var rawLink = clickedLink
             if kind == .osc8 {
                 guard let vetted = linkAfterUntrustedPolicy(clickedLink) else { return }
@@ -124,7 +130,9 @@
             switch route {
             case .webURL(let url): _ = registry.open(url, as: .webURL)
             case .loopbackURL(let url): if isLocalDevice { _ = registry.open(url, as: .webURL) } else { banner.showNotice(Self.loopbackRemoteNotice) }
-            case .fileLink(let raw): if isLocalDevice { openLocalFileLink(raw) } else { startRemoteFileOpen(raw) }
+            case .fileLink(let raw):
+                let candidates = [raw] + clickedLinks.dropFirst()
+                if isLocalDevice { openLocalFileLink(candidates) } else { startRemoteFileOpen(candidates) }
             case .spacesTerminal(let link): openSpacesTerminalLink(qualifiedDeepLink(link))
             }
         }
@@ -180,16 +188,18 @@
 
         // MARK: - Local files
 
-        private func openLocalFileLink(_ raw: String) {
+        private func openLocalFileLink(_ candidates: [String]) {
             // No daemon round trip and no type/path restrictions: opening a local file preserves macOS
             // "open anything" semantics (a `.swift` path opens the user's editor, a `.png` opens Preview,
             // etc.), so the coordinator only expands the path and confirms the file is there.
-            guard let url = GhosttyTerminalLinkOpener.resolvedURL(for: raw, workingDirectory: workingDirectoryProvider()) else {
-                banner.showError("Couldn't resolve “\(raw)”.")
+            let workingDirectory = workingDirectoryProvider()
+            let urls = candidates.compactMap { GhosttyTerminalLinkOpener.resolvedURL(for: $0, workingDirectory: workingDirectory) }
+            guard let firstURL = urls.first else {
+                banner.showError("Couldn't resolve “\(candidates[0])”.")
                 return
             }
-            if url.isFileURL, !FileManager.default.fileExists(atPath: url.path) {
-                banner.showError("File not found: \(SpacesUntrustedTerminalLink.escapingUnsafeCharacters(url.lastPathComponent))")
+            guard let url = urls.first(where: { !$0.isFileURL || FileManager.default.fileExists(atPath: $0.path) }) else {
+                banner.showError("File not found: \(SpacesUntrustedTerminalLink.escapingUnsafeCharacters(firstURL.lastPathComponent))")
                 return
             }
             _ = registry.openLocalFile(at: url)
@@ -197,14 +207,14 @@
 
         // MARK: - Remote files
 
-        private func startRemoteFileOpen(_ raw: String) {
+        private func startRemoteFileOpen(_ candidates: [String]) {
             let generationAtStart = generation
             banner.showProgress(message: "Resolving link…", onCancel: { [weak self] in self?.cancelActiveOpen() })
             startCacheGCIfNeeded()
             let taskID = UUID()
             let task = Task { @MainActor [weak self] in
                 defer { self?.inFlightOpenTasks[taskID] = nil }
-                await self?.performRemoteFileOpen(raw, generation: generationAtStart)
+                await self?.performRemoteFileOpen(candidates, generation: generationAtStart)
             }
             inFlightOpenTasks[taskID] = task
             activeTask = task
@@ -219,29 +229,41 @@
         /// against a settle window.
         func drainActiveWorkForTesting() async { while let (_, task) = inFlightOpenTasks.first { await task.value } }
 
-        private func performRemoteFileOpen(_ raw: String, generation generationAtStart: UInt64) async {
+        /// Resolves each candidate on the session's host in order and stops at the first that resolves, so
+        /// a rejoined wrapped path that is not a file there falls through to the link as matched. Only the
+        /// host refusing a candidate moves on: a transport failure or a response without link details
+        /// would fail the next candidate the same way, so it ends the attempt with its own error. When
+        /// every candidate is refused, the first candidate's refusal is the one shown.
+        private func performRemoteFileOpen(_ candidates: [String], generation generationAtStart: UInt64) async {
             let sessionID = self.sessionID
             let sender = self.requestSender
 
-            let resolveResult = await Self.send(
-                TerminalServiceRequest(command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: raw))), using: sender)
-            guard isCurrent(generationAtStart) else { return }
-
-            let metadata: TerminalServiceTerminalLinkMetadata
-            switch resolveResult {
-            case .failure(let error):
-                finishWithError(error.localizedDescription, generation: generationAtStart)
+            var resolved: TerminalServiceTerminalLinkMetadata?
+            var firstRefusal: String?
+            for raw in candidates {
+                let resolveResult = await Self.send(
+                    TerminalServiceRequest(command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: raw))), using: sender)
+                guard isCurrent(generationAtStart) else { return }
+                switch resolveResult {
+                case .failure(let error):
+                    finishWithError(error.localizedDescription, generation: generationAtStart)
+                    return
+                case .success(let response):
+                    guard response.ok else {
+                        firstRefusal = firstRefusal ?? response.message
+                        continue
+                    }
+                    guard let metadata = response.terminalLinkMetadata else {
+                        finishWithError("The session's host didn't return link details.", generation: generationAtStart)
+                        return
+                    }
+                    resolved = metadata
+                }
+                break
+            }
+            guard let metadata = resolved else {
+                finishWithError(firstRefusal ?? "The link couldn't be resolved.", generation: generationAtStart)
                 return
-            case .success(let response):
-                guard response.ok else {
-                    finishWithError(response.message, generation: generationAtStart)
-                    return
-                }
-                guard let resolved = response.terminalLinkMetadata else {
-                    finishWithError("The session's host didn't return link details.", generation: generationAtStart)
-                    return
-                }
-                metadata = resolved
             }
 
             // The route already caught web URLs, so a resolved external URL is not expected here; honor it

@@ -985,7 +985,7 @@
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var openedLinks: [String] = []
-            hostView.onOpenLink = { link, _ in openedLinks.append(link) }
+            hostView.onOpenLink = { candidates, _ in openedLinks.append(contentsOf: candidates) }
 
             hostView.debugApplyActionEventForTesting(.openURL(kind: .unknown, value: "https://example.com/image.png"))
             hostView.debugApplyActionEventForTesting(.mouseOverLink("https://example.com/image.png"))
@@ -1007,7 +1007,7 @@
         func testRemoteTerminalHostViewIgnoresHoveredLinkDuringTapProbe() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var openedLinks: [String] = []
-            hostView.onOpenLink = { link, _ in openedLinks.append(link) }
+            hostView.onOpenLink = { candidates, _ in openedLinks.append(contentsOf: candidates) }
 
             XCTAssertFalse(hostView.debugApplyActionEventsDuringTapProbeForTesting([.mouseOverLink(" image.png ")]))
 
@@ -1018,7 +1018,7 @@
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             let fullPath = "/Users/yogesh/Downloads/Screen Recording 2026-03-20 at 11.17.57 AM.mov"
             var openedLinks: [String] = []
-            hostView.onOpenLink = { link, _ in openedLinks.append(link) }
+            hostView.onOpenLink = { candidates, _ in openedLinks.append(contentsOf: candidates) }
 
             XCTAssertTrue(
                 hostView.debugApplyActionEventsDuringTapProbeForTesting([
@@ -1032,18 +1032,71 @@
         /// tap probe finds it on the real mirror surface, which holds the frame's link table as page
         /// hyperlinks; a label that is not itself a URL has nothing else for the probe to match.
         func testRemoteTerminalHostViewTapOnAnOSC8LabelOpensItsTarget() async throws {
-            let opened = try await openedLinksAfterTappingOSC8Label(mouseTrackingLevel: .none)
+            let opened = try await openedLinksAfterTapping(mouseTrackingLevel: .none)
             XCTAssertEqual(opened, ["https://example.com/docs"])
         }
 
         /// Under a program that tracks the mouse the probe's click carries shift as well, which is what
         /// releases the pointer for the link.
         func testRemoteTerminalHostViewTapOnAnOSC8LabelOpensItsTargetUnderMouseTracking() async throws {
-            let opened = try await openedLinksAfterTappingOSC8Label(mouseTrackingLevel: .clicks)
+            let opened = try await openedLinksAfterTapping(mouseTrackingLevel: .clicks)
             XCTAssertEqual(opened, ["https://example.com/docs"])
         }
 
-        private func openedLinksAfterTappingOSC8Label(mouseTrackingLevel: TerminalMouseTrackingLevel) async throws -> [String] {
+        /// A hyperlink a program wraps itself, onto a row the terminal never marked as wrapped, opens its
+        /// whole target from the first row.
+        func testRemoteTerminalHostViewTapOnTheFirstRowOfAProgramWrappedOSC8LinkOpensItsWholeTarget() async throws {
+            let wrapped = Self.programWrappedOSC8Link()
+            let opened = try await openedLinksAfterTapping(
+                mouseTrackingLevel: .clicks, rows: wrapped.rows, linkURLs: wrapped.linkURLs, tapColumn: 20, tapRow: 0)
+            XCTAssertEqual(opened, [Self.programWrappedOSC8Target])
+        }
+
+        /// A hyperlink a program wraps itself, onto a row the terminal never marked as wrapped, opens its
+        /// whole target from the continuation row.
+        func testRemoteTerminalHostViewTapOnTheContinuationRowOfAProgramWrappedOSC8LinkOpensItsWholeTarget() async throws {
+            let wrapped = Self.programWrappedOSC8Link()
+            let opened = try await openedLinksAfterTapping(
+                mouseTrackingLevel: .clicks, rows: wrapped.rows, linkURLs: wrapped.linkURLs, tapColumn: 10, tapRow: 1)
+            XCTAssertEqual(opened, [Self.programWrappedOSC8Target])
+        }
+
+        /// A file path a program wraps itself, onto a row the terminal never marked as wrapped, is offered
+        /// whole first and as Ghostty matched it second, from a tap on either row.
+        func testRemoteTerminalHostViewTapOnEitherRowOfAProgramWrappedPathOffersTheJoinedPathFirst() async throws {
+            let joined = "/Users/dev/projects/spaces/apps/macos/Sources/File.swift"
+            let firstRow = String(joined.prefix(40))
+            let secondRow = String(joined.dropFirst(40))
+            let first = try await openedLinksAfterTapping(
+                mouseTrackingLevel: .clicks, rows: [firstRow, "  " + secondRow], linkURLs: [:], tapColumn: 5, tapRow: 0)
+            XCTAssertEqual(first, [joined, firstRow])
+            let second = try await openedLinksAfterTapping(
+                mouseTrackingLevel: .clicks, rows: [firstRow, "  " + secondRow], linkURLs: [:], tapColumn: 5, tapRow: 1)
+            XCTAssertEqual(second, [joined, secondRow])
+        }
+
+        private static let programWrappedOSC8Target = "https://usespaces.dev/docs/orchestration/handoff-workflows"
+
+        /// Claude Code's layout: the target text fills row 0 to the last column, then the cursor moves down
+        /// and two columns in and the rest follows, so no row carries a soft-wrap flag.
+        private static func programWrappedOSC8Link() -> (rows: [String], linkURLs: [Int: String]) {
+            let columns = 40
+            let text = Array(programWrappedOSC8Target)
+            let firstRow = String(text.prefix(columns - 2))
+            let secondRow = String(text.dropFirst(columns - 2))
+            var linkURLs: [Int: String] = [:]
+            for column in 2..<(2 + firstRow.count) { linkURLs[column] = programWrappedOSC8Target }
+            for column in 2..<(2 + secondRow.count) { linkURLs[columns + column] = programWrappedOSC8Target }
+            return (["  " + firstRow, "  " + secondRow], linkURLs)
+        }
+
+        private func openedLinksAfterTapping(
+            mouseTrackingLevel: TerminalMouseTrackingLevel,
+            rows: [String] = ["Docs"],
+            linkURLs: [Int: String] = [0: "https://example.com/docs", 1: "https://example.com/docs", 2: "https://example.com/docs", 3: "https://example.com/docs"],
+            tapColumn: Int = 1,
+            tapRow: Int = 0
+        ) async throws -> [String] {
             GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
             let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
             let viewController = UIViewController()
@@ -1057,13 +1110,14 @@
             viewController.view.layoutIfNeeded()
             defer { hostView.removeFromSuperview() }
 
-            let label = Array("Docs".unicodeScalars)
-            let cells = (0..<400).map { index -> GhosttyTerminalSnapshot.Cell in
-                let scalar = index < label.count ? label[index].value : 0x20
+            let columns = 40
+            let rowScalars = rows.map { Array($0.unicodeScalars) }
+            let cells = (0..<(columns * 10)).map { index -> GhosttyTerminalSnapshot.Cell in
+                let row = index / columns
+                let column = index % columns
+                let scalar = row < rowScalars.count && column < rowScalars[row].count ? rowScalars[row][column].value : 0x20
                 return GhosttyTerminalSnapshot.Cell(codepoint: scalar, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
             }
-            var linkURLs: [Int: String] = [:]
-            for index in 0..<label.count { linkURLs[index] = "https://example.com/docs" }
             hostView.update(
                 snapshot: GhosttyTerminalSnapshot(
                     columns: 40, rows: 10, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xF2F2F2,
@@ -1076,9 +1130,9 @@
             try await Task.sleep(for: .milliseconds(200))
 
             var opened: [String] = []
-            hostView.onOpenLink = { link, _ in opened.append(link) }
+            hostView.onOpenLink = { candidates, _ in opened.append(contentsOf: candidates) }
             hostView.debugAppliedFrameCoversHostColumnsForTesting = true
-            _ = hostView.debugTapToActivateInputForTesting(at: pointInCell(column: 1, row: 0))
+            _ = hostView.debugTapToActivateInputForTesting(at: pointInCell(column: tapColumn, row: tapRow))
             return opened
         }
 

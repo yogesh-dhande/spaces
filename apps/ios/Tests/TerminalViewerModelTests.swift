@@ -4483,7 +4483,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
 
-            await model.openTerminalLink("https://example.com/docs")
+            await model.openTerminalLink(["https://example.com/docs"])
 
             let safariLink = try XCTUnwrap(model.safariLink)
             XCTAssertEqual(safariLink.url, URL(string: "https://example.com/docs")!)
@@ -4510,7 +4510,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
 
-            await model.openTerminalLink(spacedPath)
+            await model.openTerminalLink([spacedPath])
 
             XCTAssertEqual(resolvedLinks, [spacedPath])
             XCTAssertEqual(model.safariLink?.url, URL(string: "https://example.com/docs")!)
@@ -4540,7 +4540,7 @@
                     return downloadedURL
                 }, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink("https://example.com/image.png")
+            await model.openTerminalLink(["https://example.com/image.png"])
 
             let preview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(preview.kind, .image)
@@ -4581,7 +4581,7 @@
                         downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind, sourceURL: requestedURL)
                 }, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink(url.absoluteString)
+            await model.openTerminalLink([url.absoluteString])
 
             let preview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(preview.kind, .markdown)
@@ -4621,7 +4621,7 @@
                         downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind, sourceURL: requestedURL)
                 }, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink("https://example.com/missing.png")
+            await model.openTerminalLink(["https://example.com/missing.png"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertEqual(model.linkPreviewErrorMessage, "The media link returned HTTP status 404.")
@@ -4659,7 +4659,7 @@
                         downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind, sourceURL: requestedURL)
                 }, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink("https://example.com/login.png")
+            await model.openTerminalLink(["https://example.com/login.png"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertEqual(model.linkPreviewErrorMessage, "The media link did not return image content.")
@@ -4694,7 +4694,7 @@
                     return downloadedURL
                 }, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink("https://example.com/huge.log")
+            await model.openTerminalLink(["https://example.com/huge.log"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertEqual(model.linkPreviewErrorMessage, "huge.log is too large to preview on this device.")
@@ -4769,9 +4769,9 @@
                     return downloadedURL
                 }, linkPreviewCacheDirectory: cacheRoot)
 
-            let slowTask = Task { await model.openTerminalLink("https://example.com/slow.png") }
+            let slowTask = Task { await model.openTerminalLink(["https://example.com/slow.png"]) }
             await probe.waitForSlowStart()
-            await model.openTerminalLink("https://example.com/fast.png")
+            await model.openTerminalLink(["https://example.com/fast.png"])
             await probe.waitForSlowCancel()
             await slowTask.value
 
@@ -4816,9 +4816,9 @@
                     return fastDownloadedURL
                 }, linkPreviewCacheDirectory: cacheRoot)
 
-            let slowTask = Task { await model.openTerminalLink("https://example.com/slow.png") }
+            let slowTask = Task { await model.openTerminalLink(["https://example.com/slow.png"]) }
             await gate.waitForSlowStart()
-            await model.openTerminalLink("https://example.com/fast.png")
+            await model.openTerminalLink(["https://example.com/fast.png"])
             await gate.releaseSlow()
             await slowTask.value
 
@@ -4854,9 +4854,9 @@
                     return downloadedURL
                 }, linkPreviewCacheDirectory: cacheRoot)
 
-            let loadingTask = Task { await model.openTerminalLink("https://example.com/slow.png") }
+            let loadingTask = Task { await model.openTerminalLink(["https://example.com/slow.png"]) }
             await gate.waitForSlowStart()
-            await model.openTappedTerminalLink("https://example.com", kind: .osc8)
+            await model.openTappedTerminalLink(["https://example.com"], kind: .osc8)
             XCTAssertNotNil(model.pendingLinkConfirmation)
 
             await gate.releaseSlow()
@@ -4895,7 +4895,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink("image.png")
+            await model.openTerminalLink(["image.png"])
 
             let preview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(preview.kind, .image)
@@ -4914,7 +4914,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
 
-            await model.openTerminalLink("http://localhost:3000/dashboard")
+            await model.openTerminalLink(["http://localhost:3000/dashboard"])
 
             XCTAssertEqual(model.linkNotice, "This address runs on the session's host machine and isn't reachable from this device yet.")
             XCTAssertNil(model.linkPreview)
@@ -4936,7 +4936,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { openedLink = $0 },
                 bridgeClient: bridgeClient)
 
-            await model.openTerminalLink("spaces://terminal/abc")
+            await model.openTerminalLink(["spaces://terminal/abc"])
 
             XCTAssertEqual(openedLink, SpacesTerminalDeepLink(sessionID: "abc"))
             XCTAssertNil(model.linkPreview)
@@ -4972,7 +4972,7 @@
         func testTappedWebLinkAsksFirstAndOpensOnlyAfterOpenLink() async throws {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("https://github.com/org/repo", kind: .text)
+            await harness.model.openTappedTerminalLink(["https://github.com/org/repo"], kind: .text)
 
             let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
             XCTAssertEqual(confirmation.title, "github.com")
@@ -4991,16 +4991,68 @@
         func testTappedRelativeFileLinkShowsThePathAsWritten() async throws {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("src/app/main.swift", kind: .text)
+            await harness.model.openTappedTerminalLink(["src/app/main.swift"], kind: .text)
 
             let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
             XCTAssertEqual(confirmation.displayString, "src/app/main.swift")
             XCTAssertEqual(harness.resolves.count, 0, "nothing opens until the user says so")
         }
 
+        /// A path the program wrapped itself arrives as candidates, rejoined path first: the confirmation
+        /// shows that path, and no resolve happens until the user confirms.
+        func testTappedHardWrappedPathConfirmsTheJoinedPath() async throws {
+            let harness = linkTapHarness()
+
+            await harness.model.openTappedTerminalLink(["/work/src/main.swift", "/work/sr"], kind: .text)
+
+            let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
+            XCTAssertEqual(confirmation.displayString, "/work/src/main.swift")
+            XCTAssertEqual(confirmation.title, "main.swift")
+            XCTAssertEqual(harness.resolves.count, 0, "nothing opens until the user says so")
+        }
+
+        /// Confirming resolves the joined candidate first and takes the next only when the host refuses it.
+        func testConfirmedHardWrappedPathResolvesCandidatesInOrderUntilOneResolves() async throws {
+            let settings = settings()
+            var resolvedLinks: [String] = []
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                resolvedLinks.append(request.terminalLink ?? "")
+                guard request.terminalLink == "/work/sr" else { return SpacesDeviceAPIResponse(ok: false, message: "not a file") }
+                return Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/docs", source: .externalURL, originalLink: "/work/sr", displayName: "docs",
+                        contentType: nil, artifactKind: nil, byteCount: nil, externalURL: "https://example.com/docs"))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+
+            await model.openTappedTerminalLink(["/work/src/main.swift", "/work/sr", "/work/never-asked"], kind: .text)
+            await model.openConfirmedLink(try XCTUnwrap(model.pendingLinkConfirmation))
+
+            XCTAssertEqual(resolvedLinks, ["/work/src/main.swift", "/work/sr"])
+            XCTAssertEqual(model.safariLink?.url, URL(string: "https://example.com/docs")!)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+        }
+
+        /// When every candidate is refused, the error shown is the first candidate's.
+        func testHardWrappedPathShowsTheFirstCandidatesRefusalWhenNoneResolves() async throws {
+            let settings = settings()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                SpacesDeviceAPIResponse(ok: false, message: "refused \(request.terminalLink ?? "")")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+
+            await model.openTerminalLink(["/work/src/main.swift", "/work/sr"])
+
+            XCTAssertEqual(model.linkPreviewErrorMessage, "refused /work/src/main.swift")
+        }
+
         func testCancellingTheConfirmationOpensNothing() async throws {
             let harness = linkTapHarness()
-            await harness.model.openTappedTerminalLink("https://github.com/org/repo", kind: .text)
+            await harness.model.openTappedTerminalLink(["https://github.com/org/repo"], kind: .text)
             XCTAssertNotNil(harness.model.pendingLinkConfirmation)
 
             harness.model.dismissPendingLinkConfirmation()
@@ -5015,7 +5067,7 @@
             let pasteboard = UIPasteboard.withUniqueName()
             defer { UIPasteboard.remove(withName: pasteboard.name) }
             harness.model.pasteboardOverrideForTesting = pasteboard
-            await harness.model.openTappedTerminalLink("https://github.com/org/repo", kind: .text)
+            await harness.model.openTappedTerminalLink(["https://github.com/org/repo"], kind: .text)
             let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
 
             harness.model.copyLinkText(confirmation.displayString)
@@ -5027,7 +5079,7 @@
         func testTappedFileLinkAsksWithItsFileName() async throws {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("src/app/main.swift", kind: .text)
+            await harness.model.openTappedTerminalLink(["src/app/main.swift"], kind: .text)
 
             XCTAssertEqual(harness.model.pendingLinkConfirmation?.title, "main.swift")
             XCTAssertEqual(harness.resolves.count, 0)
@@ -5036,7 +5088,7 @@
         func testTappedSpacesTerminalLinkOpensInAppWithoutAsking() async {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("spaces://terminal/abc", kind: .text)
+            await harness.model.openTappedTerminalLink(["spaces://terminal/abc"], kind: .text)
 
             XCTAssertNil(harness.model.pendingLinkConfirmation)
             XCTAssertEqual(harness.deepLinks.links, [SpacesTerminalDeepLink(sessionID: "abc")])
@@ -5045,7 +5097,7 @@
         func testTappedLoopbackLinkShowsItsNoticeWithoutAsking() async {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("http://localhost:3000/dashboard", kind: .text)
+            await harness.model.openTappedTerminalLink(["http://localhost:3000/dashboard"], kind: .text)
 
             XCTAssertNil(harness.model.pendingLinkConfirmation)
             XCTAssertEqual(harness.model.linkNotice, "This address runs on the session's host machine and isn't reachable from this device yet.")
@@ -5054,7 +5106,7 @@
         func testTappedTextLinkWithUnknownSchemeDoesNothing() async {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("ftp://example.com/file", kind: .text)
+            await harness.model.openTappedTerminalLink(["ftp://example.com/file"], kind: .text)
 
             XCTAssertNil(harness.model.pendingLinkConfirmation)
             XCTAssertNil(harness.model.blockedLink)
@@ -5065,7 +5117,7 @@
         func testOSC8LinkWithBidirectionalOverrideIsBlockedAndNothingOpens() async throws {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("https://example.com/\u{202E}gpj.exe", kind: .osc8)
+            await harness.model.openTappedTerminalLink(["https://example.com/\u{202E}gpj.exe"], kind: .osc8)
 
             XCTAssertNil(harness.model.pendingLinkConfirmation)
             let blocked = try XCTUnwrap(harness.model.blockedLink)
@@ -5078,7 +5130,7 @@
         func testOSC8CustomSchemeLinkAsksThenHandsItToTheSystem() async throws {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("zoommtg://zoom.us/join?confno=123", kind: .osc8)
+            await harness.model.openTappedTerminalLink(["zoommtg://zoom.us/join?confno=123"], kind: .osc8)
 
             let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
             XCTAssertEqual(confirmation.title, "zoom.us")
@@ -5093,7 +5145,7 @@
         func testOSC8MailtoLinkAsksThenHandsItToTheSystem() async throws {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("mailto:person@example.com", kind: .osc8)
+            await harness.model.openTappedTerminalLink(["mailto:person@example.com"], kind: .osc8)
 
             let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
             XCTAssertEqual(confirmation.title, "person@example.com")
@@ -5122,7 +5174,7 @@
         func testOSC8WebLinkAsksThenOpensThroughTheDaemon() async throws {
             let harness = linkTapHarness()
 
-            await harness.model.openTappedTerminalLink("https://example.com/docs", kind: .osc8)
+            await harness.model.openTappedTerminalLink(["https://example.com/docs"], kind: .osc8)
 
             let confirmation = try XCTUnwrap(harness.model.pendingLinkConfirmation)
             await harness.model.openConfirmedLink(confirmation)
@@ -5141,7 +5193,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
 
-            await model.openTerminalLink("mailto:person@example.com")
+            await model.openTerminalLink(["mailto:person@example.com"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertNil(model.linkPreviewErrorMessage)
@@ -5170,10 +5222,10 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
-            let slowTask = Task { await model.openTerminalLink("slow.png") }
+            let slowTask = Task { await model.openTerminalLink(["slow.png"]) }
             await gate.waitForSlowStart()
 
-            await model.openTerminalLink("mailto:person@example.com")
+            await model.openTerminalLink(["mailto:person@example.com"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertNil(model.linkPreviewErrorMessage)
@@ -5217,7 +5269,7 @@
                     session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                     bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
-                await model.openTerminalLink("file.\(testCase.artifactKind.rawValue)")
+                await model.openTerminalLink(["file.\(testCase.artifactKind.rawValue)"])
 
                 let preview = try XCTUnwrap(model.linkPreview, "kind=\(testCase.artifactKind)")
                 XCTAssertEqual(preview.kind, testCase.artifactKind)
@@ -5248,7 +5300,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
 
-            await model.openTerminalLink("huge.log")
+            await model.openTerminalLink(["huge.log"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertEqual(model.linkPreviewErrorMessage, "huge.log is too large to preview on this device.")
@@ -5268,7 +5320,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
 
-            await model.openTerminalLink("broken-link")
+            await model.openTerminalLink(["broken-link"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertEqual(model.linkPreviewErrorMessage, "Terminal link file is not a readable regular file.")
@@ -5332,7 +5384,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink("image.png")
+            await model.openTerminalLink(["image.png"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertEqual(model.linkPreviewErrorMessage, "Terminal link 'link-1' transfer returned an invalid chunk size (reported 2, decoded 1).")
@@ -5363,11 +5415,11 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink("image.png")
+            await model.openTerminalLink(["image.png"])
             let preview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(preview.title, "image.png")
 
-            await model.openTerminalLink("image.png")
+            await model.openTerminalLink(["image.png"])
 
             let retainedPreview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(retainedPreview.title, "image.png")
@@ -5384,7 +5436,7 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
 
-            await model.openTerminalLink("notes.txt")
+            await model.openTerminalLink(["notes.txt"])
 
             XCTAssertNil(model.linkPreview)
             XCTAssertEqual(model.linkPreviewErrorMessage, "Only image and video files can be previewed on iOS.")
@@ -5418,9 +5470,9 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
-            let slowTask = Task { await model.openTerminalLink("slow.png") }
+            let slowTask = Task { await model.openTerminalLink(["slow.png"]) }
             await gate.waitForSlowStart()
-            await model.openTerminalLink("fast.png")
+            await model.openTerminalLink(["fast.png"])
 
             let fastPreview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(fastPreview.title, "fast.png")
@@ -5462,9 +5514,9 @@
                 session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
-            await model.openTerminalLink("first.png")
+            await model.openTerminalLink(["first.png"])
             let firstURL = try XCTUnwrap(model.linkPreview?.content.url)
-            await model.openTerminalLink("second.png")
+            await model.openTerminalLink(["second.png"])
             let secondURL = try XCTUnwrap(model.linkPreview?.content.url)
 
             XCTAssertNotEqual(firstURL, secondURL)
